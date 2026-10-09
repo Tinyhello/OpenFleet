@@ -22,11 +22,6 @@ namespace OpenFleet.Contracts
         /// </summary>
         Transport,
 
-        /// <summary>
-        /// 空車移動到 <see cref="VehicleCommand.Destination"/>（例如回充電維護區待命）。
-        /// 不是派工：沒有 AssignmentId，收到新的 Transport 時可以被取代。
-        /// </summary>
-        MoveTo,
     }
 
     /// <summary>後端 → 設備／模擬器。</summary>
@@ -46,7 +41,7 @@ namespace OpenFleet.Contracts
         /// <summary>Transport 的取料交接點。座標由後端提供，設備不需要認得站點。</summary>
         public Position3? Pickup { get; set; }
 
-        /// <summary>Transport 的卸料交接點，或 MoveTo 的目的地。</summary>
+        /// <summary>Transport 的卸料交接點。</summary>
         public Position3? Destination { get; set; }
 
         /// <summary>Transport 搬運的件數；設備用來決定載貨時的車速，並回報在遙測裡。</summary>
@@ -57,6 +52,26 @@ namespace OpenFleet.Contracts
 
         /// <summary>Transport 在取料點、卸料點各需要的交接時間（秒）；省略時使用設備自己的預設值。</summary>
         public double? HandoverSeconds { get; set; }
+    }
+
+    /// <summary>
+    /// 後端 → 設備／模擬器：放行。告訴車輛要走的路徑，以及目前可以開到哪裡。
+    /// 車輛只能沿 <see cref="Path"/> 開到第 <see cref="ReleasedCount"/> 個點然後停下，等下一次放行。
+    /// 已放行的部分不會被更改；同一個 <see cref="PlanId"/> 之內，<see cref="Revision"/> 較大的內容取代舊的。
+    /// </summary>
+    public sealed class VehicleClearance
+    {
+        /// <summary>一段路的識別。走完一段、開始下一段時會換新的值，點的編號從頭算起。</summary>
+        public Guid PlanId { get; set; }
+
+        /// <summary>同一段路之內遞增；設備用來忽略重送或亂序的舊訊息。</summary>
+        public long Revision { get; set; }
+
+        /// <summary>依序要經過的點。第一個是出發時所在的點。</summary>
+        public List<Position3> Path { get; set; } = new List<Position3>();
+
+        /// <summary>已放行的點數：可以開到 Path[ReleasedCount - 1]。</summary>
+        public int ReleasedCount { get; set; }
     }
 
     public enum VehicleEventType
@@ -118,10 +133,21 @@ namespace OpenFleet.Contracts
         public string? LoadCode { get; set; }
 
         /// <summary>
-        /// 接下來要依序經過的點，最後一點是這一段的目的地；沒有要去的地方時是空的。
-        /// 行駛中是剩下的路徑；上料中是上料完成後要走到卸料點的路徑。只用於顯示。
+        /// 接下來要依序經過的點（後端放行的路徑中還沒走到的部分），最後一點是這一段的目的地；沒有時是空的。
         /// </summary>
         public List<Position3> Route { get; set; } = new List<Position3>();
+
+        /// <summary><see cref="Route"/> 的前幾個點已經放行（可以開過去）；其餘的還在等預約。</summary>
+        public int RouteReleasedCount { get; set; }
+
+        /// <summary>目前依循的放行（<see cref="VehicleClearance.PlanId"/>）；還沒收到過放行時為 null。</summary>
+        public Guid? RoutePlanId { get; set; }
+
+        /// <summary>目前套用的放行版本；後端用來判斷車輛是否已收到最新的放行。</summary>
+        public long RouteRevision { get; set; }
+
+        /// <summary>這一段路已經到達的點數；後端據此釋放車輛已經離開的路段。</summary>
+        public int RouteReachedCount { get; set; }
     }
 
     /// <summary>車型。由後端的車輛設定決定；設定裡沒有的車輛為 Unknown。</summary>
@@ -157,6 +183,12 @@ namespace OpenFleet.Contracts
 
         /// <summary>接下來要依序經過的點，最後一點是目的地（見 <see cref="VehicleTelemetry.Route"/>）。</summary>
         public List<Position3> Route { get; set; } = new List<Position3>();
+
+        /// <summary><see cref="Route"/> 的前幾個點已經放行；顯示端可以用不同的樣式畫出「已放行」與「等待中」。</summary>
+        public int RouteReleasedCount { get; set; }
+        public Guid? RoutePlanId { get; set; }
+        public long RouteRevision { get; set; }
+        public int RouteReachedCount { get; set; }
         public DateTimeOffset LastSeenAt { get; set; }
         public Guid TelemetrySessionId { get; set; }
         public long TelemetrySequence { get; set; }

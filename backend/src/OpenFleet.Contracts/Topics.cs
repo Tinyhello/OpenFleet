@@ -5,11 +5,14 @@ namespace OpenFleet.Contracts
         Commands,
         Events,
         Telemetry,
+
+        /// <summary>後端 → 設備：放行（路徑與可以開到哪裡）。</summary>
+        Clearance,
     }
 
     /// <summary>
     /// MQTT Topic 命名集中在這裡，後端、模擬器與 Unity 共用，避免各自拼字串。
-    /// 格式：openfleet/v1/{factoryId}/vehicles/{vehicleId}/{commands|events|telemetry}
+    /// 格式：openfleet/v1/{factoryId}/vehicles/{vehicleId}/{commands|events|telemetry|clearance}
     ///       openfleet/v1/{factoryId}/state/vehicles/{vehicleId}
     ///       openfleet/v1/{factoryId}/state/simulation
     /// </summary>
@@ -75,6 +78,7 @@ namespace OpenFleet.Contracts
                 case VehicleChannel.Commands: return "commands";
                 case VehicleChannel.Events: return "events";
                 case VehicleChannel.Telemetry: return "telemetry";
+                case VehicleChannel.Clearance: return "clearance";
                 default: throw new System.ArgumentOutOfRangeException(nameof(channel), channel, null);
             }
         }
@@ -86,6 +90,7 @@ namespace OpenFleet.Contracts
                 case "commands": channel = VehicleChannel.Commands; return true;
                 case "events": channel = VehicleChannel.Events; return true;
                 case "telemetry": channel = VehicleChannel.Telemetry; return true;
+                case "clearance": channel = VehicleChannel.Clearance; return true;
                 default: channel = default; return false;
             }
         }

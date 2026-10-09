@@ -52,8 +52,11 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             b.UseSetting("Fleet:DispatchInterval", "00:00:00.100");
             b.UseSetting("Fleet:OutboxPollInterval", "00:00:00.100");
             b.UseSetting("Production:TickInterval", "00:00:00.100");
-            b.UseSetting("Fleet:Parking:agv-t2:X", "3");
-            b.UseSetting("Fleet:Parking:agv-t2:Z", "2");
+            // agv-t2 的車位是充電維護區中間那一格；交通控制調快、前瞻放大，讓高速行駛的車不必每個節點都停。
+            b.UseSetting("Fleet:Parking:agv-t2:X", "-8");
+            b.UseSetting("Fleet:Parking:agv-t2:Z", "0.2");
+            b.UseSetting("Traffic:ControlInterval", "00:00:00.050");
+            b.UseSetting("Traffic:Lookahead", "6");
         });
         _http = _api.CreateClient();
 
@@ -73,10 +76,11 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             ["Simulator:VehicleIds:0"] = "agv-t1",
             ["Simulator:VehicleIds:1"] = "agv-t2",
             ["Simulator:TelemetryInterval"] = "00:00:00.100",
-            ["Simulator:Route:0:X"] = "0",
-            ["Simulator:Route:0:Z"] = "0",
-            ["Simulator:Route:1:X"] = "10",
-            ["Simulator:Route:1:Z"] = "0",
+            // agv-t1 從充電車位出發；agv-t2 從品管站的交接點出發，沒有任務所以會被引導回車位。
+            ["Simulator:StartPositions:agv-t1:X"] = "-10.3",
+            ["Simulator:StartPositions:agv-t1:Z"] = "0.2",
+            ["Simulator:StartPositions:agv-t2:X"] = "8",
+            ["Simulator:StartPositions:agv-t2:Z"] = "7.6",
             // 加快車速與交接，讓整個物料流程在幾秒內跑完。
             ["Simulator:Speed"] = "40",
             ["Simulator:HandoverDuration"] = "00:00:00.100",
@@ -159,16 +163,17 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Idle_vehicle_is_sent_to_its_parking_slot()
+    public async Task Idle_vehicle_is_guided_along_the_road_network_to_its_parking_slot()
     {
         await EventuallyAsync(async () =>
         {
             var state = await GetVehicleAsync("agv-t2");
-            return state.Speed == 0 && Math.Abs(state.Position.X - 3) < 0.01 && Math.Abs(state.Position.Z - 2) < 0.01;
+            return state.Speed == 0 && Math.Abs(state.Position.X + 8) < 0.01 && Math.Abs(state.Position.Z - 0.2) < 0.01;
         });
 
         // 沒有設定車位的車留在原地。
-        Assert.Equal(0, (await GetVehicleAsync("agv-t1")).Position.Z);
+        var other = await GetVehicleAsync("agv-t1");
+        Assert.Equal((-10.3, 0.2), (other.Position.X, other.Position.Z));
     }
 
     [Fact]

@@ -7,6 +7,7 @@ using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Production;
 using OpenFleet.Api.Simulation;
+using OpenFleet.Api.Traffic;
 using OpenFleet.Api.Transport;
 using OpenFleet.Contracts;
 using OpenFleet.Messaging;
@@ -55,6 +56,9 @@ public sealed class TestDatabase
 
     public SimulationSpeed Speed { get; }
 
+    /// <summary>示範路網（和後端啟動時寫進資料庫的是同一份定義）。</summary>
+    public RoadNetwork Network { get; } = BuildNetwork();
+
     public FleetOptions Fleet { get; } = new()
     {
         VehicleTypes = { ["agv-a"] = VehicleType.Large, ["agv-b"] = VehicleType.Large, ["agv-s"] = VehicleType.Small },
@@ -72,11 +76,17 @@ public sealed class TestDatabase
 
     public OpenFleetDbContext NewContext() => new(_options);
 
+    private static RoadNetwork BuildNetwork()
+    {
+        var (nodes, edges) = DemoRoadNetwork.Build();
+        return new RoadNetwork(nodes, edges);
+    }
+
     public Scope NewScope()
     {
         var db = NewContext();
         var production = new ProductionService(db, Speed, Time, NullLogger<ProductionService>.Instance);
-        var transport = new TransportService(db, production, Options.Create(Fleet),
+        var transport = new TransportService(db, production, Network, Options.Create(Fleet),
             Options.Create(new MqttSettings { ProducerId = "backend", FactoryId = "demo" }), Time, NullLogger<TransportService>.Instance);
         return new Scope(db, production, transport, new VehicleEventProcessor(db, transport, Time));
     }

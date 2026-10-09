@@ -41,6 +41,7 @@ namespace OpenFleet.Unity
         private static readonly Color ToolChangeColor = new Color(0.98f, 0.45f, 0.4f);
         private static readonly Color HandoverColor = new Color(0.35f, 0.85f, 0.9f);
         private static readonly Color RouteColor = new Color(1f, 0.92f, 0.35f, 0.95f);
+        private static readonly Color RouteWaitingColor = new Color(1f, 0.92f, 0.35f, 0.3f);
 
         private readonly Dictionary<string, StationAnchor> _anchors = new Dictionary<string, StationAnchor>();
         private readonly Dictionary<string, StationWidget> _stations = new Dictionary<string, StationWidget>();
@@ -149,7 +150,8 @@ namespace OpenFleet.Unity
 
         /// <summary>
         /// 每台車從目前位置沿「接下來要經過的點」畫一條流動的虛線，終點畫一個圓圈。
-        /// 路徑來自車輛狀態（模擬器回報），這裡只負責畫，不自己規劃路線。
+        /// 亮的部分是後端已經放行、車可以開過去的路；暗的部分已經規劃好，但還在等路段預約。
+        /// 路徑來自車輛狀態，這裡只負責畫，不自己規劃路線。
         /// </summary>
         private void DrawRoutes(MeshGenerationContext context)
         {
@@ -184,49 +186,57 @@ namespace OpenFleet.Unity
                     _routePoints.Add(OnFloor(new Vector3((float)point.X, 0f, (float)point.Z)));
                 }
 
-                painter.BeginPath();
-                var travelled = 0f;
-                for (var i = 0; i < _routePoints.Count - 1; i++)
+                // 畫兩次：先畫已放行的部分（亮），再畫還在等預約的部分（暗）。第 i 段的終點是路徑的第 i 個點。
+                for (var pass = 0; pass < 2; pass++)
                 {
-                    var from = _routePoints[i];
-                    var to = _routePoints[i + 1];
-                    var length = Vector3.Distance(from, to);
-                    if (length < 0.001f)
+                    painter.strokeColor = pass == 0 ? RouteColor : RouteWaitingColor;
+                    painter.BeginPath();
+                    var travelled = 0f;
+                    for (var i = 0; i < _routePoints.Count - 1; i++)
                     {
-                        continue;
-                    }
-
-                    // 沿這一段走，依「到起點的累計距離」決定哪些區間是實線。跨過轉角時圖樣不中斷。
-                    var position = 0f;
-                    while (position < length)
-                    {
-                        var phase = Mathf.Repeat(travelled + position - shift, period);
-                        if (phase < dashLength)
+                        var from = _routePoints[i];
+                        var to = _routePoints[i + 1];
+                        var length = Vector3.Distance(from, to);
+                        var released = i < state.RouteReleasedCount;
+                        if (length < 0.001f || released != (pass == 0))
                         {
-                            var end = Mathf.Min(position + dashLength - phase, length);
-                            if (ToPanel(Vector3.Lerp(from, to, position / length), out var a)
-                                && ToPanel(Vector3.Lerp(from, to, end / length), out var b))
+                            travelled += length;
+                            continue;
+                        }
+
+                        // 沿這一段走，依「到起點的累計距離」決定哪些區間是實線。跨過轉角時圖樣不中斷。
+                        var position = 0f;
+                        while (position < length)
+                        {
+                            var phase = Mathf.Repeat(travelled + position - shift, period);
+                            if (phase < dashLength)
                             {
-                                painter.MoveTo(a);
-                                painter.LineTo(b);
+                                var end = Mathf.Min(position + dashLength - phase, length);
+                                if (ToPanel(Vector3.Lerp(from, to, position / length), out var a)
+                                    && ToPanel(Vector3.Lerp(from, to, end / length), out var b))
+                                {
+                                    painter.MoveTo(a);
+                                    painter.LineTo(b);
+                                }
+
+                                position = end;
+                            }
+                            else
+                            {
+                                position += period - phase;
                             }
 
-                            position = end;
-                        }
-                        else
-                        {
-                            position += period - phase;
+                            // 浮點誤差可能讓 position 剛好停在邊界上不前進。
+                            position += 0.0001f;
                         }
 
-                        // 浮點誤差可能讓 position 剛好停在邊界上不前進。
-                        position += 0.0001f;
+                        travelled += length;
                     }
 
-                    travelled += length;
+                    painter.Stroke();
                 }
 
-                painter.Stroke();
-
+                painter.strokeColor = RouteColor;
                 if (ToPanel(_routePoints[_routePoints.Count - 1], out var destination))
                 {
                     painter.BeginPath();

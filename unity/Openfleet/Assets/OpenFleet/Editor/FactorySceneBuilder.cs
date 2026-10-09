@@ -149,23 +149,22 @@ namespace OpenFleet.Unity.Editor
                 }
             }
 
-            // 環狀主走道：鋪面 + 兩側黃線。沒有畫方向箭頭，因為交通規則（單向／雙向）尚未決定。
-            var loop = FactoryLayout.AisleLoop;
-            var min = loop[0];
-            var max = loop[2];
-            var w = FactoryLayout.AisleWidth;
+            // 環狀走道：兩條車道共用一片鋪面，外緣與內緣是黃線，兩條車道之間是白色分隔線。
+            // 沒有畫方向箭頭：車道不限方向，由後端的路段預約決定誰先走。
+            var outer = FactoryLayout.OuterLane + new Vector2(FactoryLayout.LaneEdge, FactoryLayout.LaneEdge);
+            var inner = FactoryLayout.InnerLane - new Vector2(FactoryLayout.InnerLaneEdge, FactoryLayout.InnerLaneEdge);
+            var mid = (outer + inner) / 2f;
+            var width = outer - inner;
             var aisle = Group(env, "Aisle", Vector3.zero);
-            var lengthX = max.x - min.x + w;
-            var lengthZ = max.y - min.y - w;
-            Box(aisle, "South", new Vector3((min.x + max.x) / 2f, 0.005f, min.y), new Vector3(lengthX, 0.01f, w), Palette.Aisle);
-            Box(aisle, "North", new Vector3((min.x + max.x) / 2f, 0.005f, max.y), new Vector3(lengthX, 0.01f, w), Palette.Aisle);
-            Box(aisle, "West", new Vector3(min.x, 0.005f, (min.y + max.y) / 2f), new Vector3(w, 0.01f, lengthZ), Palette.Aisle);
-            Box(aisle, "East", new Vector3(max.x, 0.005f, (min.y + max.y) / 2f), new Vector3(w, 0.01f, lengthZ), Palette.Aisle);
+            Box(aisle, "South", new Vector3(0f, 0.005f, -mid.y), new Vector3(outer.x * 2f, 0.01f, width.y), Palette.Aisle);
+            Box(aisle, "North", new Vector3(0f, 0.005f, mid.y), new Vector3(outer.x * 2f, 0.01f, width.y), Palette.Aisle);
+            Box(aisle, "West", new Vector3(-mid.x, 0.005f, 0f), new Vector3(width.x, 0.01f, inner.y * 2f), Palette.Aisle);
+            Box(aisle, "East", new Vector3(mid.x, 0.005f, 0f), new Vector3(width.x, 0.01f, inner.y * 2f), Palette.Aisle);
 
-            var center = new Vector3((min.x + max.x) / 2f, 0f, (min.y + max.y) / 2f);
-            var span = max - min;
-            FloorFrame(aisle, "Outer Line", center, span + new Vector2(w, w), 0.1f, Palette.LaneLine);
-            FloorFrame(aisle, "Inner Line", center, span - new Vector2(w, w), 0.1f, Palette.LaneLine);
+            FloorFrame(aisle, "Outer Line", Vector3.zero, outer * 2f, 0.1f, Palette.LaneLine);
+            FloorFrame(aisle, "Inner Line", Vector3.zero, inner * 2f, 0.1f, Palette.LaneLine);
+            var divider = (FactoryLayout.OuterLane + FactoryLayout.InnerLane) / 2f;
+            FloorFrame(aisle, "Lane Divider", Vector3.zero, divider * 2f, 0.05f, Palette.ZoneLine);
         }
 
         private static void BuildStation(Transform parent, StationSpec spec)

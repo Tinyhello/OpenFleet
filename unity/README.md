@@ -28,7 +28,7 @@
 | `Assets/OpenFleet/Editor/FactorySceneBuilder.cs` | 選單 **OpenFleet → Build Factory Scene**：產生材質、AGV Prefab 與 `Factory.unity`（會覆寫） |
 | `Assets/OpenFleet/Editor/PlayerBuilder.cs` | 選單 **OpenFleet → Build Windows Player**：重建場景並建置 `Builds/Windows/OpenFleet.exe` |
 | `Assets/OpenFleet/UI/` | UI Toolkit 的 PanelSettings 與主題（由 Build Factory Scene 產生） |
-| `Assets/OpenFleet/Editor/FactoryLayout.cs` | 暫定佈局：站點位置、環狀走道（須與模擬器 `Simulator:Route` 相同） |
+| `Assets/OpenFleet/Editor/FactoryLayout.cs` | 暫定佈局：站點位置、內外兩條車道（須與後端的示範路網 `DemoRoadNetwork` 相同） |
 | `Assets/OpenFleet/Editor/StationModels.cs`、`VehicleModels.cs` | 用基本幾何組裝的站點與 AGV 模型 |
 | `Assets/OpenFleet/Editor/Palette.cs` | 所有材質顏色 |
 | `Assets/OpenFleet/Scenes/Factory.unity` | 工廠場景（由選單產生，不要手動修改） |
@@ -49,7 +49,7 @@
 
 5. 場景上的顯示：
    - **車輛**：標籤顯示「空車」或「載 N 件」，載貨時車上有料箱；上料、下料時車輛上方有進度條。載貨越多車速越慢。
-   - **路徑**：黃色的流動虛線從車輛沿走道畫到目的地（圓圈）；上料時會預先顯示接下來要去的卸料點。
+   - **路徑**：黃色的流動虛線從車輛沿車道畫到目的地（圓圈）。亮的部分是後端已經放行、車可以開過去的路；暗的部分已經規劃好，但還在等路段預約（例如前面有車）。上料時會預先以暗色顯示接下來要去的卸料點。
    - **機台**（粗加工、精加工）：下方有備料、成品、加工三列進度條；前方右側的台子是備料區、左側是成品區，有料時台上才有料箱。按「刀具 ▼」展開刀具已加工件數；換刀時加工列會變成紅色的「換刀」。
    - **原料倉、暫存點**：有料時顯示件數。
 
@@ -61,7 +61,8 @@
 
 - 暫定佈局（每道工序一站）：下排由左到右為原料倉、粗加工、精加工、淬火／回火、電鍍；上排由右到左為拋光、品管、包裝、出貨、刀具庫。走道內側是充電維護區與載具存放區。
 - 每站前方的青色方框是交接點。走道只畫邊線，沒有方向箭頭，因為交通規則尚未決定。
-- 車輛平常停在充電維護區的車位，有搬運任務才沿走道移動；沒有任何交通規則，車輛之間不會避讓。
+- 環狀走道有內外兩條車道（黃線是走道邊緣，白線是車道分隔），都不限方向；沒有畫箭頭，誰先走由後端的路段預約決定。
+- 車輛平常停在充電維護區的車位，有搬運任務才移動。兩台大型車會同時工作，遇到前面有車會停下等待或改走另一條車道。
 - 進度條是固定大小的螢幕元件，畫面拉遠時會顯得比機台大；加工進度逐件跳動，不是平滑移動。
 - AGV：大型車（橘色頂升平台）、小型車（白色車身、刀把架）、未知車型（紫色，表示後端設定缺漏）。
 

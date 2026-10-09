@@ -358,6 +358,51 @@ namespace OpenFleet.Api.Data.Migrations
                         });
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.RouteEdge", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("FromCode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ToCode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ToCode");
+
+                    b.HasIndex("FromCode", "ToCode")
+                        .IsUnique();
+
+                    b.ToTable("RouteEdges");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.RouteNode", b =>
+                {
+                    b.Property<string>("Code")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<double>("X")
+                        .HasColumnType("double precision");
+
+                    b.Property<double>("Z")
+                        .HasColumnType("double precision");
+
+                    b.HasKey("Code");
+
+                    b.ToTable("RouteNodes");
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.Station", b =>
                 {
                     b.Property<string>("Code")
@@ -619,6 +664,21 @@ namespace OpenFleet.Api.Data.Migrations
                         .WithMany()
                         .HasForeignKey("StationCode")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.RouteEdge", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.RouteNode", null)
+                        .WithMany()
+                        .HasForeignKey("FromCode")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.RouteNode", null)
+                        .WithMany()
+                        .HasForeignKey("ToCode")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

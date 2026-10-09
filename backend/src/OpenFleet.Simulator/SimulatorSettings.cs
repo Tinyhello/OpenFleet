@@ -1,8 +1,7 @@
 namespace OpenFleet.Simulator;
 
 /// <summary>
-/// 對應 "Simulator" 設定區段。車輛啟動時平均分布在環狀走道上並保持靜止，收到指令才沿走道移動。
-/// 沒有任何交通規則：車輛之間不會避讓。
+/// 對應 "Simulator" 設定區段。車輛平常靜止；路徑與可以開到哪裡都由後端的放行決定，模擬器不知道路網。
 /// </summary>
 public sealed class SimulatorSettings
 {
@@ -14,10 +13,9 @@ public sealed class SimulatorSettings
     public TimeSpan TelemetryInterval { get; set; } = TimeSpan.FromMilliseconds(200);
 
     /// <summary>
-    /// 封閉路線的轉折點（公尺，X／Z 平面），最後一點會接回第一點。
-    /// 預設是 Unity 暫定工廠佈局的環狀主走道中心線。
+    /// 車輛啟動時的位置（公尺，X／Z 平面）。示範設定是各自的充電車位；沒有列出的車排在原點旁邊。
     /// </summary>
-    public List<RoutePoint> Route { get; set; } = [];
+    public Dictionary<string, RoutePoint> StartPositions { get; set; } = new(StringComparer.Ordinal);
 
     /// <summary>空車車速（公尺／秒）。</summary>
     public double Speed { get; set; } = 2;

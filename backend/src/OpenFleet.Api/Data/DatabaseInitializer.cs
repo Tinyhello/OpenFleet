@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OpenFleet.Api.Fleet;
+using OpenFleet.Api.Traffic;
 
 namespace OpenFleet.Api.Data;
 
@@ -44,6 +45,11 @@ public static class DatabaseInitializer
 
         await db.Database.MigrateAsync();
         await SeedAsync(db, fleet);
+
+        // 路網不會在執行中改變：啟動時從資料庫讀進記憶體，之後規劃路徑不必再查資料庫。
+        var nodes = await db.RouteNodes.AsNoTracking().Select(n => new RoadNode(n.Code, n.X, n.Z)).ToListAsync();
+        var edges = await db.RouteEdges.AsNoTracking().Select(e => new { e.FromCode, e.ToCode }).ToListAsync();
+        app.Services.GetRequiredService<RoadNetwork>().Load(nodes, edges.Select(e => (e.FromCode, e.ToCode)));
     }
 
     public static async Task SeedAsync(OpenFleetDbContext db, FleetOptions fleet)
@@ -68,6 +74,13 @@ public static class DatabaseInitializer
                 // 舊資料庫升級：欄位是後來才加的，沒有值就補上示範值。
                 station.OutboundCapacity ??= demo.OutboundCapacity;
             }
+        }
+
+        if (!await db.RouteNodes.AnyAsync())
+        {
+            var (nodes, edges) = DemoRoadNetwork.Build();
+            db.RouteNodes.AddRange(nodes.Select(n => new RouteNode { Code = n.Code, X = n.X, Z = n.Z }));
+            db.RouteEdges.AddRange(edges.Select(e => new RouteEdge { FromCode = e.From, ToCode = e.To }));
         }
 
         var steps = await db.ProcessSteps.ToDictionaryAsync(s => s.Sequence);

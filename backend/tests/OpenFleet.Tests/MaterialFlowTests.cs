@@ -75,14 +75,37 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Nearest_available_vehicle_is_chosen()
+    public async Task Vehicle_with_the_shortest_drive_along_the_road_network_is_chosen()
     {
         await CreateLotAsync();
 
-        // 取料點（原料倉）在 (-16, -7.6)。
-        var assignment = await DispatchAsync(Online("agv-a", x: 10), Online("agv-b", x: -15, z: -6));
+        // 取料點（原料倉）在 (-16, -7.6)。agv-a 的直線距離比較近，但它在充電車位裡，要先繞出來；
+        // agv-b 在外圈車道上，沿路網開過去比較短。
+        var assignment = await DispatchAsync(Online("agv-a", x: -10.3, z: 0.2), Online("agv-b", x: -8, z: -6));
 
         Assert.Equal("agv-b", assignment.VehicleId);
+    }
+
+    [Fact]
+    public async Task Finished_work_is_moved_before_new_material_is_brought_in()
+    {
+        // 第一批加工完成、等著搬走；之後才建立第二批（補料任務比較早建立也一樣排後面）。
+        await ConfigureAsync(s => s.LotQuantity = 15);
+        await CreateLotAsync();
+        await DeliverAsync("agv-a");
+        await CreateLotAsync();
+        await AdvanceOperationsAsync();
+        _database.Time.Advance(TimeSpan.FromSeconds(30));
+        await AdvanceOperationsAsync();
+
+        await using var scope = _database.NewScope();
+        var pending = await scope.Db.TransportTasks.Where(t => t.Status == TransportTaskStatus.Pending).OrderBy(t => t.CreatedAt).ToListAsync();
+        Assert.Equal(new[] { TransportTaskKind.Replenishment, TransportTaskKind.WipTransfer }, pending.Select(t => t.Kind));
+
+        // 只有一台車：先搬完成品（含各工序做完的半成品），補料等下一輪。
+        Assert.Equal(1, await scope.Transport.DispatchPendingAsync([Online("agv-a")], default));
+        var assigned = await scope.Db.TransportTasks.SingleAsync(t => t.Status == TransportTaskStatus.Assigned);
+        Assert.Equal((TransportTaskKind.WipTransfer, "rough", "fine"), (assigned.Kind, assigned.FromStationCode, assigned.ToStationCode));
     }
 
     [Fact]
@@ -423,14 +446,17 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
             Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-b")], default));
         }
 
-        // 整批做完後備料區空了，第二批可以送來（成品區的第一批另外等車來搬）。
+        // 整批做完後備料區空了，第二批可以送來；成品區的第一批也要搬走，所以兩台車各接一趟。
         _database.Time.Advance(TimeSpan.FromSeconds(40));
         await AdvanceOperationsAsync();
         await using (var scope = _database.NewScope())
         {
-            Assert.Equal(1, await scope.Transport.DispatchPendingAsync([Online("agv-b")], default));
-            var task = await scope.Db.TransportTasks.SingleAsync(t => t.Status == TransportTaskStatus.Assigned);
-            Assert.Equal(("raw-store", "rough"), (task.FromStationCode, task.ToStationCode));
+            Assert.Equal(2, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b")], default));
+            var routes = await scope.Db.TransportTasks
+                .Where(t => t.Status == TransportTaskStatus.Assigned)
+                .Select(t => t.FromStationCode + ">" + t.ToStationCode)
+                .ToListAsync();
+            Assert.Equal(new[] { "raw-store>rough", "rough>fine" }, routes.Order());
         }
     }
 

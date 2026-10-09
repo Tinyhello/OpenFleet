@@ -7,18 +7,22 @@ namespace OpenFleet.Simulator;
 /// <summary>
 /// 模擬器內所有車輛的狀態（模擬器是自己車輛的唯一狀態來源）。
 /// 每次程序啟動產生新的 SessionId，後端據此辨認「設備重啟」。
-/// 車輛平常靜止；收到 Transport／MoveTo 才沿走道移動，並把過程中的回報放進待發送佇列。
+///
+/// 車輛自己不規劃路線、也不知道路網：路徑與「可以開到哪裡」都由後端的放行（<see cref="VehicleClearance"/>）決定，
+/// 車只會沿著放行的路徑開到已放行的最後一點然後停下。搬運指令只決定「到了取料點、卸料點要做什麼」。
 /// </summary>
 public sealed class SimulatedFleet
 {
     private const int RepliesToRemember = 1_000;
     private const double ArrivalTolerance = 1e-9;
 
+    /// <summary>離交接點多近算是到了（公尺）。</summary>
+    private const double HandoffTolerance = 0.05;
+
     private readonly Lock _gate = new();
     private readonly SimulatorSettings _settings;
     private readonly string _producerId;
     private readonly TimeProvider _time;
-    private readonly LoopRoute _route;
     private readonly Dictionary<string, SimulatedVehicle> _vehicles;
     private readonly Dictionary<Guid, List<MessageEnvelope<VehicleEvent>>> _replies = [];
     private readonly Queue<Guid> _replyOrder = new();
@@ -30,12 +34,12 @@ public sealed class SimulatedFleet
         _settings = settings.Value;
         _producerId = mqtt.Value.ProducerId;
         _time = time;
-        _route = new LoopRoute(_settings.Route);
 
-        // 起始位置沿走道平均錯開，避免重疊。
-        var spacing = _route.Length / _settings.VehicleIds.Count;
+        // 起始位置由設定指定（示範設定是充電車位）；沒指定的車排在原點旁邊，後端會把它們引到最近的節點。
         _vehicles = _settings.VehicleIds
-            .Select((id, index) => new SimulatedVehicle(id, _route.PointAt(index * spacing)))
+            .Select((id, index) => _settings.StartPositions.TryGetValue(id, out var start)
+                ? new SimulatedVehicle(id, start.X, start.Z)
+                : new SimulatedVehicle(id, index * 2, 0))
             .ToDictionary(v => v.VehicleId, StringComparer.Ordinal);
     }
 
@@ -82,11 +86,43 @@ public sealed class SimulatedFleet
                     ActivityProgress = job is { Phase: JobPhase.Loading or JobPhase.Unloading } ? job.HandoverProgress : 0,
                     LoadQuantity = vehicle.LoadQuantity,
                     LoadCode = vehicle.LoadQuantity > 0 ? vehicle.LoadCode : null,
-                    Route = RouteAhead(vehicle),
+                    RoutePlanId = vehicle.PlanId,
+                    RouteRevision = vehicle.Revision,
+                    RouteReachedCount = vehicle.Reached,
+                    Route = vehicle.Path.Skip(vehicle.Reached).Select(Copy).ToList(),
+                    RouteReleasedCount = Math.Max(0, vehicle.Released - vehicle.Reached),
                 }));
             }
 
             return result;
+        }
+    }
+
+    /// <summary>
+    /// 套用後端的放行。同一條路徑（PlanId 相同）只接受版本較新的內容，重送或亂序的舊訊息會被忽略；
+    /// 已經走過的進度保留，因為後端保證已放行的部分不會改。換了一條路徑（PlanId 不同）就從頭開始走。
+    /// </summary>
+    public void ApplyClearance(string vehicleId, VehicleClearance clearance)
+    {
+        lock (_gate)
+        {
+            var vehicle = _vehicles[vehicleId];
+            if (clearance.PlanId == vehicle.PlanId)
+            {
+                if (clearance.Revision <= vehicle.Revision)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                vehicle.PlanId = clearance.PlanId;
+                vehicle.Reached = 0;
+            }
+
+            vehicle.Revision = clearance.Revision;
+            vehicle.Path = clearance.Path.Select(Copy).ToList();
+            vehicle.Released = Math.Clamp(clearance.ReleasedCount, vehicle.Reached, vehicle.Path.Count);
         }
     }
 
@@ -129,27 +165,15 @@ public sealed class SimulatedFleet
                     Emit(source, VehicleEventType.Rejected, "Transport needs assignmentId, pickup and destination");
                     break;
 
-                case VehicleCommandType.MoveTo when command.Destination is null:
-                    Emit(source, VehicleEventType.Rejected, "MoveTo needs destination");
-                    break;
-
-                case VehicleCommandType.Transport or VehicleCommandType.MoveTo when vehicle.Job is { IsTransport: true }:
-                    // 搬運中不接受其他移動指令：物料還在車上或正要去取。
+                case VehicleCommandType.Transport when vehicle.Job is not null:
+                    // 搬運中不接受另一筆搬運：物料還在車上或正要去取。
                     Emit(source, VehicleEventType.Rejected, "Busy");
                     break;
 
                 case VehicleCommandType.Transport:
-                    Supersede(vehicle);
-                    vehicle.Job = Job.Transport(source, command.Destination!, command.LoadQuantity, command.LoadCode,
+                    // 接受後不會自己出發：等後端放行到取料點的路。
+                    vehicle.Job = new Job(source, command.Pickup!, command.Destination!, command.LoadQuantity, command.LoadCode,
                         command.HandoverSeconds is { } seconds ? TimeSpan.FromSeconds(seconds) : _settings.HandoverDuration);
-                    vehicle.Job.Waypoints = Plan(vehicle, command.Pickup!);
-                    Emit(source, VehicleEventType.Accepted);
-                    break;
-
-                case VehicleCommandType.MoveTo:
-                    Supersede(vehicle);
-                    vehicle.Job = Job.Move(source);
-                    vehicle.Job.Waypoints = Plan(vehicle, command.Destination!);
                     Emit(source, VehicleEventType.Accepted);
                     break;
 
@@ -191,22 +215,6 @@ public sealed class SimulatedFleet
     }
 
     /// <summary>
-    /// 接下來要走的路：行駛中是剩下的路徑；上料中預先給出上料完成後到卸料點的路徑；其他時候是空的。
-    /// </summary>
-    private List<Position3> RouteAhead(SimulatedVehicle vehicle)
-    {
-        var points = vehicle.Job switch
-        {
-            { Phase: JobPhase.Loading, Destination: { } destination } =>
-                _route.PlanPath(vehicle.X, vehicle.Z, destination.X, destination.Z),
-            { Phase: JobPhase.ToPickup or JobPhase.ToDestination } job => job.Waypoints,
-            _ => (IEnumerable<(double X, double Z)>)[],
-        };
-
-        return points.Select(p => new Position3 { X = p.X, Y = 0, Z = p.Z }).ToList();
-    }
-
-    /// <summary>
     /// 目前的車速：空車最快，載貨越多越慢，滿載時是 FullLoadSpeed。
     /// </summary>
     private double SpeedFor(SimulatedVehicle vehicle)
@@ -218,96 +226,93 @@ public sealed class SimulatedFleet
     /// <summary>推進一台車，回傳這一步是否在移動。</summary>
     private bool Step(SimulatedVehicle vehicle, TimeSpan elapsed, double speed)
     {
-        if (vehicle.Job is not { } job)
+        if (vehicle.Job is { Phase: JobPhase.Loading or JobPhase.Unloading } handover)
         {
-            return false;
-        }
-
-        if (job.Phase is JobPhase.Loading or JobPhase.Unloading)
-        {
-            job.HandoverRemaining -= elapsed;
-            if (job.HandoverRemaining > TimeSpan.Zero)
+            // 交接中不移動，但仍要確認「已經在新路徑的起點上」，回報的進度才正確。
+            Drive(vehicle, 0);
+            handover.HandoverRemaining -= elapsed;
+            if (handover.HandoverRemaining > TimeSpan.Zero)
             {
                 return false;
             }
 
-            if (job.Phase == JobPhase.Loading)
+            if (handover.Phase == JobPhase.Loading)
             {
                 // 交接完成才回報 Loaded；抵達取料點本身不代表已取料。物料從這一刻起算在車上，車速也跟著變慢。
-                vehicle.LoadQuantity = job.LoadQuantity;
-                vehicle.LoadCode = job.LoadCode;
-                Emit(job.Source, VehicleEventType.Loaded);
-                job.Phase = JobPhase.ToDestination;
-                job.Waypoints = Plan(vehicle, job.Destination!);
+                vehicle.LoadQuantity = handover.LoadQuantity;
+                vehicle.LoadCode = handover.LoadCode;
+                Emit(handover.Source, VehicleEventType.Loaded);
+                handover.Phase = JobPhase.ToDestination;
             }
             else
             {
                 vehicle.LoadQuantity = 0;
                 vehicle.LoadCode = null;
-                Emit(job.Source, VehicleEventType.Completed);
+                Emit(handover.Source, VehicleEventType.Completed);
                 vehicle.Job = null;
             }
 
             return false;
         }
 
-        // 容許極小的浮點誤差：累加多步之後差 1e-15 也算到達，直接對齊到目標點。
-        var budget = speed * elapsed.TotalSeconds + ArrivalTolerance;
-        while (budget > ArrivalTolerance && job.Waypoints.TryPeek(out var target))
+        var moving = Drive(vehicle, speed * elapsed.TotalSeconds);
+
+        // 停在交接點上才開始交接。交接點是支線的盡頭，不會只是路過。
+        if (vehicle.Job is { } job)
         {
+            if (job.Phase == JobPhase.ToPickup && IsAt(vehicle, job.Pickup))
+            {
+                job.Phase = JobPhase.Loading;
+                job.HandoverRemaining = job.HandoverDuration;
+            }
+            else if (job.Phase == JobPhase.ToDestination && IsAt(vehicle, job.Destination))
+            {
+                job.Phase = JobPhase.Unloading;
+                job.HandoverRemaining = job.HandoverDuration;
+            }
+        }
+
+        return moving;
+    }
+
+    /// <summary>沿放行的路徑前進，最多走 <paramref name="distance"/> 公尺，而且不超過已放行的最後一點。</summary>
+    private static bool Drive(SimulatedVehicle vehicle, double distance)
+    {
+        var budget = distance;
+        var moved = false;
+
+        while (vehicle.Reached < vehicle.Released)
+        {
+            var target = vehicle.Path[vehicle.Reached];
             var dx = target.X - vehicle.X;
             var dz = target.Z - vehicle.Z;
-            var distance = Math.Sqrt(dx * dx + dz * dz);
-            if (distance <= budget)
+            var remaining = Math.Sqrt(dx * dx + dz * dz);
+            moved |= remaining > ArrivalTolerance;
+
+            // 容許極小的浮點誤差：累加多步之後差 1e-15 也算到達，直接對齊到目標點。
+            // 誤差只用來判斷「到了沒」，不加進可以走的距離，否則每一步都會多走一點。
+            if (remaining <= budget + ArrivalTolerance)
             {
-                (vehicle.X, vehicle.Z) = target;
-                budget -= distance;
-                job.Waypoints.Dequeue();
+                (vehicle.X, vehicle.Z) = (target.X, target.Z);
+                budget = Math.Max(0, budget - remaining);
+                vehicle.Reached++;
             }
             else
             {
-                vehicle.X += dx / distance * budget;
-                vehicle.Z += dz / distance * budget;
-                budget = 0;
+                // 這一步走不到下一點：用完剩下的距離（可能是 0）就停。
+                vehicle.X += dx / remaining * budget;
+                vehicle.Z += dz / remaining * budget;
+                return moved && budget > 0;
             }
         }
 
-        if (job.Waypoints.Count > 0)
-        {
-            return true;
-        }
-
-        switch (job.Phase)
-        {
-            case JobPhase.ToPickup:
-                job.Phase = JobPhase.Loading;
-                job.HandoverRemaining = job.HandoverDuration;
-                break;
-            case JobPhase.ToDestination when job.IsTransport:
-                job.Phase = JobPhase.Unloading;
-                job.HandoverRemaining = job.HandoverDuration;
-                break;
-            default:
-                Emit(job.Source, VehicleEventType.Completed);
-                vehicle.Job = null;
-                break;
-        }
-
-        return true;
+        return moved;
     }
 
-    /// <summary>新的指令取代進行中的 MoveTo（例如回充電區途中被派工）。</summary>
-    private void Supersede(SimulatedVehicle vehicle)
-    {
-        if (vehicle.Job is { IsTransport: false } moving)
-        {
-            Emit(moving.Source, VehicleEventType.Failed, "Superseded");
-            vehicle.Job = null;
-        }
-    }
+    private static bool IsAt(SimulatedVehicle vehicle, Position3 point) =>
+        Math.Abs(vehicle.X - point.X) <= HandoffTolerance && Math.Abs(vehicle.Z - point.Z) <= HandoffTolerance;
 
-    private Queue<(double X, double Z)> Plan(SimulatedVehicle vehicle, Position3 target) =>
-        new(_route.PlanPath(vehicle.X, vehicle.Z, target.X, target.Z));
+    private static Position3 Copy(Position3 p) => new() { X = p.X, Y = p.Y, Z = p.Z };
 
     private void Emit(CommandSource source, VehicleEventType type, string? reason = null)
     {
@@ -347,58 +352,47 @@ public sealed class SimulatedFleet
         Unloading,
     }
 
-    private sealed class Job
+    /// <summary>一筆搬運：到取料點交接、再到卸料點交接。怎麼開過去由放行決定。</summary>
+    private sealed class Job(CommandSource source, Position3 pickup, Position3 destination, int loadQuantity, string? loadCode, TimeSpan handoverDuration)
     {
-        private Job(CommandSource source, bool isTransport, JobPhase phase, Position3? destination)
-        {
-            Source = source;
-            IsTransport = isTransport;
-            Phase = phase;
-            Destination = destination;
-        }
-
-        public int LoadQuantity { get; private init; }
-        public string? LoadCode { get; private init; }
+        public CommandSource Source { get; } = source;
+        public Position3 Pickup { get; } = pickup;
+        public Position3 Destination { get; } = destination;
+        public int LoadQuantity { get; } = loadQuantity;
+        public string? LoadCode { get; } = loadCode;
 
         /// <summary>取料、卸料各需要的交接時間。</summary>
-        public TimeSpan HandoverDuration { get; private init; }
+        public TimeSpan HandoverDuration { get; } = handoverDuration;
+        public JobPhase Phase { get; set; } = JobPhase.ToPickup;
+        public TimeSpan HandoverRemaining { get; set; }
 
         /// <summary>目前這次交接的進度，0～1。</summary>
         public double HandoverProgress => HandoverDuration <= TimeSpan.Zero
             ? 1
             : Math.Clamp(1 - HandoverRemaining / HandoverDuration, 0, 1);
-
-        public CommandSource Source { get; }
-        public bool IsTransport { get; }
-        public JobPhase Phase { get; set; }
-
-        /// <summary>Transport 的卸料點；取料完成後才規劃過去的路徑。</summary>
-        public Position3? Destination { get; }
-        public Queue<(double X, double Z)> Waypoints { get; set; } = new();
-        public TimeSpan HandoverRemaining { get; set; }
-
-        public static Job Transport(CommandSource source, Position3 destination, int loadQuantity, string? loadCode, TimeSpan handoverDuration) =>
-            new(source, isTransport: true, JobPhase.ToPickup, destination)
-            {
-                LoadQuantity = loadQuantity,
-                LoadCode = loadCode,
-                HandoverDuration = handoverDuration,
-            };
-
-        public static Job Move(CommandSource source) =>
-            new(source, isTransport: false, JobPhase.ToDestination, destination: null);
     }
 
-    private sealed class SimulatedVehicle(string vehicleId, (double X, double Z) position)
+    private sealed class SimulatedVehicle(string vehicleId, double x, double z)
     {
         public string VehicleId { get; } = vehicleId;
-        public double X { get; set; } = position.X;
-        public double Z { get; set; } = position.Z;
+        public double X { get; set; } = x;
+        public double Z { get; set; } = z;
         public long Sequence { get; set; }
         public Job? Job { get; set; }
 
         /// <summary>車上的件數；取料交接完成後才有值，卸料交接完成後歸零。</summary>
         public int LoadQuantity { get; set; }
         public string? LoadCode { get; set; }
+
+        // 後端放行的路徑與進度。
+        public Guid? PlanId { get; set; }
+        public long Revision { get; set; }
+        public List<Position3> Path { get; set; } = [];
+
+        /// <summary>可以開到 Path[Released - 1]。</summary>
+        public int Released { get; set; }
+
+        /// <summary>已經到達的點數；下一個要去的是 Path[Reached]。</summary>
+        public int Reached { get; set; }
     }
 }

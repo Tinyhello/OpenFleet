@@ -23,7 +23,7 @@ public sealed class FleetOptions
     /// </summary>
     public Dictionary<string, VehicleType> VehicleTypes { get; set; } = new(StringComparer.Ordinal);
 
-    /// <summary>參與自動派工的車輛。P2 先以單車驗證，所以示範設定只列一台。</summary>
+    /// <summary>參與自動派工的車輛。示範設定是兩台大型車。</summary>
     public List<string> DispatchVehicleIds { get; set; } = [];
 
     public TimeSpan DispatchInterval { get; set; } = TimeSpan.FromSeconds(1);
@@ -34,7 +34,7 @@ public sealed class FleetOptions
     public int MaxDispatchAttempts { get; set; } = 3;
 
     /// <summary>
-    /// 車輛 ID → 待命位置（充電維護區的車位）。沒有任務、已停止且不在車位上的車輛會被送回去。
+    /// 車輛 ID → 待命位置（充電維護區的車位，會對應到最近的路網節點）。沒有任務的車輛會被交通控制引導回去。
     /// 席位數與充電規則尚未定案，這裡只是示範用的固定車位。
     /// </summary>
     public Dictionary<string, ParkingSlot> Parking { get; set; } = new(StringComparer.Ordinal);

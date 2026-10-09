@@ -8,7 +8,7 @@ namespace OpenFleet.Simulator;
 
 /// <summary>
 /// 接收後端指令並交給 <see cref="SimulatedFleet"/> 執行。Ping 立即回報；
-/// Transport／MoveTo 先回報 Accepted，之後的 Loaded／Completed 由模擬迴圈在車輛實際到達時產生。
+/// Transport 先回報 Accepted，之後的 Loaded／Completed 由模擬迴圈在車輛實際到達並完成交接時產生。
 /// </summary>
 public sealed class CommandHandler(
     IOptions<MqttSettings> mqtt,

@@ -3,7 +3,9 @@
 - P1（通訊相容性）：.NET 後端、設備模擬器與 MQTT Broker 可靠收送 JSON，斷線後自動恢復。
 - P2（最小物料閉環）：批次從原料倉經粗加工、精加工送到暫存點，批次、搬運、加工狀態都存進 PostgreSQL 並可追蹤。
 
-實作紀錄與決策見 [document/P1實作紀錄.md](../document/P1實作紀錄.md)、[document/P2實作紀錄.md](../document/P2實作紀錄.md)。Unity 端見 [unity/README.md](../unity/README.md)。
+- P3（多車整合，進行中）：內外兩條不限方向的車道、路段預約與死結處理，兩台大型車同時派工。
+
+實作紀錄與決策見 [document/P1實作紀錄.md](../document/P1實作紀錄.md)、[document/P2實作紀錄.md](../document/P2實作紀錄.md)、[document/P3實作紀錄.md](../document/P3實作紀錄.md)。Unity 端見 [unity/README.md](../unity/README.md)。
 
 ## 專案結構
 
@@ -11,8 +13,8 @@
 | --- | --- | --- |
 | `src/OpenFleet.Contracts` | netstandard2.1 | MQTT／HTTP 共用 JSON 契約與 Topic 命名；不依賴任何套件，Unity 6 可直接引用 |
 | `src/OpenFleet.Messaging` | net10.0 | MQTTnet 5 連線（自動重連、重新訂閱）、訊息分派、JSON 設定 |
-| `src/OpenFleet.Api` | net10.0 | ASP.NET Core + EF Core。`Fleet`：車輛即時狀態；`Production`：批次、設定、加工；`Transport`：搬運任務、派工、Outbox／Inbox；`Data`：DbContext、Entity、Migration |
-| `src/OpenFleet.Simulator` | net10.0 | Worker Service：模擬 AGV 行駛、交接並回報 |
+| `src/OpenFleet.Api` | net10.0 | ASP.NET Core + EF Core。`Fleet`：車輛即時狀態；`Production`：批次、設定、加工；`Transport`：搬運任務、派工、Outbox／Inbox；`Traffic`：路網、路徑規劃、路段預約與放行；`Data`：DbContext、Entity、Migration |
+| `src/OpenFleet.Simulator` | net10.0 | Worker Service：模擬 AGV 依後端的放行行駛、交接並回報 |
 | `tests/OpenFleet.Tests` | net10.0 | 單元測試＋整合測試（內嵌 MQTT broker；PostgreSQL 由 Testcontainers 啟動，需要 Docker） |
 
 ## 執行
@@ -74,9 +76,11 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | --- | --- | --- |
 | 車輛清單 | 模擬器 `Simulator:VehicleIds` | `agv-01`、`agv-02`、`agv-03` |
 | 車型 | 後端 `Fleet:VehicleTypes` | `agv-01`、`agv-02` 為 `Large`，`agv-03` 為 `Small`；啟動時寫入 `Vehicles` 資料表 |
-| 派工車輛 | 後端 `Fleet:DispatchVehicleIds` | 只有 `agv-01`（P2 先以單車驗證） |
-| 待命車位 | 後端 `Fleet:Parking` | 充電維護區的 3 個車位；沒有任務的車會自己開回去 |
-| 走道 | 模擬器 `Simulator:Route` | 環狀走道中心線（封閉折線），須與 Unity `FactoryLayout.AisleLoop` 相同 |
+| 派工車輛 | 後端 `Fleet:DispatchVehicleIds` | `agv-01`、`agv-02`（兩台大型車） |
+| 待命車位 | 後端 `Fleet:Parking` | 充電維護區的 3 個車位；沒有任務的車會被引導回去 |
+| 起始位置 | 模擬器 `Simulator:StartPositions` | 各車的充電車位 |
+| 路網 | 資料庫 `RouteNodes`／`RouteEdges`（`DemoRoadNetwork` 建立） | 內外兩條車道、車道間的連接、站點與車位的支線；須與 Unity `FactoryLayout` 的車道位置相同 |
+| 交通控制 | 後端 `Traffic:*` | 每 0.2 秒一輪、前方預約 2 個節點、被擋 4 秒後改道 |
 | 車速 | 模擬器 `Simulator:Speed`、`FullLoadSpeed`、`LoadCapacity` | 空車 2 m/s；載貨依件數線性遞減，滿載 30 件時 1 m/s |
 | 批量 | 資料庫，由 Unity 面板或 `PUT /api/settings` 修改 | 30 件 |
 | 上下料時間 | 同上 | 每件 5 秒；一趟的取料、卸料各花「件數 × 5 秒」，由後端寫進搬運指令 |
@@ -104,6 +108,7 @@ Api <─ telemetry (QoS0，序號) ───────────────
 | `openfleet/v1/{factory}/vehicles/{id}/commands` | 後端 → 模擬器 | 1 | 否（避免重連收到過期指令） |
 | `openfleet/v1/{factory}/vehicles/{id}/events` | 模擬器 → 後端 | 1 | 否 |
 | `openfleet/v1/{factory}/vehicles/{id}/telemetry` | 模擬器 → 後端 | 0 | 否 |
+| `openfleet/v1/{factory}/vehicles/{id}/clearance` | 後端 → 模擬器 | 1 | 否（放行：路徑與可以開到哪裡） |
 | `openfleet/v1/{factory}/state/vehicles/{id}` | 後端 → 顯示端 | 1 | 是 |
 | `openfleet/v1/{factory}/state/simulation` | 後端 → 模擬器 | 1 | 是（模擬時間倍率） |
 
@@ -111,7 +116,8 @@ Api <─ telemetry (QoS0，序號) ───────────────
 | --- | --- |
 | `ping` | `accepted`、`completed`（立即） |
 | `transport`（帶 `assignmentId`、`pickup`、`destination`、`loadQuantity`、`loadCode`、`handoverSeconds`） | `accepted` → 到取料點交接後 `loaded` → 到卸料點交接後 `completed`；忙碌或過期時 `rejected` |
-| `moveTo`（帶 `destination`） | `accepted` → 抵達後 `completed`；被搬運指令取代時 `failed`（`Superseded`） |
+
+車輛怎麼開過去不在指令裡：後端另外用 `clearance` 告訴每台車路徑與「可以開到第幾個點」，車開到已放行的最後一點就停下等下一次放行。回充電車位也是用放行引導，沒有對應的指令。
 
 遙測除了位置與車速，還帶 `activity`（`idle`／`moving`／`loading`／`unloading`）、`activityProgress`（上下料進度 0～1）、`loadQuantity`、`loadCode` 與 `route`（接下來要依序經過的點，最後一點是目的地）；後端原樣放進車輛狀態發給顯示端。
 
@@ -142,7 +148,8 @@ Api <─ telemetry (QoS0，序號) ───────────────
 
 - 車輛位置與連線狀態仍只在記憶體；後端重啟後由遙測重建，並換新的 `stateEpoch`。
 - 斷線期間的訊息不補收（CleanSession）；Unity 每次連上 Broker 都重新取 HTTP 快照，並以 `stateEpoch` + `version` 對齊。
-- 沒有交通規則、路網、拆批、載具、刀具配送與庫存預留；搬運失敗後沒有恢復流程（見 P2實作紀錄第 7、9 節）。
+- 沒有拆批、載具、刀具配送與庫存預留；搬運失敗後沒有恢復流程（見 P2實作紀錄第 7、9 節）。
+- 路段預約只存在記憶體，後端重啟後由車輛位置重建；交通的已知限制見 P3實作紀錄第 5 節。
 - Mosquitto 允許匿名、未加密；PostgreSQL 帳密寫在設定檔；HTTP API 沒有驗證。只能在本機開發使用。
 
 ## 對照 Unity 經驗的學習點

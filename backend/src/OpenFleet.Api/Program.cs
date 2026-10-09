@@ -3,6 +3,7 @@ using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Production;
 using OpenFleet.Api.Simulation;
+using OpenFleet.Api.Traffic;
 using OpenFleet.Api.Transport;
 using OpenFleet.Messaging;
 
@@ -22,6 +23,14 @@ builder.Services.AddSingleton<StateChangeQueue>();
 builder.Services.AddSingleton<FleetStateStore>();
 builder.Services.AddSingleton<SimulationSpeed>();
 
+// 路網與交通控制的狀態都在記憶體：路網啟動時從資料庫載入，預約狀況由車輛的遙測重建。
+builder.Services.AddOptions<TrafficOptions>().Bind(builder.Configuration.GetSection(TrafficOptions.SectionName));
+builder.Services.AddSingleton<RoadNetwork>();
+builder.Services.AddSingleton(sp => new TrafficController(
+    sp.GetRequiredService<RoadNetwork>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TrafficOptions>>().Value,
+    sp.GetRequiredService<TimeProvider>()));
+
 // 用到 DbContext 的服務也必須是 Scoped（Singleton 不能依賴 Scoped）。
 builder.Services.AddScoped<ProductionService>();
 builder.Services.AddScoped<TransportService>();
@@ -35,6 +44,7 @@ builder.Services.AddHostedService<VehicleStatePublisher>();
 builder.Services.AddHostedService<VehicleLivenessMonitor>();
 builder.Services.AddHostedService<OutboxPublisher>();
 builder.Services.AddHostedService<DispatchWorker>();
+builder.Services.AddHostedService<TrafficWorker>();
 builder.Services.AddHostedService<ProductionWorker>();
 builder.Services.AddHostedService<SimulationSpeedPublisher>();
 

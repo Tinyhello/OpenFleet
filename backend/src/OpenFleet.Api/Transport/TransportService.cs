@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Production;
+using OpenFleet.Api.Traffic;
 using OpenFleet.Contracts;
 using OpenFleet.Messaging;
 
@@ -14,9 +15,13 @@ namespace OpenFleet.Api.Transport;
 /// 收到車輛事件時呼叫 <see cref="ApplyVehicleEventAsync"/>。
 /// 後端不會自己判定搬運成功：任務只會因為設備回報而前進。
 /// </summary>
+/// <summary>一台車目前的有效派工：交通控制用它決定車要去取料點還是卸料點。</summary>
+public sealed record MovementGoal(string VehicleId, AssignmentStatus Status, string FromStationCode, string ToStationCode);
+
 public sealed class TransportService(
     OpenFleetDbContext db,
     ProductionService production,
+    RoadNetwork network,
     IOptions<FleetOptions> fleetOptions,
     IOptions<MqttSettings> mqtt,
     TimeProvider time,
@@ -28,10 +33,12 @@ public sealed class TransportService(
     /// </summary>
     public async Task<int> DispatchPendingAsync(IReadOnlyCollection<VehicleState> onlineVehicles, CancellationToken cancellationToken)
     {
-        var pending = await db.TransportTasks.Include(t => t.Lot)
+        var pending = (await db.TransportTasks.Include(t => t.Lot)
             .Where(t => t.Status == TransportTaskStatus.Pending)
-            .OrderBy(t => t.CreatedAt).ThenBy(t => t.Id)
-            .ToListAsync(cancellationToken);
+            .ToListAsync(cancellationToken))
+            // 優先順序（使用者 2026-10-09 確認）：搬完成品（含各工序做完的半成品）→ 送刀具 → 補料；同級依建立時間。
+            .OrderBy(t => Priority(t.Kind)).ThenBy(t => t.CreatedAt).ThenBy(t => t.Id)
+            .ToList();
         if (pending.Count == 0)
         {
             return 0;
@@ -74,10 +81,11 @@ public sealed class TransportService(
                 continue;
             }
 
-            // 再比較「誰比較合適」：離取料點最近的車，距離相同時用 ID 決定，結果可重現。
+            // 再比較「誰比較合適」：沿路網開到取料點最近的車，距離相同時用 ID 決定，結果可重現。
             var pickup = stations[task.FromStationCode];
+            var pickupNode = network.Nearest(pickup.HandoffX, pickup.HandoffZ).Code;
             var vehicle = available
-                .OrderBy(v => Distance(v.Position, pickup))
+                .OrderBy(v => network.PathLength(network.Nearest(v.Position.X, v.Position.Z).Code, pickupNode))
                 .ThenBy(v => v.VehicleId, StringComparer.Ordinal)
                 .First();
 
@@ -108,6 +116,13 @@ public sealed class TransportService(
 
         return dispatched;
     }
+
+    /// <summary>每台有有效派工的車輛，以及那筆派工的狀態與起訖站。</summary>
+    public async Task<List<MovementGoal>> GetMovementGoalsAsync(CancellationToken cancellationToken) =>
+        await db.Assignments.AsNoTracking()
+            .Where(a => Assignment.ActiveStatuses.Contains(a.Status))
+            .Select(a => new MovementGoal(a.VehicleId, a.Status, a.Task.FromStationCode, a.Task.ToStationCode))
+            .ToListAsync(cancellationToken);
 
     /// <summary>目前有有效派工（還沒結束）的車輛。</summary>
     public async Task<IReadOnlyCollection<string>> GetBusyVehicleIdsAsync(CancellationToken cancellationToken) =>
@@ -279,6 +294,10 @@ public sealed class TransportService(
         };
     }
 
-    private static double Distance(Position3 position, Station station) =>
-        Math.Sqrt(Math.Pow(position.X - station.HandoffX, 2) + Math.Pow(position.Z - station.HandoffZ, 2));
+    private static int Priority(TransportTaskKind kind) => kind switch
+    {
+        TransportTaskKind.WipTransfer => 0,
+        TransportTaskKind.Replenishment => 2,
+        _ => 1,
+    };
 }

@@ -44,23 +44,23 @@ namespace OpenFleet.Unity.Editor
     /// 暫定的顯示用佈局（2026-09-27，使用者同意「每道工序先放一站」）。
     /// 站點數量與位置不是已確認的業務規則；P2 起站點應由後端資料提供，Unity 只負責畫出來。
     ///
-    /// 環狀主走道的中心線必須與模擬器設定 Simulator:Route 相同（backend/src/OpenFleet.Simulator/appsettings.json）。
+    /// 走道的車道位置必須與後端的路網相同（見 OuterLane／InnerLane）。
     /// 下排站點由左到右、上排由右到左，依製程順序沿走道排列。
     /// </summary>
     internal static class FactoryLayout
     {
         public static readonly Vector2 FloorSize = new Vector2(48f, 32f);
 
-        /// <summary>走道中心線的四個角（與 Simulator:Route 相同）。</summary>
-        public static readonly Vector2[] AisleLoop =
-        {
-            new Vector2(-18f, -6f),
-            new Vector2(18f, -6f),
-            new Vector2(18f, 6f),
-            new Vector2(-18f, 6f),
-        };
+        /// <summary>
+        /// 環狀走道有內外兩條車道（都不限方向）。數值是各車道中心線到場地中心的距離，
+        /// 必須與後端路網的節點座標相同（backend/src/OpenFleet.Api/Traffic/RoadNetwork.cs 的 DemoRoadNetwork）。
+        /// </summary>
+        public static readonly Vector2 OuterLane = new Vector2(18f, 6f);
+        public static readonly Vector2 InnerLane = new Vector2(16.2f, 4.2f);
 
-        public const float AisleWidth = 2.4f;
+        /// <summary>車道中心線到鋪面邊緣的距離。</summary>
+        public const float LaneEdge = 1.2f;
+        public const float InnerLaneEdge = 0.9f;
 
         /// <summary>站點中心到交接點的距離（交接點位於走道外緣旁）。</summary>
         public const float HandoffOffset = 3.4f;

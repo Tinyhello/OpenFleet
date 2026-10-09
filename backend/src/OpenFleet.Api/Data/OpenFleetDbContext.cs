@@ -18,6 +18,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<InventoryMovement> InventoryMovements => Set<InventoryMovement>();
     public DbSet<OperationExecution> Operations => Set<OperationExecution>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
+    public DbSet<RouteNode> RouteNodes => Set<RouteNode>();
+    public DbSet<RouteEdge> RouteEdges => Set<RouteEdge>();
     public DbSet<TransportTask> TransportTasks => Set<TransportTask>();
     public DbSet<Assignment> Assignments => Set<Assignment>();
     public DbSet<TaskEvent> TaskEvents => Set<TaskEvent>();
@@ -120,6 +122,21 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.HasIndex(o => new { o.StationCode, o.Status });
             e.HasOne(o => o.Lot).WithMany().HasForeignKey(o => o.LotId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<Station>().WithMany().HasForeignKey(o => o.StationCode).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        model.Entity<RouteNode>(e =>
+        {
+            e.HasKey(n => n.Code);
+            e.Property(n => n.Code).HasMaxLength(32);
+        });
+
+        model.Entity<RouteEdge>(e =>
+        {
+            e.Property(r => r.FromCode).HasMaxLength(32);
+            e.Property(r => r.ToCode).HasMaxLength(32);
+            e.HasIndex(r => new { r.FromCode, r.ToCode }).IsUnique();
+            e.HasOne<RouteNode>().WithMany().HasForeignKey(r => r.FromCode).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<RouteNode>().WithMany().HasForeignKey(r => r.ToCode).OnDelete(DeleteBehavior.Cascade);
         });
 
         model.Entity<Vehicle>(e =>

@@ -13,7 +13,6 @@ public static class SimulatorApp
         builder.Services.AddOptions<SimulatorSettings>()
             .Bind(builder.Configuration.GetSection(SimulatorSettings.SectionName))
             .Validate(s => s.VehicleIds.Count > 0, "Simulator:VehicleIds must contain at least one vehicle.")
-            .Validate(s => s.Route.Count >= 2 && LoopRoute.MeasureLength(s.Route) > 0, "Simulator:Route needs at least two distinct points.")
             .Validate(s => s.Speed > 0 && s.FullLoadSpeed > 0 && s.LoadCapacity > 0 && s.TelemetryInterval > TimeSpan.Zero, "Simulator settings are out of range.")
             .ValidateOnStart();
 
@@ -21,6 +20,7 @@ public static class SimulatorApp
         builder.Services.AddSingleton<EventSender>();
         builder.Services.AddOpenFleetMqtt(builder.Configuration);
         builder.Services.AddMqttHandler<CommandHandler>();
+        builder.Services.AddMqttHandler<ClearanceHandler>();
         builder.Services.AddMqttHandler<SimulationSpeedHandler>();
         builder.Services.AddHostedService<TelemetryLoop>();
 

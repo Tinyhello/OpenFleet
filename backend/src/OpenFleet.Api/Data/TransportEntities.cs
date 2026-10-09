@@ -12,6 +12,24 @@ public sealed class Vehicle
     public bool DispatchEnabled { get; set; }
 }
 
+/// <summary>路網節點（座標，公尺）。站點交接點與充電車位也是節點。</summary>
+public sealed class RouteNode
+{
+    public required string Code { get; set; }
+    public double X { get; set; }
+    public double Z { get; set; }
+}
+
+/// <summary>
+/// 路網的路段。車道不限方向，所以一筆代表雙向都能走的一段；同一時間誰能用由交通控制的預約決定。
+/// </summary>
+public sealed class RouteEdge
+{
+    public int Id { get; set; }
+    public required string FromCode { get; set; }
+    public required string ToCode { get; set; }
+}
+
 /// <summary>
 /// 一趟單車搬運。合法的狀態轉移：Pending → Assigned → Executing → Completed；
 /// Assigned／Executing 可以 Failed；設備拒絕時 Assigned 回到 Pending 等待重新派工。
