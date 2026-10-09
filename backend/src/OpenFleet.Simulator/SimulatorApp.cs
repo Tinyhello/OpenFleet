@@ -18,6 +18,7 @@ public static class SimulatorApp
             .ValidateOnStart();
 
         builder.Services.AddSingleton<SimulatedFleet>();
+        builder.Services.AddSingleton<EventSender>();
         builder.Services.AddOpenFleetMqtt(builder.Configuration);
         builder.Services.AddMqttHandler<CommandHandler>();
         builder.Services.AddHostedService<TelemetryLoop>();

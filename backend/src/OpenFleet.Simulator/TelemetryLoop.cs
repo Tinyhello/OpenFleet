@@ -5,9 +5,12 @@ using OpenFleet.Messaging;
 
 namespace OpenFleet.Simulator;
 
-/// <summary>固定間隔推進模擬並發送遙測（QoS 0，斷線時直接略過，不補送舊位置）。</summary>
+/// <summary>
+/// 固定間隔推進模擬，發送遙測（QoS 0，斷線時直接略過，不補送舊位置）與這一步產生的回報（QoS 1，斷線時保留到重連後補送）。
+/// </summary>
 public sealed class TelemetryLoop(
     SimulatedFleet fleet,
+    EventSender sender,
     IMqttPublisher publisher,
     IOptions<SimulatorSettings> settings,
     TimeProvider time,
@@ -32,6 +35,8 @@ public sealed class TelemetryLoop(
                 {
                     continue;
                 }
+
+                await sender.FlushAsync(publisher, stoppingToken);
 
                 foreach (var (vehicleId, telemetry) in samples)
                 {

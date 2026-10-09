@@ -6,11 +6,14 @@ using OpenFleet.Messaging;
 
 namespace OpenFleet.Simulator;
 
-/// <summary>接收後端指令並回報事件。P1 只支援 Ping：立即回報 Accepted 與 Completed。</summary>
+/// <summary>
+/// 接收後端指令並交給 <see cref="SimulatedFleet"/> 執行。Ping 立即回報；
+/// Transport／MoveTo 先回報 Accepted，之後的 Loaded／Completed 由模擬迴圈在車輛實際到達時產生。
+/// </summary>
 public sealed class CommandHandler(
     IOptions<MqttSettings> mqtt,
     SimulatedFleet fleet,
-    TimeProvider time,
+    EventSender sender,
     ILogger<CommandHandler> logger) : IMqttMessageHandler
 {
     public string TopicFilter { get; } = Topics.AllVehicles(mqtt.Value.FactoryId, VehicleChannel.Commands);
@@ -41,42 +44,15 @@ public sealed class CommandHandler(
             return;
         }
 
-        var replies = fleet.GetOrCreateReplies(command.CommandId, () => Execute(envelope, publisher.Settings.ProducerId), out var isDuplicate);
-        if (isDuplicate)
+        if (fleet.HandleCommand(vehicleId, envelope))
         {
             logger.LogInformation("Duplicate command {CommandId} for {VehicleId}; re-sending previous replies.", command.CommandId, vehicleId);
         }
-
-        var topic = Topics.Vehicle(publisher.Settings.FactoryId, vehicleId, VehicleChannel.Events);
-        foreach (var reply in replies)
+        else
         {
-            await publisher.PublishAsync(topic, reply, MqttQualityOfServiceLevel.AtLeastOnce, retain: false, cancellationToken);
-        }
-    }
-
-    private IReadOnlyList<MessageEnvelope<VehicleEvent>> Execute(MessageEnvelope<VehicleCommand> envelope, string producerId)
-    {
-        var command = envelope.Payload;
-        var now = time.GetUtcNow();
-
-        MessageEnvelope<VehicleEvent> Reply(VehicleEventType type, string? reason = null) =>
-            MessageEnvelope.Create(producerId, new VehicleEvent
-            {
-                CommandId = command.CommandId,
-                AssignmentId = command.AssignmentId,
-                EventType = type,
-                Reason = reason,
-            }, now, correlationId: envelope.MessageId);
-
-        if (now > command.ExpiresAt)
-        {
-            return [Reply(VehicleEventType.Rejected, "Expired")];
+            logger.LogInformation("Command {CommandType} {CommandId} received for {VehicleId}.", command.CommandType, command.CommandId, vehicleId);
         }
 
-        return command.CommandType switch
-        {
-            VehicleCommandType.Ping => [Reply(VehicleEventType.Accepted), Reply(VehicleEventType.Completed)],
-            _ => [Reply(VehicleEventType.Rejected, $"Unsupported command type {command.CommandType}")],
-        };
+        await sender.FlushAsync(publisher, cancellationToken);
     }
 }

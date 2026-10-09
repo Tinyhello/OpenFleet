@@ -1,4 +1,4 @@
-# P1 開發環境：只有 MQTT Broker。PostgreSQL 在 P2 加入。
+# 開發環境：MQTT Broker 與 PostgreSQL（P2 起）。
 # 啟動：docker compose -f docker/compose.yaml up -d
 name: openfleet
 
@@ -14,5 +14,25 @@ services:
       - mosquitto-data:/mosquitto/data
     restart: unless-stopped
 
+  postgres:
+    image: postgres:17
+    container_name: openfleet-postgres
+    # 僅供本機開發：帳密寫在這裡、只綁定 127.0.0.1。上雲前必須改用機密設定。
+    environment:
+      POSTGRES_USER: openfleet
+      POSTGRES_PASSWORD: openfleet
+      POSTGRES_DB: openfleet
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openfleet -d openfleet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   mosquitto-data:
+  postgres-data:

@@ -49,17 +49,19 @@ public sealed class MqttConnection : BackgroundService, IMqttPublisher
 
     public bool IsConnected => _client.IsConnected;
 
-    public async Task PublishAsync<T>(string topic, T message, MqttQualityOfServiceLevel qos, bool retain, CancellationToken cancellationToken)
+    public Task PublishAsync<T>(string topic, T message, MqttQualityOfServiceLevel qos, bool retain, CancellationToken cancellationToken) =>
+        PublishRawAsync(topic, JsonSerializer.SerializeToUtf8Bytes(message, JsonDefaults.Options), qos, retain, cancellationToken);
+
+    public async Task PublishRawAsync(string topic, ReadOnlyMemory<byte> payload, MqttQualityOfServiceLevel qos, bool retain, CancellationToken cancellationToken)
     {
         if (!_client.IsConnected)
         {
             throw new MqttNotConnectedException();
         }
 
-        var payload = JsonSerializer.SerializeToUtf8Bytes(message, JsonDefaults.Options);
         var applicationMessage = new MqttApplicationMessageBuilder()
             .WithTopic(topic)
-            .WithPayload(payload)
+            .WithPayload(new ReadOnlySequence<byte>(payload))
             .WithContentType("application/json")
             .WithQualityOfServiceLevel(qos)
             .WithRetainFlag(retain)

@@ -1,6 +1,9 @@
 namespace OpenFleet.Simulator;
 
-/// <summary>對應 "Simulator" 設定區段。車輛沿固定的封閉路線循環行駛，只用來產生位置變化，不代表派工或交通規則。</summary>
+/// <summary>
+/// 對應 "Simulator" 設定區段。車輛啟動時平均分布在環狀走道上並保持靜止，收到指令才沿走道移動。
+/// 沒有任何交通規則：車輛之間不會避讓。
+/// </summary>
 public sealed class SimulatorSettings
 {
     public const string SectionName = "Simulator";
@@ -18,6 +21,12 @@ public sealed class SimulatorSettings
 
     /// <summary>公尺／秒。</summary>
     public double Speed { get; set; } = 1;
+
+    /// <summary>
+    /// 在交接點取料或卸料所需的時間。代表「站點設備確認取放」的簡化模擬：時間到就回報，沒有真正的交接設備。
+    /// 示範值，尚未定案。
+    /// </summary>
+    public TimeSpan HandoverDuration { get; set; } = TimeSpan.FromSeconds(2);
 }
 
 public sealed class RoutePoint

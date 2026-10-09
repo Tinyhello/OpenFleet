@@ -103,15 +103,4 @@ public class FleetStateStoreTests
 
         Assert.Equal(1, _store.Find("agv")!.Position.X);
     }
-
-    [Fact]
-    public void Inbox_accepts_a_message_only_once_per_producer()
-    {
-        var inbox = new InboxDeduplicator();
-        var id = Guid.NewGuid();
-
-        Assert.True(inbox.TryRegister("simulator", id));
-        Assert.False(inbox.TryRegister("simulator", id));
-        Assert.True(inbox.TryRegister("other", id));
-    }
 }

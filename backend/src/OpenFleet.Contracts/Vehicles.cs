@@ -14,6 +14,18 @@ namespace OpenFleet.Contracts
     {
         /// <summary>P1 通訊驗證用：設備收到後回報 Accepted 與 Completed，不做實際動作。</summary>
         Ping,
+
+        /// <summary>
+        /// 搬運：前往 <see cref="VehicleCommand.Pickup"/> 取料（回報 Loaded），再到
+        /// <see cref="VehicleCommand.Destination"/> 卸料（回報 Completed）。必須帶 AssignmentId。
+        /// </summary>
+        Transport,
+
+        /// <summary>
+        /// 空車移動到 <see cref="VehicleCommand.Destination"/>（例如回充電維護區待命）。
+        /// 不是派工：沒有 AssignmentId，收到新的 Transport 時可以被取代。
+        /// </summary>
+        MoveTo,
     }
 
     /// <summary>後端 → 設備／模擬器。</summary>
@@ -29,6 +41,12 @@ namespace OpenFleet.Contracts
 
         /// <summary>設備收到時若已超過此時間，必須回報 Rejected 而不是執行。</summary>
         public DateTimeOffset ExpiresAt { get; set; }
+
+        /// <summary>Transport 的取料交接點。座標由後端提供，設備不需要認得站點。</summary>
+        public Position3? Pickup { get; set; }
+
+        /// <summary>Transport 的卸料交接點，或 MoveTo 的目的地。</summary>
+        public Position3? Destination { get; set; }
     }
 
     public enum VehicleEventType
@@ -37,6 +55,9 @@ namespace OpenFleet.Contracts
         Rejected,
         Completed,
         Failed,
+
+        /// <summary>Transport：已在取料點完成交接，物料在車上。抵達不等於已取料，所以另外回報。</summary>
+        Loaded,
     }
 
     /// <summary>設備／模擬器 → 後端。業務結果回報，與位置遙測分開。</summary>

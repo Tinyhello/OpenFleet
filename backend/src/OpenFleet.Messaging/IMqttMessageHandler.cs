@@ -25,6 +25,9 @@ public interface IMqttPublisher
 
     /// <summary>未連線時丟出 <see cref="MqttNotConnectedException"/>；呼叫端決定要重試、丟棄或回報錯誤。</summary>
     Task PublishAsync<T>(string topic, T message, MqttQualityOfServiceLevel qos, bool retain, CancellationToken cancellationToken);
+
+    /// <summary>發送已序列化的 JSON（Outbox 用：重送時內容與 MessageId 必須完全相同）。</summary>
+    Task PublishRawAsync(string topic, ReadOnlyMemory<byte> payload, MqttQualityOfServiceLevel qos, bool retain, CancellationToken cancellationToken);
 }
 
 public sealed class MqttNotConnectedException() : InvalidOperationException("MQTT client is not connected.");

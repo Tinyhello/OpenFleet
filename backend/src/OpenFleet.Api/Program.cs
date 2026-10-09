@@ -1,4 +1,8 @@
+using Microsoft.EntityFrameworkCore;
+using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
+using OpenFleet.Api.Production;
+using OpenFleet.Api.Transport;
 using OpenFleet.Messaging;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -6,10 +10,20 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.ConfigureHttpJsonOptions(o => JsonDefaults.Configure(o.SerializerOptions));
 builder.Services.AddSingleton(TimeProvider.System);
 
+// DbContext 預設是 Scoped：每個請求／每個手動建立的 scope 一個實例。
+builder.Services.AddDbContext<OpenFleetDbContext>(o => o.UseNpgsql(
+    builder.Configuration.GetConnectionString("OpenFleet")
+        ?? throw new InvalidOperationException("ConnectionStrings:OpenFleet is required.")));
+
 builder.Services.AddOptions<FleetOptions>().Bind(builder.Configuration.GetSection(FleetOptions.SectionName));
+builder.Services.AddOptions<ProductionOptions>().Bind(builder.Configuration.GetSection(ProductionOptions.SectionName));
 builder.Services.AddSingleton<StateChangeQueue>();
 builder.Services.AddSingleton<FleetStateStore>();
-builder.Services.AddSingleton<InboxDeduplicator>();
+
+// 用到 DbContext 的服務也必須是 Scoped（Singleton 不能依賴 Scoped）。
+builder.Services.AddScoped<ProductionService>();
+builder.Services.AddScoped<TransportService>();
+builder.Services.AddScoped<VehicleEventProcessor>();
 
 builder.Services.AddOpenFleetMqtt(builder.Configuration);
 builder.Services.AddMqttHandler<VehicleEventHandler>();
@@ -17,8 +31,14 @@ builder.Services.AddMqttHandler<VehicleTelemetryHandler>();
 
 builder.Services.AddHostedService<VehicleStatePublisher>();
 builder.Services.AddHostedService<VehicleLivenessMonitor>();
+builder.Services.AddHostedService<OutboxPublisher>();
+builder.Services.AddHostedService<DispatchWorker>();
+builder.Services.AddHostedService<ProductionWorker>();
 
 var app = builder.Build();
+
+// 資料庫連不上就直接啟動失敗：沒有資料庫時後端無法保證任何業務狀態，不像 MQTT 可以先降級再重連。
+await app.InitializeDatabaseAsync();
 
 app.MapGet("/health", (IMqttPublisher mqtt) => Results.Ok(new
 {
@@ -27,6 +47,8 @@ app.MapGet("/health", (IMqttPublisher mqtt) => Results.Ok(new
 }));
 
 app.MapVehicleEndpoints();
+app.MapProductionEndpoints();
+app.MapTransportEndpoints();
 
 app.Run();
 

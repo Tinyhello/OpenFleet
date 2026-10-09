@@ -1,39 +1,61 @@
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using MQTTnet.Protocol;
 using OpenFleet.Contracts;
+using OpenFleet.Api.Transport;
 using OpenFleet.Messaging;
 
 namespace OpenFleet.Api.Fleet;
 
-/// <summary>車輛事件（接受／完成／失敗）：QoS 1，可能重送，因此先去重再更新狀態。</summary>
+/// <summary>
+/// 車輛事件（接受／取料／完成／失敗）：QoS 1，可能重送。去重與業務變更在同一筆資料庫交易完成，
+/// 提交之後才更新記憶體中的顯示狀態。
+/// 這個處理者是 Singleton，DbContext 是 Scoped，所以每則訊息建立一個 scope。
+/// </summary>
 public sealed class VehicleEventHandler(
     IOptions<MqttSettings> mqtt,
     FleetStateStore store,
-    InboxDeduplicator inbox,
+    IServiceScopeFactory scopes,
     ILogger<VehicleEventHandler> logger) : IMqttMessageHandler
 {
+    private const int MaxAttempts = 3;
+
     public string TopicFilter { get; } = Topics.AllVehicles(mqtt.Value.FactoryId, VehicleChannel.Events);
 
     public MqttQualityOfServiceLevel QualityOfService => MqttQualityOfServiceLevel.AtLeastOnce;
 
-    public Task HandleAsync(MqttInboundMessage message, IMqttPublisher _, CancellationToken cancellationToken)
+    public async Task HandleAsync(MqttInboundMessage message, IMqttPublisher _, CancellationToken cancellationToken)
     {
         if (!VehicleMessageParser.TryRead<VehicleEvent>(message, logger, out var vehicleId, out var envelope))
         {
-            return Task.CompletedTask;
+            return;
         }
 
-        if (!inbox.TryRegister(envelope.ProducerId, envelope.MessageId))
+        for (var attempt = 1; ; attempt++)
         {
-            logger.LogInformation("Duplicate event {MessageId} from {Producer} ignored.", envelope.MessageId, envelope.ProducerId);
-            return Task.CompletedTask;
+            try
+            {
+                await using var scope = scopes.CreateAsyncScope();
+                var processor = scope.ServiceProvider.GetRequiredService<VehicleEventProcessor>();
+                if (!await processor.ProcessAsync(vehicleId, envelope, cancellationToken))
+                {
+                    logger.LogInformation("Duplicate event {MessageId} from {Producer} ignored.", envelope.MessageId, envelope.ProducerId);
+                    return;
+                }
+
+                break;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < MaxAttempts)
+            {
+                // 樂觀並行衝突：派工迴圈剛好改了同一筆派工（例如標記逾時）。整筆交易已回滾，用新的 scope 重讀再做一次。
+                logger.LogInformation("Concurrent update while handling event {MessageId}; retrying ({Attempt}/{Max}).", envelope.MessageId, attempt, MaxAttempts);
+            }
         }
 
         store.ApplyEvent(vehicleId, envelope.Payload);
         logger.LogInformation("Vehicle {VehicleId} reported {EventType} for command {CommandId}.",
             vehicleId, envelope.Payload.EventType, envelope.Payload.CommandId);
-        return Task.CompletedTask;
     }
 }
 

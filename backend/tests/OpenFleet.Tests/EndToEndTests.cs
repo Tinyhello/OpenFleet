@@ -20,10 +20,11 @@ using OpenFleet.Simulator;
 namespace OpenFleet.Tests;
 
 /// <summary>
-/// P1 驗收：程式內嵌 MQTT broker + 後端 API + 模擬器，走完整通訊路徑。
-/// 不依賴 Docker，CI 也能跑；與真正的 Mosquitto 的手動驗證步驟寫在 backend/README.md。
+/// 端對端驗收：程式內嵌 MQTT broker + 後端 API + 模擬器 + PostgreSQL（Testcontainers，需要 Docker），走完整路徑。
+/// 與真正的 Mosquitto 的手動驗證步驟寫在 backend/README.md。
 /// </summary>
-public sealed class EndToEndTests : IAsyncLifetime
+[Collection(PostgresCollection.Name)]
+public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
 
@@ -46,6 +47,13 @@ public sealed class EndToEndTests : IAsyncLifetime
             b.UseSetting("Fleet:LivenessCheckInterval", "00:00:00.200");
             b.UseSetting("Fleet:VehicleTypes:agv-t1", "Large");
             b.UseSetting("Fleet:VehicleTypes:agv-t2", "Small");
+            b.UseSetting("ConnectionStrings:OpenFleet", postgres.NewConnectionString());
+            b.UseSetting("Fleet:DispatchVehicleIds:0", "agv-t1");
+            b.UseSetting("Fleet:DispatchInterval", "00:00:00.100");
+            b.UseSetting("Fleet:OutboxPollInterval", "00:00:00.100");
+            b.UseSetting("Production:TickInterval", "00:00:00.100");
+            b.UseSetting("Fleet:Parking:agv-t2:X", "3");
+            b.UseSetting("Fleet:Parking:agv-t2:Z", "2");
         });
         _http = _api.CreateClient();
 
@@ -69,6 +77,9 @@ public sealed class EndToEndTests : IAsyncLifetime
             ["Simulator:Route:0:Z"] = "0",
             ["Simulator:Route:1:X"] = "10",
             ["Simulator:Route:1:Z"] = "0",
+            // 加快車速與交接，讓整個物料流程在幾秒內跑完。
+            ["Simulator:Speed"] = "40",
+            ["Simulator:HandoverDuration"] = "00:00:00.100",
         });
         _simulator = simulator.Build();
         await _simulator.StartAsync();
@@ -102,6 +113,66 @@ public sealed class EndToEndTests : IAsyncLifetime
             var state = await GetVehicleAsync("agv-t1");
             return state.LastCommandId == accepted.CommandId && state.LastCommandEvent == VehicleEventType.Completed;
         });
+    }
+
+    [Fact]
+    public async Task Lot_travels_from_raw_store_through_both_machines_to_the_buffer()
+    {
+        await EventuallyAsync(async () => (await GetVehiclesAsync()).Count(v => v.Connectivity == VehicleConnectivity.Online) == 2);
+
+        // 經由面板用的 API 把兩站的加工時間改成 1 秒、批量改成 20。
+        var settings = (await _http.GetFromJsonAsync<ProductionSettingsDto>("/api/settings", JsonDefaults.Options))!;
+        settings.LotQuantity = 20;
+        settings.Steps.ForEach(step => step.DurationSeconds = 1);
+        (await _http.PutAsJsonAsync("/api/settings", settings, JsonDefaults.Options)).EnsureSuccessStatusCode();
+
+        var created = await _http.PostAsJsonAsync("/api/lots", new CreateLotRequest(), JsonDefaults.Options);
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var lot = (await created.Content.ReadFromJsonAsync<LotDto>(JsonDefaults.Options))!;
+        Assert.Equal(20, lot.Quantity);
+
+        await EventuallyAsync(async () => (await GetTraceAsync(lot.Id)).Lot.Status == LotStatus.Staged);
+
+        var trace = await GetTraceAsync(lot.Id);
+        Assert.Equal("heat", trace.Lot.StationCode);
+        Assert.Equal(
+            new[] { "station:raw-store", "vehicle:agv-t1", "station:rough", "vehicle:agv-t1", "station:fine", "vehicle:agv-t1", "station:heat" },
+            trace.Movements.Select(m => m.To));
+        Assert.Equal(new[] { "rough", "fine" }, trace.Operations.Select(o => o.StationCode));
+        Assert.All(trace.Operations, o => Assert.Equal(Contracts.OperationStatus.Completed, o.Status));
+        Assert.Equal(3, trace.Tasks.Count);
+        Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
+
+        // 任務歷史：待派工 → 已派工 → 執行中 → 完成。
+        var events = (await _http.GetFromJsonAsync<List<TaskEventDto>>($"/api/transport-tasks/{trace.Tasks[0].Id}/events", JsonDefaults.Options))!;
+        Assert.Equal(
+            new[] { TransportTaskStatus.Pending, TransportTaskStatus.Assigned, TransportTaskStatus.Executing, TransportTaskStatus.Completed },
+            events.Select(e => e.ToStatus));
+    }
+
+    [Fact]
+    public async Task Idle_vehicle_is_sent_to_its_parking_slot()
+    {
+        await EventuallyAsync(async () =>
+        {
+            var state = await GetVehicleAsync("agv-t2");
+            return state.Speed == 0 && Math.Abs(state.Position.X - 3) < 0.01 && Math.Abs(state.Position.Z - 2) < 0.01;
+        });
+
+        // 沒有設定車位的車留在原地。
+        Assert.Equal(0, (await GetVehicleAsync("agv-t1")).Position.Z);
+    }
+
+    [Fact]
+    public async Task Invalid_settings_are_rejected_with_400()
+    {
+        var settings = (await _http.GetFromJsonAsync<ProductionSettingsDto>("/api/settings", JsonDefaults.Options))!;
+        settings.LotQuantity = settings.MaxLotQuantity + 1;
+
+        var response = await _http.PutAsJsonAsync("/api/settings", settings, JsonDefaults.Options);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("lotQuantity", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -192,6 +263,9 @@ public sealed class EndToEndTests : IAsyncLifetime
 
     private async Task<VehicleState> GetVehicleAsync(string id) =>
         (await _http.GetFromJsonAsync<VehicleState>($"/api/vehicles/{id}", JsonDefaults.Options))!;
+
+    private async Task<LotTraceDto> GetTraceAsync(Guid lotId) =>
+        (await _http.GetFromJsonAsync<LotTraceDto>($"/api/lots/{lotId}", JsonDefaults.Options))!;
 
     private async Task<bool> GetHealthAsync()
     {
