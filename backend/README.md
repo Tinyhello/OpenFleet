@@ -63,6 +63,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `POST /api/lots` | 模擬收料：在原料倉建立批次並建立第一趟搬運。可帶 `{"quantity": n}` |
 | `GET /api/lots`、`GET /api/lots/{id}` | 批次清單；單一批次的完整追蹤 |
 | `GET /api/transport-tasks`、`GET /api/transport-tasks/{id}`、`.../{id}/events` | 搬運任務、派工狀態與狀態歷史 |
+| `GET /api/simulation`、`PUT /api/simulation` | 測試用的模擬時間倍率（`{"timeScale": 10}`，1～20）。行駛、上下料、加工、換刀一起加快；只存在記憶體，後端重啟回到 1 |
 | `POST /api/demo/reset` | 清除所有批次與搬運資料、刀具計數歸零（設定、站點、車輛保留）。只供本機示範 |
 
 ## 示範設定
@@ -104,6 +105,7 @@ Api <─ telemetry (QoS0，序號) ───────────────
 | `openfleet/v1/{factory}/vehicles/{id}/events` | 模擬器 → 後端 | 1 | 否 |
 | `openfleet/v1/{factory}/vehicles/{id}/telemetry` | 模擬器 → 後端 | 0 | 否 |
 | `openfleet/v1/{factory}/state/vehicles/{id}` | 後端 → 顯示端 | 1 | 是 |
+| `openfleet/v1/{factory}/state/simulation` | 後端 → 模擬器 | 1 | 是（模擬時間倍率） |
 
 | 指令 | 設備回報 |
 | --- | --- |
@@ -111,7 +113,7 @@ Api <─ telemetry (QoS0，序號) ───────────────
 | `transport`（帶 `assignmentId`、`pickup`、`destination`、`loadQuantity`、`loadCode`、`handoverSeconds`） | `accepted` → 到取料點交接後 `loaded` → 到卸料點交接後 `completed`；忙碌或過期時 `rejected` |
 | `moveTo`（帶 `destination`） | `accepted` → 抵達後 `completed`；被搬運指令取代時 `failed`（`Superseded`） |
 
-遙測除了位置與車速，還帶 `activity`（`idle`／`moving`／`loading`／`unloading`）、`activityProgress`（上下料進度 0～1）、`loadQuantity` 與 `loadCode`；後端原樣放進車輛狀態發給顯示端。
+遙測除了位置與車速，還帶 `activity`（`idle`／`moving`／`loading`／`unloading`）、`activityProgress`（上下料進度 0～1）、`loadQuantity`、`loadCode` 與 `route`（接下來要依序經過的點，最後一點是目的地）；後端原樣放進車輛狀態發給顯示端。
 
 所有訊息都包在 `MessageEnvelope<T>`：`schemaVersion`、`messageId`、`producerId`、`correlationId`、`occurredAt`、`payload`。JSON 欄位 camelCase，enum 為小寫字串。
 

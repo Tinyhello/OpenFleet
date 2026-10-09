@@ -18,6 +18,17 @@ namespace OpenFleet.Unity
         [SerializeField] private FleetView fleetView;
         [SerializeField] private float refreshSeconds = 0.5f;
 
+        [Header("路徑虛線")]
+        [Tooltip("虛線每一段的長度與間隔（公尺）。以世界座標計算，所以遠處的虛線會隨透視變短。")]
+        [SerializeField] private float dashLength = 0.7f;
+        [SerializeField] private float gapLength = 0.5f;
+
+        [Tooltip("虛線往目的地流動的速度（公尺／秒）。只是動畫，和車速無關。")]
+        [SerializeField] private float dashFlowSpeed = 1.6f;
+
+        [Tooltip("虛線離地面的高度（公尺）。")]
+        [SerializeField] private float routeHeight = 0.1f;
+
         [Tooltip("上下料進度條在車輛上方的高度（公尺）。")]
         [SerializeField] private float vehicleBarHeight = 2.1f;
 
@@ -29,12 +40,15 @@ namespace OpenFleet.Unity
         private static readonly Color ToolColor = new Color(0.78f, 0.6f, 0.95f);
         private static readonly Color ToolChangeColor = new Color(0.98f, 0.45f, 0.4f);
         private static readonly Color HandoverColor = new Color(0.35f, 0.85f, 0.9f);
+        private static readonly Color RouteColor = new Color(1f, 0.92f, 0.35f, 0.95f);
 
         private readonly Dictionary<string, StationAnchor> _anchors = new Dictionary<string, StationAnchor>();
         private readonly Dictionary<string, StationWidget> _stations = new Dictionary<string, StationWidget>();
         private readonly Dictionary<VehicleView, VehicleBar> _vehicleBars = new Dictionary<VehicleView, VehicleBar>();
         private readonly List<VehicleView> _stale = new List<VehicleView>();
+        private readonly List<Vector3> _routePoints = new List<Vector3>();
         private VisualElement _root;
+        private VisualElement _routeLayer;
         private Camera _camera;
 
         private string Api => fleetView != null ? fleetView.ApiBaseUrl : "http://localhost:5229";
@@ -45,6 +59,13 @@ namespace OpenFleet.Unity
             _root.Clear();
             _root.pickingMode = PickingMode.Ignore;
             ProductionPanel.ApplyFont(_root);
+
+            // 路徑虛線畫在最底層（先加入的元素在下面），進度條蓋在它上面。
+            _routeLayer = new VisualElement { pickingMode = PickingMode.Ignore };
+            _routeLayer.style.position = Position.Absolute;
+            _routeLayer.style.left = _routeLayer.style.top = _routeLayer.style.right = _routeLayer.style.bottom = 0;
+            _routeLayer.generateVisualContent += DrawRoutes;
+            _root.Add(_routeLayer);
 
             _anchors.Clear();
             foreach (var anchor in FindObjectsByType<StationAnchor>(FindObjectsInactive.Exclude))
@@ -121,6 +142,120 @@ namespace OpenFleet.Unity
             }
 
             UpdateVehicleBars();
+
+            // 虛線會流動、車和攝影機也會動，所以每個 frame 重畫。
+            _routeLayer.MarkDirtyRepaint();
+        }
+
+        /// <summary>
+        /// 每台車從目前位置沿「接下來要經過的點」畫一條流動的虛線，終點畫一個圓圈。
+        /// 路徑來自車輛狀態（模擬器回報），這裡只負責畫，不自己規劃路線。
+        /// </summary>
+        private void DrawRoutes(MeshGenerationContext context)
+        {
+            if (_camera == null || fleetView == null || _root.panel == null)
+            {
+                return;
+            }
+
+            var painter = context.painter2D;
+            painter.strokeColor = RouteColor;
+            painter.fillColor = RouteColor;
+            painter.lineWidth = 3f;
+            painter.lineCap = LineCap.Round;
+
+            var period = dashLength + gapLength;
+            // 位移隨時間增加，虛線就往路徑的前方（目的地）移動。
+            var shift = Time.unscaledTime * dashFlowSpeed % period;
+
+            foreach (var vehicle in fleetView.Vehicles)
+            {
+                var state = vehicle.State;
+                if (state == null || state.Connectivity != VehicleConnectivity.Online || state.Route == null || state.Route.Count == 0)
+                {
+                    continue;
+                }
+
+                // 從畫面上的車（已平滑處理的位置）開始，接著是後端給的路徑點。
+                _routePoints.Clear();
+                _routePoints.Add(OnFloor(vehicle.transform.position));
+                foreach (var point in state.Route)
+                {
+                    _routePoints.Add(OnFloor(new Vector3((float)point.X, 0f, (float)point.Z)));
+                }
+
+                painter.BeginPath();
+                var travelled = 0f;
+                for (var i = 0; i < _routePoints.Count - 1; i++)
+                {
+                    var from = _routePoints[i];
+                    var to = _routePoints[i + 1];
+                    var length = Vector3.Distance(from, to);
+                    if (length < 0.001f)
+                    {
+                        continue;
+                    }
+
+                    // 沿這一段走，依「到起點的累計距離」決定哪些區間是實線。跨過轉角時圖樣不中斷。
+                    var position = 0f;
+                    while (position < length)
+                    {
+                        var phase = Mathf.Repeat(travelled + position - shift, period);
+                        if (phase < dashLength)
+                        {
+                            var end = Mathf.Min(position + dashLength - phase, length);
+                            if (ToPanel(Vector3.Lerp(from, to, position / length), out var a)
+                                && ToPanel(Vector3.Lerp(from, to, end / length), out var b))
+                            {
+                                painter.MoveTo(a);
+                                painter.LineTo(b);
+                            }
+
+                            position = end;
+                        }
+                        else
+                        {
+                            position += period - phase;
+                        }
+
+                        // 浮點誤差可能讓 position 剛好停在邊界上不前進。
+                        position += 0.0001f;
+                    }
+
+                    travelled += length;
+                }
+
+                painter.Stroke();
+
+                if (ToPanel(_routePoints[_routePoints.Count - 1], out var destination))
+                {
+                    painter.BeginPath();
+                    painter.Arc(destination, 7f, 0f, 360f);
+                    painter.Stroke();
+                    painter.BeginPath();
+                    painter.Arc(destination, 3f, 0f, 360f);
+                    painter.Fill();
+                }
+            }
+        }
+
+        private Vector3 OnFloor(Vector3 position)
+        {
+            position.y = routeHeight;
+            return position;
+        }
+
+        /// <summary>世界座標轉成面板座標；在攝影機後方時回傳 false（投影結果沒有意義）。</summary>
+        private bool ToPanel(Vector3 world, out Vector2 panel)
+        {
+            if (_camera.WorldToViewportPoint(world).z <= 0.05f)
+            {
+                panel = default;
+                return false;
+            }
+
+            panel = RuntimePanelUtils.CameraTransformWorldToPanel(_root.panel, world, _camera);
+            return true;
         }
 
         private void UpdateVehicleBars()

@@ -336,6 +336,37 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Time_scale_speeds_up_machining_and_tool_changes()
+    {
+        await ConfigureAsync(s => s.Steps[0].ToolLifePieces = 10);
+        await CreateLotAsync();
+        await DeliverAsync("agv-a");
+        await AdvanceOperationsAsync();
+
+        // 1 倍速 5 秒：每件 2 秒，做完 2 件，第 3 件做到一半。
+        _database.Time.Advance(TimeSpan.FromSeconds(5));
+        await AdvanceOperationsAsync();
+        Assert.Equal(2, (await StationAsync("rough")).Machining!.PiecesCompleted);
+
+        // 切到 10 倍：進行中的那一件從切換的時間重新計時（不會把之前的 5 秒也用 10 倍計算），之後每件 0.2 秒。
+        _database.Speed.Set(10);
+        _database.Time.Advance(TimeSpan.FromSeconds(1));
+        await AdvanceOperationsAsync();
+        Assert.Equal(7, (await StationAsync("rough")).Machining!.PiecesCompleted);
+
+        // 再 0.6 秒做到第 10 件，開始換刀；換刀 20 秒在 10 倍速下是 2 秒。
+        _database.Time.Advance(TimeSpan.FromSeconds(1.6));
+        await AdvanceOperationsAsync();
+        var rough = await StationAsync("rough");
+        Assert.Equal((10, true, 0.5), (rough.Machining!.PiecesCompleted, rough.Tool!.Changing, rough.Tool.ChangeProgress));
+
+        _database.Time.Advance(TimeSpan.FromSeconds(1.2));
+        await AdvanceOperationsAsync();
+        rough = await StationAsync("rough");
+        Assert.Equal((11, false), (rough.Machining!.PiecesCompleted, rough.Tool!.Changing));
+    }
+
+    [Fact]
     public async Task Machine_does_not_start_the_next_lot_until_the_finished_one_is_picked_up()
     {
         // 兩個 15 件的批次：第一批加工中時，備料區還放得下第二批。

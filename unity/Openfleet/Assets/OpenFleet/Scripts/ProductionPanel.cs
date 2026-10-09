@@ -23,6 +23,8 @@ namespace OpenFleet.Unity
         private static readonly Color PanelColor = new Color(0.10f, 0.12f, 0.15f, 0.92f);
         private static readonly Color MutedColor = new Color(0.65f, 0.69f, 0.75f);
         private static readonly Color ErrorColor = new Color(1f, 0.55f, 0.45f);
+        private static readonly double[] SpeedOptions = { 1, 5, 10 };
+        private static readonly Color SelectedColor = new Color(0.98f, 0.78f, 0.35f);
         private static readonly Color InputTextColor = new Color(0.08f, 0.09f, 0.11f);
         private static readonly Color OkColor = new Color(0.55f, 0.9f, 0.6f);
 
@@ -38,6 +40,7 @@ namespace OpenFleet.Unity
         private Label _quantityHint;
         private Label _status;
         private ProductionSettingsDto _settings;
+        private readonly List<(double Scale, Button Button)> _speedButtons = new List<(double, Button)>();
 
         /// <summary>滑鼠是否在面板上；攝影機用來避免捲動清單時同時縮放畫面。</summary>
         public static bool PointerOverPanel { get; private set; }
@@ -144,6 +147,19 @@ namespace OpenFleet.Unity
             settingButtons.Add(ActionButton("重新載入", () => StartCoroutine(LoadSettings())));
             settings.Add(settingButtons);
 
+            // 測試用：加快模擬時間。倍率由後端保存並轉給模擬器，行駛、上下料、加工、換刀一起變快。
+            _panel.Add(Heading("模擬速度（測試用）"));
+            var speedButtons = Row();
+            foreach (var scale in SpeedOptions)
+            {
+                var value = scale;
+                var button = ActionButton($"{value:0}×", () => StartCoroutine(SetSpeed(value)));
+                _speedButtons.Add((value, button));
+                speedButtons.Add(button);
+            }
+
+            _panel.Add(speedButtons);
+
             _panel.Add(Heading("批次"));
             var lotButtons = Row();
             lotButtons.Add(ActionButton("建立批次", () => StartCoroutine(Post("/api/lots", "{}", "已建立批次"))));
@@ -161,8 +177,49 @@ namespace OpenFleet.Unity
             _panel.Add(scroll);
         }
 
+        private IEnumerator LoadSpeed()
+        {
+            using (var request = UnityWebRequest.Get($"{Api}/api/simulation"))
+            {
+                yield return request.SendWebRequest();
+                if (request.result == UnityWebRequest.Result.Success)
+                {
+                    ShowSpeed(FleetJson.Deserialize<SimulationSettingsDto>(request.downloadHandler.text).TimeScale);
+                }
+            }
+        }
+
+        private IEnumerator SetSpeed(double scale)
+        {
+            var json = FleetJson.Serialize(new SimulationSettingsDto { TimeScale = scale });
+            using (var request = JsonRequest(UnityWebRequest.kHttpVerbPUT, "/api/simulation", json))
+            {
+                yield return request.SendWebRequest();
+                if (Succeeded(request, "切換模擬速度"))
+                {
+                    var applied = FleetJson.Deserialize<SimulationSettingsDto>(request.downloadHandler.text).TimeScale;
+                    ShowSpeed(applied);
+                    SetStatus(applied > 1 ? $"模擬時間 {applied:0} 倍速。後端重啟後會回到 1 倍。" : "模擬時間恢復正常速度。", OkColor);
+                }
+            }
+        }
+
+        /// <summary>目前的倍率用不同底色標出來；顯示的是後端回報的值，不是剛按下的按鈕。</summary>
+        private void ShowSpeed(double scale)
+        {
+            foreach (var (value, button) in _speedButtons)
+            {
+                var selected = Mathf.Approximately((float)value, (float)scale);
+                button.style.backgroundColor = selected ? SelectedColor : new StyleColor(StyleKeyword.Null);
+                button.style.unityFontStyleAndWeight = selected ? FontStyle.Bold : FontStyle.Normal;
+            }
+        }
+
         private IEnumerator LoadSettings()
         {
+            // 後端可能重啟過（倍率回到 1），所以每次重新載入都一起更新。
+            yield return LoadSpeed();
+
             using (var request = UnityWebRequest.Get($"{Api}/api/settings"))
             {
                 yield return request.SendWebRequest();

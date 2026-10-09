@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Production;
+using OpenFleet.Api.Simulation;
 using OpenFleet.Api.Transport;
 using OpenFleet.Messaging;
 
@@ -19,6 +20,7 @@ builder.Services.AddOptions<FleetOptions>().Bind(builder.Configuration.GetSectio
 builder.Services.AddOptions<ProductionOptions>().Bind(builder.Configuration.GetSection(ProductionOptions.SectionName));
 builder.Services.AddSingleton<StateChangeQueue>();
 builder.Services.AddSingleton<FleetStateStore>();
+builder.Services.AddSingleton<SimulationSpeed>();
 
 // 用到 DbContext 的服務也必須是 Scoped（Singleton 不能依賴 Scoped）。
 builder.Services.AddScoped<ProductionService>();
@@ -34,6 +36,7 @@ builder.Services.AddHostedService<VehicleLivenessMonitor>();
 builder.Services.AddHostedService<OutboxPublisher>();
 builder.Services.AddHostedService<DispatchWorker>();
 builder.Services.AddHostedService<ProductionWorker>();
+builder.Services.AddHostedService<SimulationSpeedPublisher>();
 
 var app = builder.Build();
 
@@ -49,6 +52,7 @@ app.MapGet("/health", (IMqttPublisher mqtt) => Results.Ok(new
 app.MapVehicleEndpoints();
 app.MapProductionEndpoints();
 app.MapTransportEndpoints();
+app.MapSimulationEndpoints();
 
 app.Run();
 

@@ -62,6 +62,7 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
             state.ActivityProgress = telemetry.ActivityProgress;
             state.LoadQuantity = telemetry.LoadQuantity;
             state.LoadCode = telemetry.LoadCode;
+            state.Route = Copy(telemetry.Route);
             MarkSeen(state);
             Publish(state);
             return TelemetryOutcome.Applied;
@@ -154,6 +155,8 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
 
     private static Position3 Copy(Position3 p) => new() { X = p.X, Y = p.Y, Z = p.Z };
 
+    private static List<Position3> Copy(List<Position3>? route) => route is null ? [] : route.Select(Copy).ToList();
+
     private static VehicleState Copy(VehicleState s) => new()
     {
         VehicleId = s.VehicleId,
@@ -165,6 +168,7 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
         ActivityProgress = s.ActivityProgress,
         LoadQuantity = s.LoadQuantity,
         LoadCode = s.LoadCode,
+        Route = Copy(s.Route),
         LastSeenAt = s.LastSeenAt,
         TelemetrySessionId = s.TelemetrySessionId,
         TelemetrySequence = s.TelemetrySequence,

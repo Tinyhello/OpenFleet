@@ -100,7 +100,9 @@ public class FleetStateStoreTests
 
         Assert.True(_changes.Reader.TryRead(out var queued));
         queued.Position.X = 42;
+        queued.Route.Add(new Position3 { X = 9 });
 
         Assert.Equal(1, _store.Find("agv")!.Position.X);
+        Assert.Empty(_store.Find("agv")!.Route);
     }
 }

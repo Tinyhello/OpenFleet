@@ -243,8 +243,15 @@ public sealed class OperationExecution
     public DateTimeOffset? PieceStartedAt { get; private set; }
     public DateTimeOffset? CompletedAt { get; private set; }
 
-    /// <summary>目前這一件預計完成的時間。</summary>
-    public DateTimeOffset NextPieceDueAt => PieceStartedAt!.Value.AddSeconds(SecondsPerPiece!.Value);
+    /// <summary>
+    /// 目前這一件預計完成的時間。<paramref name="timeScale"/> 是模擬時間倍率（測試用）；
+    /// 倍率在這一件開始之後才改變時，從 <paramref name="scaleChangedAt"/> 重新計時。
+    /// </summary>
+    public DateTimeOffset PieceDueAt(double timeScale, DateTimeOffset scaleChangedAt)
+    {
+        var from = PieceStartedAt!.Value > scaleChangedAt ? PieceStartedAt.Value : scaleChangedAt;
+        return from.AddSeconds(SecondsPerPiece!.Value / timeScale);
+    }
 
     public void Start(double secondsPerPiece, DateTimeOffset now)
     {

@@ -23,6 +23,7 @@ public sealed class SimulatedFleet
     private readonly Dictionary<Guid, List<MessageEnvelope<VehicleEvent>>> _replies = [];
     private readonly Queue<Guid> _replyOrder = new();
     private readonly Queue<OutgoingEvent> _outgoing = new();
+    private double _timeScale = 1;
 
     public SimulatedFleet(IOptions<SimulatorSettings> settings, IOptions<MqttSettings> mqtt, TimeProvider time)
     {
@@ -40,6 +41,16 @@ public sealed class SimulatedFleet
 
     public Guid SessionId { get; } = Guid.NewGuid();
 
+    /// <summary>
+    /// 測試用的模擬時間倍率（由後端經 MQTT 設定）：每一步推進的模擬時間＝實際經過時間 × 倍率，
+    /// 所以行駛與上下料一起變快。回報的車速仍是 1 倍時的數值。
+    /// </summary>
+    public double TimeScale
+    {
+        get => Volatile.Read(ref _timeScale);
+        set => Volatile.Write(ref _timeScale, value);
+    }
+
     public bool Contains(string vehicleId) => _vehicles.ContainsKey(vehicleId);
 
     /// <summary>推進模擬時間並產生每台車的遙測。斷線時也持續推進：車子不會因為網路斷掉而停下。</summary>
@@ -47,6 +58,7 @@ public sealed class SimulatedFleet
     {
         lock (_gate)
         {
+            elapsed *= TimeScale;
             var result = new List<(string, VehicleTelemetry)>(_vehicles.Count);
             foreach (var vehicle in _vehicles.Values)
             {
@@ -70,6 +82,7 @@ public sealed class SimulatedFleet
                     ActivityProgress = job is { Phase: JobPhase.Loading or JobPhase.Unloading } ? job.HandoverProgress : 0,
                     LoadQuantity = vehicle.LoadQuantity,
                     LoadCode = vehicle.LoadQuantity > 0 ? vehicle.LoadCode : null,
+                    Route = RouteAhead(vehicle),
                 }));
             }
 
@@ -175,6 +188,22 @@ public sealed class SimulatedFleet
         {
             _outgoing.TryDequeue(out _);
         }
+    }
+
+    /// <summary>
+    /// 接下來要走的路：行駛中是剩下的路徑；上料中預先給出上料完成後到卸料點的路徑；其他時候是空的。
+    /// </summary>
+    private List<Position3> RouteAhead(SimulatedVehicle vehicle)
+    {
+        var points = vehicle.Job switch
+        {
+            { Phase: JobPhase.Loading, Destination: { } destination } =>
+                _route.PlanPath(vehicle.X, vehicle.Z, destination.X, destination.Z),
+            { Phase: JobPhase.ToPickup or JobPhase.ToDestination } job => job.Waypoints,
+            _ => (IEnumerable<(double X, double Z)>)[],
+        };
+
+        return points.Select(p => new Position3 { X = p.X, Y = 0, Z = p.Z }).ToList();
     }
 
     /// <summary>

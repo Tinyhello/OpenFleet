@@ -117,7 +117,6 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.ToTable("Operations");
             e.Property(o => o.Id).ValueGeneratedNever();
             e.Property(o => o.StationCode).HasMaxLength(32);
-            e.Ignore(o => o.NextPieceDueAt);
             e.HasIndex(o => new { o.StationCode, o.Status });
             e.HasOne(o => o.Lot).WithMany().HasForeignKey(o => o.LotId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<Station>().WithMany().HasForeignKey(o => o.StationCode).OnDelete(DeleteBehavior.Restrict);

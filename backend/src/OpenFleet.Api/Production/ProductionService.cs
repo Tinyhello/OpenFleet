@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
+using OpenFleet.Api.Simulation;
 using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Production;
@@ -14,7 +15,7 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 批次、製程設定與加工進度（Scoped：跟著一個 DbContext）。
 /// 加工是後端內的簡化模擬：每站一台、先到先做、逐件計數、整批做完才放行；刀具到達壽命時機台暫停換刀。
 /// </summary>
-public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, ILogger<ProductionService> logger)
+public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed speed, TimeProvider time, ILogger<ProductionService> logger)
 {
     public const double MaxSecondsPerPiece = 600;
     public const double MaxHandoverSecondsPerPiece = 60;
@@ -142,6 +143,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
     public async Task<bool> AdvanceOperationsAsync(CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
+        var (timeScale, scaleChangedAt) = speed.Current;
         var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
         var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
         var tools = await db.StationTools.ToDictionaryAsync(t => t.StationCode, cancellationToken);
@@ -168,7 +170,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                     operation.ResumeAt(changeDue);
                 }
 
-                var pieceDue = operation.NextPieceDueAt;
+                var pieceDue = operation.PieceDueAt(timeScale, scaleChangedAt);
                 if (pieceDue > now)
                 {
                     break;
@@ -178,7 +180,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                 tool.CountPiece();
                 if (tool.PiecesSinceChange >= step.ToolLifePieces)
                 {
-                    tool.StartChange(pieceDue, settings.ToolChangeSeconds);
+                    tool.StartChange(pieceDue, settings.ToolChangeSeconds / timeScale);
                     logger.LogInformation("Station {Station}: tool reached {Pieces} piece(s); changing for {Seconds}s.",
                         tool.StationCode, tool.PiecesSinceChange, settings.ToolChangeSeconds);
                 }

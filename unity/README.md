@@ -22,7 +22,7 @@
 | `Assets/OpenFleet/Scripts/VehicleView.cs` | 單台車的顯示（掛在 Prefab 上）：依 `stateEpoch` + `version` 丟棄舊狀態，位置插值、燈條與警示燈依連線狀態變色 |
 | `Assets/OpenFleet/Scripts/FactoryCameraController.cs` | 攝影機：右鍵旋轉、中鍵／WASD 平移、滾輪縮放、F 重設、跟隨車輛 |
 | `Assets/OpenFleet/Scripts/ProductionPanel.cs` | P2 操作面板（UI Toolkit，介面用程式建立）：示範設定、建立批次、批次清單。只呼叫後端 HTTP API |
-| `Assets/OpenFleet/Scripts/StatusOverlay.cs` | 場景物件上的進度條（UI Toolkit，螢幕座標）：機台的備料、成品、加工與可收合的刀具列；車輛的上下料進度 |
+| `Assets/OpenFleet/Scripts/StatusOverlay.cs` | 場景物件上的進度條（UI Toolkit，螢幕座標）：機台的備料、成品、加工與可收合的刀具列；車輛的上下料進度；車輛前往目的地的流動虛線 |
 | `Assets/OpenFleet/Scripts/StationAnchor.cs` | 場景中的站點與後端站點代碼的對應；進度條的位置、備料區／成品區有料時要顯示的物件 |
 | `Assets/OpenFleet/Scripts/Billboard.cs` | 文字標籤面向攝影機 |
 | `Assets/OpenFleet/Editor/FactorySceneBuilder.cs` | 選單 **OpenFleet → Build Factory Scene**：產生材質、AGV Prefab 與 `Factory.unity`（會覆寫） |
@@ -43,11 +43,13 @@
 3. 左上面板顯示每台車的車型、連線狀態、`version` 與最近一次指令的回報；車上燈條綠色為 online、灰色為 offline。
 4. 右上是操作面板：
    - **示範設定**（預設收合，點標題展開）：用滑桿（或輸入框）調整批量、上下料每件秒數、換刀時間、各站的每件加工秒數與刀具壽命，按「套用」存進後端。超出範圍時後端會拒絕，原因顯示在面板上。
+   - **模擬速度（測試用）**：1×／5×／10×，把車輛行駛、上下料、加工、換刀一起加快。倍率存在後端，後端重啟後回到 1×。
    - **建立批次**：在原料倉建立一個批次，`agv-01` 會把它送到粗加工、精加工，最後送到淬火／回火站入口暫存。清單每秒更新一次。
    - **清除示範資料**：刪除所有批次與搬運紀錄，設定保留。
 
 5. 場景上的顯示：
    - **車輛**：標籤顯示「空車」或「載 N 件」，載貨時車上有料箱；上料、下料時車輛上方有進度條。載貨越多車速越慢。
+   - **路徑**：黃色的流動虛線從車輛沿走道畫到目的地（圓圈）；上料時會預先顯示接下來要去的卸料點。
    - **機台**（粗加工、精加工）：下方有備料、成品、加工三列進度條；前方右側的台子是備料區、左側是成品區，有料時台上才有料箱。按「刀具 ▼」展開刀具已加工件數；換刀時加工列會變成紅色的「換刀」。
    - **原料倉、暫存點**：有料時顯示件數。
 

@@ -139,6 +139,51 @@ public class SimulatedFleetTests
     }
 
     [Fact]
+    public void Telemetry_carries_the_route_ahead_and_previews_the_next_leg_while_loading()
+    {
+        Assert.Empty(Advance(1).Route);
+
+        _fleet.HandleCommand("agv", Transport(handoverSeconds: 2));
+
+        // 往取料點：走道上 (2, 0) 再到 (2, -1)；走過的點會從路徑裡消失。
+        Assert.Equal(new[] { (2d, 0d), (2d, -1d) }, Points(Advance(1)));
+        Assert.Equal(new[] { (2d, -1d) }, Points(Advance(1.5)));
+
+        // 上料中：預先顯示上料完成後要走到卸料點的路徑。
+        var loading = Advance(1.5);
+        Assert.Equal(VehicleActivity.Loading, loading.Activity);
+        Assert.Equal(new[] { (2d, 0d), (10d, 0d), (10d, 4d), (8d, 4d), (8d, 5d) }, Points(loading));
+
+        // 下料中與完成後沒有要去的地方。
+        Advance(1 + 16);
+        var unloading = Advance(1);
+        Assert.Equal(VehicleActivity.Unloading, unloading.Activity);
+        Assert.Empty(unloading.Route);
+        Assert.Empty(Advance(2).Route);
+
+        static IEnumerable<(double, double)> Points(VehicleTelemetry telemetry) => telemetry.Route.Select(p => (p.X, p.Z));
+    }
+
+    [Fact]
+    public void Time_scale_speeds_up_driving_and_handover_together()
+    {
+        _fleet.TimeScale = 10;
+        _fleet.HandleCommand("agv", Transport(handoverSeconds: 4));
+        DrainEvents();
+
+        // 到取料點 3 m 只要 0.3 秒；上料 4 秒只要 0.4 秒。回報的車速仍是 1 倍時的數值。
+        var arrived = Advance(0.3);
+        Assert.Equal((2, -1, 1d), (arrived.Position.X, arrived.Position.Z, arrived.Speed));
+
+        var loading = Advance(0.2);
+        Assert.Equal(VehicleActivity.Loading, loading.Activity);
+        Assert.Equal(0.5, loading.ActivityProgress, 6);
+
+        Advance(0.2);
+        Assert.Equal(new[] { VehicleEventType.Loaded }, DrainEvents().Select(e => e.EventType));
+    }
+
+    [Fact]
     public void Loaded_vehicle_is_slower_and_reports_its_load_and_handover_progress()
     {
         // 15 件（半載）：車速 0.75 m/s；交接時間由指令指定為 4 秒。

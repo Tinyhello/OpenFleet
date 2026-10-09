@@ -172,6 +172,35 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Time_scale_can_be_changed_and_is_published_retained_for_the_simulator()
+    {
+        Assert.Equal(1, (await _http.GetFromJsonAsync<SimulationSettingsDto>("/api/simulation", JsonDefaults.Options))!.TimeScale);
+
+        var tooFast = await _http.PutAsJsonAsync("/api/simulation", new SimulationSettingsDto { TimeScale = 1000 }, JsonDefaults.Options);
+        Assert.Equal(HttpStatusCode.BadRequest, tooFast.StatusCode);
+
+        var changed = await _http.PutAsJsonAsync("/api/simulation", new SimulationSettingsDto { TimeScale = 5 }, JsonDefaults.Options);
+        Assert.Equal(5, (await changed.Content.ReadFromJsonAsync<SimulationSettingsDto>(JsonDefaults.Options))!.TimeScale);
+
+        // 之後才訂閱的用戶端（例如晚啟動的模擬器）也拿得到目前的倍率。
+        var received = new ConcurrentQueue<string>();
+        using var client = await ConnectTestClientAsync();
+        client.ApplicationMessageReceivedAsync += e =>
+        {
+            received.Enqueue(e.ApplicationMessage.ConvertPayloadToString());
+            return Task.CompletedTask;
+        };
+        await EventuallyAsync(async () =>
+        {
+            await client.SubscribeAsync(Topics.SimulationState("demo"), MqttQualityOfServiceLevel.AtLeastOnce);
+            return received.Any(json => json.Contains("\"timeScale\":5"));
+        });
+
+        // 模擬器收到後套用同一個倍率。
+        await EventuallyAsync(() => Task.FromResult(_simulator.Services.GetRequiredService<SimulatedFleet>().TimeScale == 5));
+    }
+
+    [Fact]
     public async Task Invalid_settings_are_rejected_with_400()
     {
         var settings = (await _http.GetFromJsonAsync<ProductionSettingsDto>("/api/settings", JsonDefaults.Options))!;

@@ -6,6 +6,7 @@ using Npgsql;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Production;
+using OpenFleet.Api.Simulation;
 using OpenFleet.Api.Transport;
 using OpenFleet.Contracts;
 using OpenFleet.Messaging;
@@ -47,9 +48,12 @@ public sealed class TestDatabase
     private TestDatabase(string connectionString)
     {
         _options = new DbContextOptionsBuilder<OpenFleetDbContext>().UseNpgsql(connectionString).Options;
+        Speed = new SimulationSpeed(Time);
     }
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 10, 9, 8, 0, 0, TimeSpan.Zero));
+
+    public SimulationSpeed Speed { get; }
 
     public FleetOptions Fleet { get; } = new()
     {
@@ -71,7 +75,7 @@ public sealed class TestDatabase
     public Scope NewScope()
     {
         var db = NewContext();
-        var production = new ProductionService(db, Time, NullLogger<ProductionService>.Instance);
+        var production = new ProductionService(db, Speed, Time, NullLogger<ProductionService>.Instance);
         var transport = new TransportService(db, production, Options.Create(Fleet),
             Options.Create(new MqttSettings { ProducerId = "backend", FactoryId = "demo" }), Time, NullLogger<TransportService>.Instance);
         return new Scope(db, production, transport, new VehicleEventProcessor(db, transport, Time));

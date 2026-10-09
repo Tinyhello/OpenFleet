@@ -48,5 +48,14 @@ GET {{api}}/api/transport-tasks
 ### 站點
 GET {{api}}/api/stations
 
+### 測試用：模擬時間 10 倍速（1 = 正常；後端重啟後回到 1）
+PUT {{api}}/api/simulation
+Content-Type: application/json
+
+{ "timeScale": 10 }
+
+### 目前的模擬時間倍率
+GET {{api}}/api/simulation
+
 ### 清除示範資料（批次、搬運、Outbox、Inbox）
 POST {{api}}/api/demo/reset

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace OpenFleet.Contracts
 {
@@ -115,6 +116,12 @@ namespace OpenFleet.Contracts
 
         /// <summary>車上的內容（零件代碼）；空車時為 null。</summary>
         public string? LoadCode { get; set; }
+
+        /// <summary>
+        /// 接下來要依序經過的點，最後一點是這一段的目的地；沒有要去的地方時是空的。
+        /// 行駛中是剩下的路徑；上料中是上料完成後要走到卸料點的路徑。只用於顯示。
+        /// </summary>
+        public List<Position3> Route { get; set; } = new List<Position3>();
     }
 
     /// <summary>車型。由後端的車輛設定決定；設定裡沒有的車輛為 Unknown。</summary>
@@ -147,6 +154,9 @@ namespace OpenFleet.Contracts
         public double ActivityProgress { get; set; }
         public int LoadQuantity { get; set; }
         public string? LoadCode { get; set; }
+
+        /// <summary>接下來要依序經過的點，最後一點是目的地（見 <see cref="VehicleTelemetry.Route"/>）。</summary>
+        public List<Position3> Route { get; set; } = new List<Position3>();
         public DateTimeOffset LastSeenAt { get; set; }
         public Guid TelemetrySessionId { get; set; }
         public long TelemetrySequence { get; set; }
