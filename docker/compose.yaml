@@ -1,0 +1,18 @@
+# P1 開發環境：只有 MQTT Broker。PostgreSQL 在 P2 加入。
+# 啟動：docker compose -f docker/compose.yaml up -d
+name: openfleet
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: openfleet-mosquitto
+    ports:
+      - "1883:1883"   # MQTT over TCP：.NET 後端、模擬器、Unity 桌面版
+      - "9001:9001"   # MQTT over WebSocket：保留給 Unity WebGL／網頁看板評估
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    restart: unless-stopped
+
+volumes:
+  mosquitto-data:

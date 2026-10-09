@@ -1,0 +1,106 @@
+using System.Collections.Generic;
+using OpenFleet.Contracts;
+using UnityEditor;
+using UnityEngine;
+using static OpenFleet.Unity.Editor.ModelKit;
+
+namespace OpenFleet.Unity.Editor
+{
+    /// <summary>AGV 模型。原點在車底中心，+Z 為車頭（VehicleView 以行進方向轉向）。</summary>
+    internal static class VehicleModels
+    {
+        /// <summary>大型車：車床物料（單件、料箱、托盤），頂部為頂升平台。</summary>
+        public static GameObject BuildLarge()
+        {
+            var root = new GameObject("AGV_Large").transform;
+            var status = new List<Renderer>();
+
+            Box(root, "Chassis", new Vector3(0f, 0.24f, 0f), new Vector3(1.1f, 0.3f, 1.6f), Palette.AgvChassis);
+            Box(root, "Lift Deck", new Vector3(0f, 0.42f, 0f), new Vector3(1.0f, 0.06f, 1.4f), Palette.AgvLargeDeck);
+            Box(root, "Bumper", new Vector3(0f, 0.18f, 0.82f), new Vector3(1.0f, 0.1f, 0.05f), Palette.LaneLine);
+            Box(root, "Bumper", new Vector3(0f, 0.18f, -0.82f), new Vector3(1.0f, 0.1f, 0.05f), Palette.LaneLine);
+            Cylinder(root, "Lidar", new Vector3(0f, 0.5f, 0.68f), 0.14f, 0.1f, Palette.Sensor);
+            Wheels(root, 0.5f, 0.55f, 0.24f, 0.1f);
+
+            status.Add(Box(root, "Status Strip L", new Vector3(-0.555f, 0.28f, 0f), new Vector3(0.02f, 0.05f, 1.3f), Palette.Status));
+            status.Add(Box(root, "Status Strip R", new Vector3(0.555f, 0.28f, 0f), new Vector3(0.02f, 0.05f, 1.3f), Palette.Status));
+            status.Add(Cylinder(root, "Beacon", new Vector3(0.38f, 0.52f, -0.6f), 0.1f, 0.14f, Palette.Status));
+
+            var label = Label(root, "agv", new Vector3(0f, 0.95f, 0f), 0.05f, Color.white);
+            return Finish(root, VehicleType.Large, status, label);
+        }
+
+        /// <summary>小型車：只配送刀具，頂部為刀把架。</summary>
+        public static GameObject BuildSmall()
+        {
+            var root = new GameObject("AGV_Small").transform;
+            var status = new List<Renderer>();
+
+            Box(root, "Body", new Vector3(0f, 0.2f, 0f), new Vector3(0.55f, 0.26f, 0.8f), Palette.AgvSmallBody);
+            Box(root, "Rim", new Vector3(0f, 0.34f, 0f), new Vector3(0.56f, 0.03f, 0.81f), Palette.AgvSmallAccent);
+            Box(root, "Tool Tray", new Vector3(0f, 0.37f, -0.06f), new Vector3(0.45f, 0.03f, 0.52f), Palette.Steel);
+            for (var ix = 0; ix < 2; ix++)
+            {
+                for (var iz = 0; iz < 3; iz++)
+                {
+                    Cylinder(root, "Tool Holder", new Vector3(-0.1f + ix * 0.2f, 0.45f, -0.22f + iz * 0.16f), 0.07f, 0.14f, Palette.MachineDark);
+                }
+            }
+
+            Cylinder(root, "Lidar", new Vector3(0f, 0.4f, 0.32f), 0.1f, 0.06f, Palette.Sensor);
+            Wheels(root, 0.26f, 0.27f, 0.16f, 0.06f);
+
+            status.Add(Box(root, "Status Strip L", new Vector3(-0.28f, 0.22f, 0f), new Vector3(0.02f, 0.04f, 0.6f), Palette.Status));
+            status.Add(Box(root, "Status Strip R", new Vector3(0.28f, 0.22f, 0f), new Vector3(0.02f, 0.04f, 0.6f), Palette.Status));
+            status.Add(Cylinder(root, "Beacon", new Vector3(0.19f, 0.44f, -0.34f), 0.07f, 0.1f, Palette.Status));
+
+            var label = Label(root, "agv", new Vector3(0f, 0.75f, 0f), 0.04f, Color.white);
+            return Finish(root, VehicleType.Small, status, label);
+        }
+
+        /// <summary>後端設定裡沒有車型的車輛：用明顯不同的顏色提醒設定缺漏。</summary>
+        public static GameObject BuildUnknown()
+        {
+            var root = new GameObject("AGV_Unknown").transform;
+            var status = new List<Renderer>();
+
+            Box(root, "Body", new Vector3(0f, 0.25f, 0f), new Vector3(0.8f, 0.4f, 1.1f), Palette.AgvUnknown);
+            Cylinder(root, "Lidar", new Vector3(0f, 0.5f, 0.45f), 0.12f, 0.08f, Palette.Sensor);
+            Wheels(root, 0.38f, 0.38f, 0.18f, 0.08f);
+            status.Add(Box(root, "Status Strip L", new Vector3(-0.405f, 0.3f, 0f), new Vector3(0.02f, 0.05f, 0.9f), Palette.Status));
+            status.Add(Box(root, "Status Strip R", new Vector3(0.405f, 0.3f, 0f), new Vector3(0.02f, 0.05f, 0.9f), Palette.Status));
+            status.Add(Cylinder(root, "Beacon", new Vector3(0f, 0.53f, -0.35f), 0.1f, 0.14f, Palette.Status));
+
+            var label = Label(root, "agv", new Vector3(0f, 0.9f, 0f), 0.05f, Color.white);
+            return Finish(root, VehicleType.Unknown, status, label);
+        }
+
+        private static void Wheels(Transform root, float x, float z, float diameter, float width)
+        {
+            foreach (var sx in new[] { -x, x })
+            {
+                foreach (var sz in new[] { -z, z })
+                {
+                    Cylinder(root, "Wheel", new Vector3(sx, diameter / 2f, sz), diameter, width, Palette.Rubber, new Vector3(0f, 0f, 90f));
+                }
+            }
+        }
+
+        private static GameObject Finish(Transform root, VehicleType type, List<Renderer> status, TextMesh label)
+        {
+            var view = root.gameObject.AddComponent<VehicleView>();
+            var so = new SerializedObject(view);
+            so.FindProperty("vehicleType").enumValueIndex = (int)type;
+            var array = so.FindProperty("statusRenderers");
+            array.arraySize = status.Count;
+            for (var i = 0; i < status.Count; i++)
+            {
+                array.GetArrayElementAtIndex(i).objectReferenceValue = status[i];
+            }
+
+            so.FindProperty("label").objectReferenceValue = label;
+            so.ApplyModifiedPropertiesWithoutUndo();
+            return root.gameObject;
+        }
+    }
+}

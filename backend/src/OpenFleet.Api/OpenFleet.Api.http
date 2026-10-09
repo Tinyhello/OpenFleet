@@ -1,0 +1,13 @@
+@api = http://localhost:5229
+
+### 健康檢查（mqttConnected 應為 true）
+GET {{api}}/health
+
+### 車輛快照（模擬器啟動後會出現 agv-01、agv-02）
+GET {{api}}/api/vehicles
+
+### 單一車輛
+GET {{api}}/api/vehicles/agv-01
+
+### 送出 Ping 指令；之後 GET 單一車輛，lastCommandEvent 應為 completed
+POST {{api}}/api/vehicles/agv-01/ping

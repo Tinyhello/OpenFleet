@@ -1,0 +1,28 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+
+# Unity（unity/Openfleet）
+/unity/Openfleet/[Ll]ibrary/
+/unity/Openfleet/[Tt]emp/
+/unity/Openfleet/[Ll]ogs/
+/unity/Openfleet/[Bb]uilds/
+/unity/Openfleet/[Uu]ser[Ss]ettings/
+/unity/Openfleet/[Oo]bj/
+/unity/Openfleet/*.csproj
+/unity/Openfleet/*.sln
+/unity/Openfleet/*.slnx
+/unity/Openfleet/.vscode/
+/unity/Openfleet/.utmp/
+
+# 本機工具與作業系統
+.claude/
+.idea/
+.DS_Store
+Thumbs.db
+/unity/Openfleet/Assets/_Recovery/
+/unity/Openfleet/Assets/_Recovery.meta

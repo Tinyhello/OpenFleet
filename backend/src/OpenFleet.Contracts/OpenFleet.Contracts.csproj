@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    共用 JSON 契約。刻意使用 netstandard2.1 + C# 9 且不依賴任何序列化套件，
+    讓 Unity 6 可以直接引用同一份原始碼／DLL；後端用 System.Text.Json，Unity 端可用 Newtonsoft.Json。
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+  </PropertyGroup>
+
+</Project>
