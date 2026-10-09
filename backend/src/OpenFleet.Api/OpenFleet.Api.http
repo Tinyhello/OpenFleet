@@ -3,7 +3,7 @@
 ### 健康檢查（mqttConnected 應為 true）
 GET {{api}}/health
 
-### 車輛快照（模擬器啟動後會出現 agv-01、agv-02）
+### 車輛快照（模擬器啟動後會出現 agv-01～agv-03）
 GET {{api}}/api/vehicles
 
 ### 單一車輛
@@ -11,3 +11,34 @@ GET {{api}}/api/vehicles/agv-01
 
 ### 送出 Ping 指令；之後 GET 單一車輛，lastCommandEvent 應為 completed
 POST {{api}}/api/vehicles/agv-01/ping
+
+### P2：示範設定（批量、各站加工時間）
+GET {{api}}/api/settings
+
+### 修改設定：批量 20、粗加工 15 秒
+PUT {{api}}/api/settings
+Content-Type: application/json
+
+{ "lotQuantity": 20, "steps": [ { "sequence": 1, "durationSeconds": 15 } ] }
+
+### 建立批次（模擬收料）；省略 quantity 時使用設定的批量
+# @name lot
+POST {{api}}/api/lots
+Content-Type: application/json
+
+{}
+
+### 追蹤剛建立的批次：位置異動、加工紀錄、搬運任務
+GET {{api}}/api/lots/{{lot.response.body.id}}
+
+### 批次清單
+GET {{api}}/api/lots
+
+### 搬運任務
+GET {{api}}/api/transport-tasks
+
+### 站點
+GET {{api}}/api/stations
+
+### 清除示範資料（批次、搬運、Outbox、Inbox）
+POST {{api}}/api/demo/reset

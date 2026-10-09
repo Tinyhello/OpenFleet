@@ -1,6 +1,7 @@
-# OpenFleet Unity 顯示端（P1）
+# OpenFleet Unity 顯示端
 
-P1 目標：Windows 桌面版能透過 MQTT 收到後端的車輛狀態、斷線後自動重連，並把背景執行緒收到的訊息切回主執行緒更新場景。
+- P1：Windows 桌面版透過 MQTT 收到後端的車輛狀態、斷線後自動重連，並把背景執行緒收到的訊息切回主執行緒更新場景。
+- P2：新增操作面板（UI Toolkit），可以修改示範設定、建立批次並查看批次目前的狀態與位置。
 
 ## 環境
 
@@ -20,8 +21,11 @@ P1 目標：Windows 桌面版能透過 MQTT 收到後端的車輛狀態、斷線
 | `Assets/OpenFleet/Scripts/FleetView.cs` | 每次連上 Broker 就取一次 HTTP 快照；依 `vehicleType` 選用 AGV Prefab；簡易面板可送 Ping、跟隨車輛 |
 | `Assets/OpenFleet/Scripts/VehicleView.cs` | 單台車的顯示（掛在 Prefab 上）：依 `stateEpoch` + `version` 丟棄舊狀態，位置插值、燈條與警示燈依連線狀態變色 |
 | `Assets/OpenFleet/Scripts/FactoryCameraController.cs` | 攝影機：右鍵旋轉、中鍵／WASD 平移、滾輪縮放、F 重設、跟隨車輛 |
+| `Assets/OpenFleet/Scripts/ProductionPanel.cs` | P2 操作面板（UI Toolkit，介面用程式建立）：示範設定、建立批次、批次清單。只呼叫後端 HTTP API |
 | `Assets/OpenFleet/Scripts/Billboard.cs` | 文字標籤面向攝影機 |
 | `Assets/OpenFleet/Editor/FactorySceneBuilder.cs` | 選單 **OpenFleet → Build Factory Scene**：產生材質、AGV Prefab 與 `Factory.unity`（會覆寫） |
+| `Assets/OpenFleet/Editor/PlayerBuilder.cs` | 選單 **OpenFleet → Build Windows Player**：重建場景並建置 `Builds/Windows/OpenFleet.exe` |
+| `Assets/OpenFleet/UI/` | UI Toolkit 的 PanelSettings 與主題（由 Build Factory Scene 產生） |
 | `Assets/OpenFleet/Editor/FactoryLayout.cs` | 暫定佈局：站點位置、環狀走道（須與模擬器 `Simulator:Route` 相同） |
 | `Assets/OpenFleet/Editor/StationModels.cs`、`VehicleModels.cs` | 用基本幾何組裝的站點與 AGV 模型 |
 | `Assets/OpenFleet/Editor/Palette.cs` | 所有材質顏色 |
@@ -34,7 +38,13 @@ P1 目標：Windows 桌面版能透過 MQTT 收到後端的車輛狀態、斷線
 
 1. 啟動 Broker、後端與模擬器（見 [backend/README.md](../backend/README.md)）。後端要用 `--launch-profile http`（`http://localhost:5229`）。
 2. 在 Unity 開啟 `Assets/OpenFleet/Scenes/Factory.unity` 按 Play，或 build Windows 版後執行。
-3. 左上面板顯示每台車的車型、連線狀態、`version` 與最近一次 Ping 結果；車上燈條綠色為 online、灰色為 offline。
+3. 左上面板顯示每台車的車型、連線狀態、`version` 與最近一次指令的回報；車上燈條綠色為 online、灰色為 offline。
+4. 右上是操作面板：
+   - **示範設定**：用滑桿（或輸入框）調整批量與各站加工時間，按「套用」存進後端。超出範圍時後端會拒絕，原因顯示在面板上。
+   - **建立批次**：在原料倉建立一個批次，`agv-01` 會把它送到粗加工、精加工，最後送到淬火／回火站入口暫存。清單每秒更新一次。
+   - **清除示範資料**：刪除所有批次與搬運紀錄，設定保留。
+
+中文輸入法開啟時，數字鍵會被輸入法攔截，輸入框打不進數字；請用滑桿，或先切到英數模式。
 
 修改模型、顏色或佈局後，執行選單 **OpenFleet → Build Factory Scene** 重建場景。
 
@@ -42,6 +52,8 @@ P1 目標：Windows 桌面版能透過 MQTT 收到後端的車輛狀態、斷線
 
 - 暫定佈局（每道工序一站）：下排由左到右為原料倉、粗加工、精加工、淬火／回火、電鍍；上排由右到左為拋光、品管、包裝、出貨、刀具庫。走道內側是充電維護區與載具存放區。
 - 每站前方的青色方框是交接點。走道只畫邊線，沒有方向箭頭，因為交通規則尚未決定。
+- 車輛平常停在充電維護區的車位，有搬運任務才沿走道移動；沒有任何交通規則，車輛之間不會避讓。
+- 車輛載貨與空車看起來一樣，站點也不顯示目前有哪些批次；批次的位置看右上面板。
 - AGV：大型車（橘色頂升平台）、小型車（白色車身、刀把架）、未知車型（紫色，表示後端設定缺漏）。
 
 連線設定（host、port、factoryId、API 位址）在場景中 `OpenFleet` 物件的 Inspector 調整。

@@ -29,6 +29,9 @@ namespace OpenFleet.Unity
         private FleetMqttClient _mqtt;
         private string _status = "Connecting...";
 
+        /// <summary>後端 HTTP API 的位址；其他面板共用這一個設定。</summary>
+        public string ApiBaseUrl => apiBaseUrl;
+
         private void Awake()
         {
             _mqtt = GetComponent<FleetMqttClient>();

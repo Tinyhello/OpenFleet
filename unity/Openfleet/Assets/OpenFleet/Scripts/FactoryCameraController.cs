@@ -59,7 +59,8 @@ namespace OpenFleet.Unity
                     Pan(-delta * distance * 0.0015f);
                 }
 
-                var scroll = mouse.scroll.ReadValue().y;
+                // 滑鼠在操作面板上時，滾輪是用來捲動清單的，不縮放畫面。
+                var scroll = ProductionPanel.PointerOverPanel ? 0f : mouse.scroll.ReadValue().y;
                 if (!Mathf.Approximately(scroll, 0f))
                 {
                     distance = Mathf.Clamp(distance * (scroll > 0f ? 0.9f : 1.1f), minDistance, maxDistance);

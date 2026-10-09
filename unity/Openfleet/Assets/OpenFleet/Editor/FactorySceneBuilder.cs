@@ -15,7 +15,8 @@ namespace OpenFleet.Unity.Editor
     {
         private const string Root = "Assets/OpenFleet";
         private const string PrefabFolder = Root + "/Prefabs";
-        private const string ScenePath = Root + "/Scenes/Factory.unity";
+        internal const string ScenePath = Root + "/Scenes/Factory.unity";
+        private const string UiFolder = Root + "/UI";
 
         [MenuItem("OpenFleet/Build Factory Scene")]
         public static void Build()
@@ -26,6 +27,8 @@ namespace OpenFleet.Unity.Editor
             var largePath = SavePrefab(VehicleModels.BuildLarge());
             var smallPath = SavePrefab(VehicleModels.BuildSmall());
             var unknownPath = SavePrefab(VehicleModels.BuildUnknown());
+
+            var panelPath = SavePanelSettings();
 
             // NewScene 會卸載未使用的資源，之前拿到的 Prefab 參考會失效，所以開新場景後再依路徑載入。
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
@@ -65,6 +68,18 @@ namespace OpenFleet.Unity.Editor
             if (large == null || small == null || unknown == null)
             {
                 Debug.LogError("[OpenFleet] AGV prefabs could not be loaded; FleetView references are missing.");
+            }
+
+            // P2 操作面板（UI Toolkit）。介面由 ProductionPanel 用程式建立，這裡只提供 PanelSettings。
+            var document = fleet.AddComponent<UnityEngine.UIElements.UIDocument>();
+            document.panelSettings = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(panelPath);
+            var panel = fleet.AddComponent<ProductionPanel>();
+            var panelObject = new SerializedObject(panel);
+            panelObject.FindProperty("fleetView").objectReferenceValue = view;
+            panelObject.ApplyModifiedPropertiesWithoutUndo();
+            if (document.panelSettings == null || document.panelSettings.themeStyleSheet == null)
+            {
+                Debug.LogError("[OpenFleet] UI Toolkit panel settings or theme could not be loaded; the production panel will not render.");
             }
 
             EditorSceneManager.SaveScene(scene, ScenePath);
@@ -210,6 +225,31 @@ namespace OpenFleet.Unity.Editor
                     GameObjectUtility.SetStaticEditorFlags(t.gameObject, StaticEditorFlags.BatchingStatic);
                 }
             }
+        }
+
+        /// <summary>
+        /// 執行期的 UI Toolkit 需要 PanelSettings 與主題樣式表；主題直接引用 Unity 內建的預設執行期主題。
+        /// </summary>
+        private static string SavePanelSettings()
+        {
+            EnsureFolder(UiFolder);
+            var themePath = UiFolder + "/OpenFleetTheme.tss";
+            File.WriteAllText(themePath, "@import url(\"unity-theme://default\");\n");
+            AssetDatabase.ImportAsset(themePath, ImportAssetOptions.ForceUpdate);
+
+            var path = UiFolder + "/OpenFleetPanel.asset";
+            var settings = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(path);
+            if (settings == null)
+            {
+                settings = ScriptableObject.CreateInstance<UnityEngine.UIElements.PanelSettings>();
+                AssetDatabase.CreateAsset(settings, path);
+            }
+
+            settings.themeStyleSheet = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.ThemeStyleSheet>(themePath);
+            settings.scaleMode = UnityEngine.UIElements.PanelScaleMode.ConstantPixelSize;
+            EditorUtility.SetDirty(settings);
+            AssetDatabase.SaveAssets();
+            return path;
         }
 
         private static string SavePrefab(GameObject go)
