@@ -55,6 +55,9 @@ public sealed class TransportService(
         }
 
         var stations = await db.Stations.AsNoTracking().ToDictionaryAsync(s => s.Code, cancellationToken);
+        var handoverSecondsPerPiece = await db.ProductionSettings.AsNoTracking()
+            .Select(s => s.HandoverSecondsPerPiece)
+            .SingleAsync(cancellationToken);
         var options = fleetOptions.Value;
         var dispatched = 0;
 
@@ -82,7 +85,7 @@ public sealed class TransportService(
             var attempt = await db.Assignments.CountAsync(a => a.TaskId == task.Id, cancellationToken) + 1;
             var assignment = task.Assign(vehicle.VehicleId, attempt, now, options.CommandTimeToLive);
             db.Assignments.Add(assignment);
-            db.OutboxMessages.Add(CreateCommandMessage(assignment, pickup, stations[task.ToStationCode], now));
+            db.OutboxMessages.Add(CreateCommandMessage(assignment, task, pickup, stations[task.ToStationCode], handoverSecondsPerPiece, now));
 
             try
             {
@@ -225,8 +228,8 @@ public sealed class TransportService(
     }
 
     /// <summary>
-    /// 目的站的待加工料容量夠不夠。已承諾量＝已在站內排隊的數量＋已派工、還沒卸料的數量；
-    /// 每一筆只算一次（卸料後任務完成，數量就改算在站內）。
+    /// 目的站的待加工料容量夠不夠。已承諾量＝備料區現有的數量（排隊中的批次＋加工中批次還沒做的件數）
+    /// ＋已派工、還沒卸料的數量；每一筆只算一次（卸料後任務完成，數量就改算在站內）。
     /// </summary>
     private async Task<bool> HasRoomAsync(Station destination, int quantity, CancellationToken cancellationToken)
     {
@@ -238,15 +241,19 @@ public sealed class TransportService(
         var waiting = await db.Lots
             .Where(l => l.StationCode == destination.Code && l.Status == LotStatus.Queued)
             .SumAsync(l => l.Quantity, cancellationToken);
+        var remaining = await db.Operations
+            .Where(o => o.StationCode == destination.Code && o.Status == OperationStatus.Running)
+            .SumAsync(o => o.Quantity - o.PiecesCompleted, cancellationToken);
         var inbound = await db.TransportTasks
             .Where(t => t.ToStationCode == destination.Code
                 && (t.Status == TransportTaskStatus.Assigned || t.Status == TransportTaskStatus.Executing))
             .SumAsync(t => t.Quantity, cancellationToken);
 
-        return waiting + inbound + quantity <= capacity;
+        return waiting + remaining + inbound + quantity <= capacity;
     }
 
-    private OutboxMessage CreateCommandMessage(Assignment assignment, Station pickup, Station destination, DateTimeOffset now)
+    private OutboxMessage CreateCommandMessage(
+        Assignment assignment, TransportTask task, Station pickup, Station destination, double handoverSecondsPerPiece, DateTimeOffset now)
     {
         var command = new VehicleCommand
         {
@@ -256,6 +263,10 @@ public sealed class TransportService(
             ExpiresAt = assignment.ExpiresAt,
             Pickup = new Position3 { X = pickup.HandoffX, Z = pickup.HandoffZ },
             Destination = new Position3 { X = destination.HandoffX, Z = destination.HandoffZ },
+            // 件數與內容讓設備決定載貨時的車速；交接時間依件數計算，取料與卸料各一次。
+            LoadQuantity = task.Quantity,
+            LoadCode = task.Lot.PartCode,
+            HandoverSeconds = task.Quantity * handoverSecondsPerPiece,
         };
         var envelope = MessageEnvelope.Create(mqtt.Value.ProducerId, command, now);
 

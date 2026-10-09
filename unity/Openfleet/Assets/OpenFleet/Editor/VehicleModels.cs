@@ -26,8 +26,14 @@ namespace OpenFleet.Unity.Editor
             status.Add(Box(root, "Status Strip R", new Vector3(0.555f, 0.28f, 0f), new Vector3(0.02f, 0.05f, 1.3f), Palette.Status));
             status.Add(Cylinder(root, "Beacon", new Vector3(0.38f, 0.52f, -0.6f), 0.1f, 0.14f, Palette.Status));
 
-            var label = Label(root, "agv", new Vector3(0f, 0.95f, 0f), 0.05f, Color.white);
-            return Finish(root, VehicleType.Large, status, label);
+            // 載貨時才顯示：一個料箱加上裡面的工件。件數由標籤文字表示，物件本身不隨數量變化。
+            var load = Group(root, "Load", new Vector3(0f, 0.45f, -0.05f));
+            Box(load, "Bin", new Vector3(0f, 0.17f, 0f), new Vector3(0.85f, 0.34f, 1.1f), Palette.Bin);
+            Box(load, "Parts", new Vector3(0f, 0.35f, 0f), new Vector3(0.75f, 0.04f, 1.0f), Palette.Steel);
+            load.gameObject.SetActive(false);
+
+            var label = Label(root, "agv", new Vector3(0f, 1.15f, 0f), 0.05f, Color.white);
+            return Finish(root, VehicleType.Large, status, label, load.gameObject);
         }
 
         /// <summary>小型車：只配送刀具，頂部為刀把架。</summary>
@@ -86,7 +92,7 @@ namespace OpenFleet.Unity.Editor
             }
         }
 
-        private static GameObject Finish(Transform root, VehicleType type, List<Renderer> status, TextMesh label)
+        private static GameObject Finish(Transform root, VehicleType type, List<Renderer> status, TextMesh label, GameObject loadVisual = null)
         {
             var view = root.gameObject.AddComponent<VehicleView>();
             var so = new SerializedObject(view);
@@ -99,6 +105,7 @@ namespace OpenFleet.Unity.Editor
             }
 
             so.FindProperty("label").objectReferenceValue = label;
+            so.FindProperty("loadVisual").objectReferenceValue = loadVisual;
             so.ApplyModifiedPropertiesWithoutUndo();
             return root.gameObject;
         }

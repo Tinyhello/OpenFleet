@@ -58,6 +58,10 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
             state.TelemetrySequence = telemetry.Sequence;
             state.Position = Copy(telemetry.Position);
             state.Speed = telemetry.Speed;
+            state.Activity = telemetry.Activity;
+            state.ActivityProgress = telemetry.ActivityProgress;
+            state.LoadQuantity = telemetry.LoadQuantity;
+            state.LoadCode = telemetry.LoadCode;
             MarkSeen(state);
             Publish(state);
             return TelemetryOutcome.Applied;
@@ -157,6 +161,10 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
         Connectivity = s.Connectivity,
         Position = Copy(s.Position),
         Speed = s.Speed,
+        Activity = s.Activity,
+        ActivityProgress = s.ActivityProgress,
+        LoadQuantity = s.LoadQuantity,
+        LoadCode = s.LoadCode,
         LastSeenAt = s.LastSeenAt,
         TelemetrySessionId = s.TelemetrySessionId,
         TelemetrySequence = s.TelemetrySequence,

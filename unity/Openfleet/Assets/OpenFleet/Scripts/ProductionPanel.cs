@@ -23,17 +23,18 @@ namespace OpenFleet.Unity
         private static readonly Color PanelColor = new Color(0.10f, 0.12f, 0.15f, 0.92f);
         private static readonly Color MutedColor = new Color(0.65f, 0.69f, 0.75f);
         private static readonly Color ErrorColor = new Color(1f, 0.55f, 0.45f);
-        private const int MaxSliderSeconds = 120;
         private static readonly Color InputTextColor = new Color(0.08f, 0.09f, 0.11f);
         private static readonly Color OkColor = new Color(0.55f, 0.9f, 0.6f);
 
-        private readonly List<(ProcessStepDto Step, SliderInt Field)> _stepFields = new List<(ProcessStepDto, SliderInt)>();
+        private readonly List<(ProcessStepDto Step, SliderInt Seconds, SliderInt ToolLife)> _stepFields = new List<(ProcessStepDto, SliderInt, SliderInt)>();
         private readonly Dictionary<string, string> _stationNames = new Dictionary<string, string>();
         private VisualElement _root;
         private VisualElement _panel;
         private VisualElement _stepRows;
         private VisualElement _lotRows;
         private SliderInt _lotQuantity;
+        private SliderInt _handoverSeconds;
+        private SliderInt _toolChangeSeconds;
         private Label _quantityHint;
         private Label _status;
         private ProductionSettingsDto _settings;
@@ -80,7 +81,7 @@ namespace OpenFleet.Unity
         /// UI Toolkit 的預設字型沒有中文字。和場景標籤一樣改用作業系統的中文字型；
         /// WebGL 沒有系統字型，屆時要改成隨專案附帶的字型。
         /// </summary>
-        private static void ApplyFont(VisualElement root)
+        public static void ApplyFont(VisualElement root)
         {
             var font = Font.CreateDynamicFontFromOSFont(
                 new[] { "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC" }, 16);
@@ -107,22 +108,41 @@ namespace OpenFleet.Unity
             s.borderTopLeftRadius = s.borderTopRightRadius = s.borderBottomLeftRadius = s.borderBottomRightRadius = 6;
             _root.Add(_panel);
 
-            _panel.Add(Heading("示範設定"));
-            _panel.Add(Hint("暫用數值，尚未定案；套用後存進後端資料庫。"));
+            // 設定預設收合，平常只留批次清單，不擋住場景；點標題展開。
+            var settings = new Foldout { text = "示範設定（點此展開）", value = false };
+            settings.RegisterValueChangedCallback(e =>
+            {
+                if (e.target == settings)
+                {
+                    settings.text = e.newValue ? "示範設定" : "示範設定（點此展開）";
+                }
+            });
+            settings.Q<Toggle>().style.marginLeft = 0;
+            var title = settings.Q<Label>();
+            title.style.fontSize = 16;
+            title.style.unityFontStyleAndWeight = FontStyle.Bold;
+            title.style.color = Color.white;
+            _panel.Add(settings);
+
+            settings.Add(Hint("暫用數值，尚未定案；套用後存進後端資料庫。"));
 
             _lotQuantity = NumberField("批量（件）", 1, 30);
-            _panel.Add(_lotQuantity);
+            settings.Add(_lotQuantity);
             _quantityHint = Hint(string.Empty);
-            _panel.Add(_quantityHint);
+            settings.Add(_quantityHint);
 
-            _panel.Add(Hint("各站整批加工時間（秒）"));
+            _handoverSeconds = NumberField("上下料（秒／件）", 1, 20);
+            settings.Add(_handoverSeconds);
+            _toolChangeSeconds = NumberField("換刀時間（秒）", 1, 120);
+            settings.Add(_toolChangeSeconds);
+
             _stepRows = new VisualElement();
-            _panel.Add(_stepRows);
+            settings.Add(_stepRows);
 
             var settingButtons = Row();
             settingButtons.Add(ActionButton("套用", () => StartCoroutine(SaveSettings())));
             settingButtons.Add(ActionButton("重新載入", () => StartCoroutine(LoadSettings())));
-            _panel.Add(settingButtons);
+            settings.Add(settingButtons);
 
             _panel.Add(Heading("批次"));
             var lotButtons = Row();
@@ -135,7 +155,7 @@ namespace OpenFleet.Unity
             _panel.Add(_status);
 
             var scroll = new ScrollView(ScrollViewMode.Vertical);
-            scroll.style.maxHeight = 260;
+            scroll.style.maxHeight = 220;
             scroll.style.marginTop = 6;
             _lotRows = scroll.contentContainer;
             _panel.Add(scroll);
@@ -176,16 +196,35 @@ namespace OpenFleet.Unity
             _lotQuantity.value = settings.LotQuantity;
             _quantityHint.text = $"1～{settings.MaxLotQuantity}（待加工料容量；目前不拆批）";
 
+            SetValue(_handoverSeconds, settings.HandoverSecondsPerPiece);
+            SetValue(_toolChangeSeconds, settings.ToolChangeSeconds);
+
             _stepRows.Clear();
             _stepFields.Clear();
             foreach (var step in settings.Steps)
             {
-                // 滑桿上限取 120 秒；後端已經存了更大的值時放寬上限，避免套用時被悄悄改小。
-                var field = NumberField($"{step.Sequence}. {step.StationName}", 1, Mathf.Max(MaxSliderSeconds, step.DurationSeconds));
-                field.value = step.DurationSeconds;
-                _stepRows.Add(field);
-                _stepFields.Add((step, field));
+                _stepRows.Add(Hint($"{step.Sequence}. {step.StationName}"));
+                var seconds = NumberField("加工（秒／件）", 1, 20);
+                SetValue(seconds, step.SecondsPerPiece);
+                _stepRows.Add(seconds);
+
+                var toolLife = NumberField("刀具壽命（件）", 10, 1000);
+                SetValue(toolLife, step.ToolLifePieces);
+                _stepRows.Add(toolLife);
+                _stepFields.Add((step, seconds, toolLife));
             }
+        }
+
+        /// <summary>
+        /// 後端的值超出滑桿範圍時放寬範圍，避免「只是按了套用，數值卻被滑桿悄悄夾住」。
+        /// 滑桿只能表示整數；後端若存了小數（例如測試用的值），顯示會四捨五入。
+        /// </summary>
+        private static void SetValue(SliderInt slider, double value)
+        {
+            var rounded = Mathf.Max(1, Mathf.RoundToInt((float)value));
+            slider.highValue = Mathf.Max(slider.highValue, rounded);
+            slider.lowValue = Mathf.Min(slider.lowValue, rounded);
+            slider.value = rounded;
         }
 
         private IEnumerator SaveSettings()
@@ -197,9 +236,12 @@ namespace OpenFleet.Unity
             }
 
             _settings.LotQuantity = _lotQuantity.value;
-            foreach (var (step, field) in _stepFields)
+            _settings.HandoverSecondsPerPiece = _handoverSeconds.value;
+            _settings.ToolChangeSeconds = _toolChangeSeconds.value;
+            foreach (var (step, seconds, toolLife) in _stepFields)
             {
-                step.DurationSeconds = field.value;
+                step.SecondsPerPiece = seconds.value;
+                step.ToolLifePieces = toolLife.value;
             }
 
             using (var request = JsonRequest(UnityWebRequest.kHttpVerbPUT, "/api/settings", FleetJson.Serialize(_settings)))
@@ -208,7 +250,7 @@ namespace OpenFleet.Unity
                 if (Succeeded(request, "套用設定"))
                 {
                     ShowSettings(FleetJson.Deserialize<ProductionSettingsDto>(request.downloadHandler.text));
-                    SetStatus("設定已套用。排隊中的批次開始加工時會採用新的時間。", OkColor);
+                    SetStatus("設定已套用。已開始的加工與搬運不受影響，之後開始的才採用新值。", OkColor);
                 }
             }
         }

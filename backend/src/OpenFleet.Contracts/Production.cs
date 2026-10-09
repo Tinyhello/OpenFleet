@@ -85,8 +85,11 @@ namespace OpenFleet.Contracts
         public string StationCode { get; set; } = string.Empty;
         public string StationName { get; set; } = string.Empty;
 
-        /// <summary>整批固定加工時間（秒）。</summary>
-        public int DurationSeconds { get; set; }
+        /// <summary>每加工一件需要的時間（秒）。</summary>
+        public double SecondsPerPiece { get; set; }
+
+        /// <summary>刀具壽命：加工這麼多件後要換刀。</summary>
+        public int ToolLifePieces { get; set; }
     }
 
     /// <summary>可由面板修改的示範設定；GET 與 PUT /api/settings 共用。</summary>
@@ -102,7 +105,13 @@ namespace OpenFleet.Contracts
         public string SourceStationCode { get; set; } = string.Empty;
         public string BufferStationCode { get; set; } = string.Empty;
 
-        /// <summary>PUT 時只採用 Sequence 與 DurationSeconds。</summary>
+        /// <summary>AGV 上料、下料時每件需要的時間（秒）；一趟的交接時間＝件數 × 這個值。</summary>
+        public double HandoverSecondsPerPiece { get; set; }
+
+        /// <summary>機台換刀需要的時間（秒）；換刀期間機台暫停加工。</summary>
+        public double ToolChangeSeconds { get; set; }
+
+        /// <summary>PUT 時只採用 Sequence、SecondsPerPiece 與 ToolLifePieces。</summary>
         public List<ProcessStepDto> Steps { get; set; } = new List<ProcessStepDto>();
     }
 
@@ -147,7 +156,9 @@ namespace OpenFleet.Contracts
         public int StepSequence { get; set; }
         public string StationCode { get; set; } = string.Empty;
         public OperationStatus Status { get; set; }
-        public int? DurationSeconds { get; set; }
+        public int Quantity { get; set; }
+        public int PiecesCompleted { get; set; }
+        public double? SecondsPerPiece { get; set; }
         public DateTimeOffset QueuedAt { get; set; }
         public DateTimeOffset? StartedAt { get; set; }
         public DateTimeOffset? CompletedAt { get; set; }
@@ -181,6 +192,49 @@ namespace OpenFleet.Contracts
         public string? VehicleId { get; set; }
         public string? Reason { get; set; }
         public DateTimeOffset OccurredAt { get; set; }
+    }
+
+    /// <summary>機台正在加工的批次與進度。</summary>
+    public sealed class MachiningStatusDto
+    {
+        public string LotNumber { get; set; } = string.Empty;
+        public int PiecesCompleted { get; set; }
+        public int Quantity { get; set; }
+    }
+
+    public sealed class ToolStatusDto
+    {
+        /// <summary>上次換刀後已加工的件數。</summary>
+        public int PiecesUsed { get; set; }
+        public int LifePieces { get; set; }
+        public bool Changing { get; set; }
+
+        /// <summary>換刀進度，0～1；沒有在換刀時為 0。</summary>
+        public double ChangeProgress { get; set; }
+    }
+
+    /// <summary>站點目前的物料與設備狀態（GET /api/stations/status），供顯示端畫進度條。</summary>
+    public sealed class StationStatusDto
+    {
+        public string Code { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+
+        /// <summary>是否為加工站（有工序）。</summary>
+        public bool IsMachine { get; set; }
+
+        /// <summary>備料區：等待加工的件數（排隊中的批次＋加工中批次還沒做的件數）；暫存點則是已暫存的件數。</summary>
+        public int InboundQuantity { get; set; }
+        public int? InboundCapacity { get; set; }
+
+        /// <summary>成品區：已加工完成、還沒被搬走的件數；倉庫則是等待搬運的件數。</summary>
+        public int OutboundQuantity { get; set; }
+        public int? OutboundCapacity { get; set; }
+
+        /// <summary>沒有在加工時為 null。</summary>
+        public MachiningStatusDto? Machining { get; set; }
+
+        /// <summary>不是加工站時為 null。</summary>
+        public ToolStatusDto? Tool { get; set; }
     }
 
     /// <summary>一個批次的完整追蹤：位置異動、加工紀錄與搬運任務。</summary>

@@ -236,19 +236,25 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Machine_processes_the_whole_lot_for_the_configured_time_then_requests_the_next_transport()
+    public async Task Machine_counts_piece_by_piece_and_releases_the_lot_only_when_all_pieces_are_done()
     {
         var lot = await CreateLotAsync();
         await DeliverAsync("agv-a");
-
         await AdvanceOperationsAsync();
         Assert.Equal((TransportTaskStatus.Completed, LotStatus.Processing, "rough"), await StateAsync(lot.Id));
 
-        // 還差 1 秒：不能提早放行。
-        _database.Time.Advance(TimeSpan.FromSeconds(9));
+        // 每件 2 秒：25 秒後做完 12 件，備料區剩 18 件、成品區 12 件，批次還不能搬走。
+        _database.Time.Advance(TimeSpan.FromSeconds(25));
         await AdvanceOperationsAsync();
+        var rough = await StationAsync("rough");
+        Assert.Equal((18, 12, 12, 30), (rough.InboundQuantity, rough.OutboundQuantity, rough.Machining!.PiecesCompleted, rough.Machining.Quantity));
+        Assert.Equal((12, 500, false), (rough.Tool!.PiecesUsed, rough.Tool.LifePieces, rough.Tool.Changing));
         Assert.Equal(LotStatus.Processing, (await StateAsync(lot.Id)).Lot);
 
+        // 第 60 秒做完最後一件：整批放行，建立下一趟搬運。
+        _database.Time.Advance(TimeSpan.FromSeconds(34));
+        await AdvanceOperationsAsync();
+        Assert.Equal(LotStatus.Processing, (await StateAsync(lot.Id)).Lot);
         _database.Time.Advance(TimeSpan.FromSeconds(1));
         await AdvanceOperationsAsync();
 
@@ -257,16 +263,87 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         var next = await scope.Db.TransportTasks.SingleAsync(t => t.Status == TransportTaskStatus.Pending);
         Assert.Equal((LotStatus.AwaitingTransport, "rough", 2), (stored.Status, stored.StationCode, stored.CurrentStepSequence!.Value));
         Assert.Equal(("rough", "fine", TransportTaskKind.WipTransfer), (next.FromStationCode, next.ToStationCode, next.Kind));
+
+        rough = await StationAsync("rough");
+        Assert.Equal((0, 30, null), (rough.InboundQuantity, rough.OutboundQuantity, rough.Machining));
+    }
+
+    [Fact]
+    public async Task Machine_pauses_for_a_tool_change_when_the_tool_reaches_its_life()
+    {
+        // 刀具壽命 10 件、換刀 20 秒：30 件的批次會在第 10、20 件之後各停 20 秒，做完第 30 件時再換一次。
+        await ConfigureAsync(s => s.Steps[0].ToolLifePieces = 10);
+        var lot = await CreateLotAsync();
+        await DeliverAsync("agv-a");
+        await AdvanceOperationsAsync();
+        var startedAt = _database.Time.GetUtcNow();
+
+        _database.Time.Advance(TimeSpan.FromSeconds(30));
+        await AdvanceOperationsAsync();
+        var rough = await StationAsync("rough");
+        Assert.Equal(10, rough.Machining!.PiecesCompleted);
+        Assert.Equal((true, 0.5), (rough.Tool!.Changing, rough.Tool.ChangeProgress));
+
+        // 換刀結束後從頭計時下一件：第 40 秒換好，第 42 秒做完第 11 件，計數從 1 開始。
+        _database.Time.Advance(TimeSpan.FromSeconds(12));
+        await AdvanceOperationsAsync();
+        rough = await StationAsync("rough");
+        Assert.Equal((11, false, 1), (rough.Machining!.PiecesCompleted, rough.Tool!.Changing, rough.Tool.PiecesUsed));
+
+        // 加工 60 秒＋兩次換刀 40 秒＝第 100 秒完成。
+        _database.Time.Advance(TimeSpan.FromSeconds(57));
+        await AdvanceOperationsAsync();
+        Assert.Equal(LotStatus.Processing, (await StateAsync(lot.Id)).Lot);
+        _database.Time.Advance(TimeSpan.FromSeconds(1));
+        await AdvanceOperationsAsync();
+        Assert.Equal(LotStatus.AwaitingTransport, (await StateAsync(lot.Id)).Lot);
+
+        await using (var scope = _database.NewScope())
+        {
+            Assert.Equal(startedAt.AddSeconds(100), (await scope.Db.Operations.SingleAsync()).CompletedAt);
+            Assert.Equal(2, await scope.Db.ToolChanges.CountAsync());
+            Assert.True((await scope.Db.StationTools.SingleAsync(t => t.StationCode == "rough")).IsChanging);
+        }
+
+        // 機台閒置時換刀照樣會結束，並留下第三筆紀錄。
+        _database.Time.Advance(TimeSpan.FromSeconds(20));
+        await AdvanceOperationsAsync();
+        await using (var scope = _database.NewScope())
+        {
+            Assert.Equal(new[] { 10, 10, 10 }, await scope.Db.ToolChanges.OrderBy(c => c.Id).Select(c => c.PiecesUsed).ToListAsync());
+            Assert.Equal((0, false), ((await StationAsync("rough")).Tool!.PiecesUsed, (await StationAsync("rough")).Tool!.Changing));
+        }
+    }
+
+    [Fact]
+    public async Task Catching_up_after_downtime_gives_the_same_result_as_ticking_continuously()
+    {
+        // 後端停機一段時間後一次補算：每一件與每次換刀的時間點都由資料庫裡的時間推算，結果和持續執行相同。
+        await ConfigureAsync(s => s.Steps[0].ToolLifePieces = 10);
+        await CreateLotAsync();
+        await DeliverAsync("agv-a");
+        await AdvanceOperationsAsync();
+        var startedAt = _database.Time.GetUtcNow();
+
+        _database.Time.Advance(TimeSpan.FromMinutes(10));
+        await AdvanceOperationsAsync();
+
+        await using var scope = _database.NewScope();
+        var operation = await scope.Db.Operations.SingleAsync();
+        Assert.Equal((OperationStatus.Completed, 30, startedAt.AddSeconds(100)), (operation.Status, operation.PiecesCompleted, operation.CompletedAt));
+        Assert.Equal(3, await scope.Db.ToolChanges.CountAsync());
+        Assert.Equal(startedAt.AddSeconds(120), (await scope.Db.ToolChanges.OrderBy(c => c.Id).LastAsync()).CompletedAt);
     }
 
     [Fact]
     public async Task Machine_does_not_start_the_next_lot_until_the_finished_one_is_picked_up()
     {
+        // 兩個 15 件的批次：第一批加工中時，備料區還放得下第二批。
+        await ConfigureAsync(s => s.LotQuantity = 15);
         await CreateLotAsync();
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
 
-        // 第一批加工中時，第二批送到機邊排隊。
         await CreateLotAsync();
         await DeliverAsync("agv-b");
         await AdvanceOperationsAsync();
@@ -277,12 +354,15 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         }
 
         // 第一批完成但還沒被搬走：第二批不能開始。
-        _database.Time.Advance(TimeSpan.FromSeconds(10));
+        _database.Time.Advance(TimeSpan.FromSeconds(30));
         await AdvanceOperationsAsync();
         await using (var scope = _database.NewScope())
         {
             Assert.Equal(0, await scope.Db.Operations.CountAsync(o => o.Status == OperationStatus.Running));
         }
+
+        var rough = await StationAsync("rough");
+        Assert.Equal((15, 15), (rough.InboundQuantity, rough.OutboundQuantity));
 
         // 第一批取走後，第二批開始加工。
         var pickup = await DispatchAsync(Online("agv-a"));
@@ -296,6 +376,50 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Pieces_still_waiting_at_the_machine_count_against_the_inbound_capacity()
+    {
+        await CreateLotAsync();
+        await DeliverAsync("agv-a");
+        await AdvanceOperationsAsync();
+        await CreateLotAsync();
+
+        // 加工到一半：備料區還有 20 件，再送 30 件會超過容量 30，所以任務等待。
+        _database.Time.Advance(TimeSpan.FromSeconds(20));
+        await AdvanceOperationsAsync();
+        await using (var scope = _database.NewScope())
+        {
+            Assert.Equal(0, await scope.Db.TransportTasks.CountAsync(t => t.Status == TransportTaskStatus.Assigned));
+            Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-b")], default));
+        }
+
+        // 整批做完後備料區空了，第二批可以送來（成品區的第一批另外等車來搬）。
+        _database.Time.Advance(TimeSpan.FromSeconds(40));
+        await AdvanceOperationsAsync();
+        await using (var scope = _database.NewScope())
+        {
+            Assert.Equal(1, await scope.Transport.DispatchPendingAsync([Online("agv-b")], default));
+            var task = await scope.Db.TransportTasks.SingleAsync(t => t.Status == TransportTaskStatus.Assigned);
+            Assert.Equal(("raw-store", "rough"), (task.FromStationCode, task.ToStationCode));
+        }
+    }
+
+    [Fact]
+    public async Task Transport_command_carries_load_and_handover_time_from_the_settings()
+    {
+        await ConfigureAsync(s => s.LotQuantity = 12);
+        await CreateLotAsync();
+        await DispatchAsync(Online("agv-a"));
+
+        await using var scope = _database.NewScope();
+        var payload = (await scope.Db.OutboxMessages.SingleAsync()).Payload;
+
+        // 12 件 × 每件 5 秒 ＝ 取料、卸料各 60 秒。
+        Assert.Contains("\"loadQuantity\":12", payload);
+        Assert.Contains("\"loadCode\":\"upper-punch\"", payload);
+        Assert.Contains("\"handoverSeconds\":60", payload);
+    }
+
+    [Fact]
     public async Task Last_step_sends_the_lot_to_the_buffer_where_it_is_staged()
     {
         var lot = await CreateLotAsync();
@@ -304,7 +428,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         {
             await DeliverAsync("agv-a");
             await AdvanceOperationsAsync();
-            _database.Time.Advance(TimeSpan.FromSeconds(10));
+            _database.Time.Advance(TimeSpan.FromSeconds(60));
             await AdvanceOperationsAsync();
             Assert.Equal((LotStatus.AwaitingTransport, station), ((await StateAsync(lot.Id)).Lot, (await StateAsync(lot.Id)).Location));
         }
@@ -315,6 +439,11 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await using var scope = _database.NewScope();
         Assert.Equal(7, await scope.Db.InventoryMovements.CountAsync());
         Assert.Equal(2, await scope.Db.Operations.CountAsync(o => o.Status == OperationStatus.Completed));
+
+        // 兩站的刀具各累計 30 件；暫存點顯示已暫存的件數。
+        Assert.Equal(30, (await StationAsync("rough")).Tool!.PiecesUsed);
+        Assert.Equal(30, (await StationAsync("fine")).Tool!.PiecesUsed);
+        Assert.Equal((30, false), ((await StationAsync("heat")).InboundQuantity, (await StationAsync("heat")).IsMachine));
     }
 
     [Fact]
@@ -322,21 +451,33 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     {
         await using var scope = _database.NewScope();
         var settings = await scope.Production.GetSettingsAsync(default);
-        Assert.Equal((30, 30, 2), (settings.LotQuantity, settings.MaxLotQuantity, settings.Steps.Count));
+        Assert.Equal((30, 30, 5d, 20d), (settings.LotQuantity, settings.MaxLotQuantity, settings.HandoverSecondsPerPiece, settings.ToolChangeSeconds));
+        Assert.Equal(new[] { (2d, 500), (2d, 250) }, settings.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
 
         settings.LotQuantity = 12;
-        settings.Steps[0].DurationSeconds = 25;
+        settings.HandoverSecondsPerPiece = 1.5;
+        settings.ToolChangeSeconds = 45;
+        settings.Steps[0].SecondsPerPiece = 4;
+        settings.Steps[0].ToolLifePieces = 100;
         var updated = await scope.Production.UpdateSettingsAsync(settings, default);
-        Assert.Equal((12, 25, 10), (updated.LotQuantity, updated.Steps[0].DurationSeconds, updated.Steps[1].DurationSeconds));
+        Assert.Equal((12, 1.5, 45d), (updated.LotQuantity, updated.HandoverSecondsPerPiece, updated.ToolChangeSeconds));
+        Assert.Equal(new[] { (4d, 100), (2d, 250) }, updated.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
         Assert.Equal(12, (await scope.Production.CreateLotAsync(null, default)).Quantity);
 
         // 待加工料容量是 30：不拆批時批量不能超過它。
-        settings.LotQuantity = 31;
-        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.UpdateSettingsAsync(settings, default));
-        settings.LotQuantity = 12;
-        settings.Steps[1].DurationSeconds = 0;
-        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.UpdateSettingsAsync(settings, default));
+        await Invalid(s => s.LotQuantity = 31);
+        await Invalid(s => s.Steps[1].SecondsPerPiece = 0);
+        await Invalid(s => s.Steps[1].ToolLifePieces = 0);
+        await Invalid(s => s.HandoverSecondsPerPiece = -1);
+        await Invalid(s => s.ToolChangeSeconds = double.NaN);
         await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateLotAsync(0, default));
+
+        async Task Invalid(Action<ProductionSettingsDto> change)
+        {
+            var request = await scope.Production.GetSettingsAsync(default);
+            change(request);
+            await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.UpdateSettingsAsync(request, default));
+        }
     }
 
     [Fact]
@@ -387,6 +528,20 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     {
         await using var scope = _database.NewScope();
         await scope.Production.AdvanceOperationsAsync(default);
+    }
+
+    private async Task ConfigureAsync(Action<ProductionSettingsDto> change)
+    {
+        await using var scope = _database.NewScope();
+        var settings = await scope.Production.GetSettingsAsync(default);
+        change(settings);
+        await scope.Production.UpdateSettingsAsync(settings, default);
+    }
+
+    private async Task<StationStatusDto> StationAsync(string code)
+    {
+        await using var scope = _database.NewScope();
+        return (await scope.Production.GetStationStatusAsync(default)).Single(s => s.Code == code);
     }
 
     /// <summary>批次最新一趟搬運的狀態、批次狀態與位置（站點代碼或 vehicle:xxx）。</summary>

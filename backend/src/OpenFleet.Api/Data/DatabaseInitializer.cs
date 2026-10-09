@@ -16,8 +16,8 @@ public static class DatabaseInitializer
     private static readonly Station[] DemoStations =
     [
         new() { Code = "raw-store", Name = "原料倉", HandoffX = -16, HandoffZ = -7.6 },
-        new() { Code = "rough", Name = "粗加工", HandoffX = -8, HandoffZ = -7.6, InboundCapacity = 30 },
-        new() { Code = "fine", Name = "精加工", HandoffX = 0, HandoffZ = -7.6, InboundCapacity = 30 },
+        new() { Code = "rough", Name = "粗加工", HandoffX = -8, HandoffZ = -7.6, InboundCapacity = 30, OutboundCapacity = 30 },
+        new() { Code = "fine", Name = "精加工", HandoffX = 0, HandoffZ = -7.6, InboundCapacity = 30, OutboundCapacity = 30 },
         new() { Code = "heat", Name = "淬火／回火", HandoffX = 8, HandoffZ = -7.6 },
         new() { Code = "plating", Name = "電鍍", HandoffX = 16, HandoffZ = -7.6 },
         new() { Code = "polish", Name = "拋光", HandoffX = 16, HandoffZ = 7.6 },
@@ -25,6 +25,15 @@ public static class DatabaseInitializer
         new() { Code = "packing", Name = "包裝", HandoffX = 0, HandoffZ = 7.6 },
         new() { Code = "shipping", Name = "出貨", HandoffX = -8, HandoffZ = 7.6 },
         new() { Code = "tool-store", Name = "刀具庫", HandoffX = -16, HandoffZ = 7.6 },
+    ];
+
+    /// <summary>
+    /// 示範製程。每件加工 2 秒是暫定值；刀具壽命（粗加工 500 件、精加工 250 件）是使用者 2026-10-09 提供的數值。
+    /// </summary>
+    private static readonly ProcessStep[] DemoSteps =
+    [
+        new() { Sequence = 1, StationCode = "rough", SecondsPerPiece = 2, ToolLifePieces = 500 },
+        new() { Sequence = 2, StationCode = "fine", SecondsPerPiece = 2, ToolLifePieces = 250 },
     ];
 
     public static async Task InitializeDatabaseAsync(this WebApplication app)
@@ -39,17 +48,51 @@ public static class DatabaseInitializer
 
     public static async Task SeedAsync(OpenFleetDbContext db, FleetOptions fleet)
     {
-        var existingStations = await db.Stations.Select(s => s.Code).ToListAsync();
-        db.Stations.AddRange(DemoStations
-            .Where(s => !existingStations.Contains(s.Code))
-            .Select(s => new Station { Code = s.Code, Name = s.Name, HandoffX = s.HandoffX, HandoffZ = s.HandoffZ, InboundCapacity = s.InboundCapacity }));
-
-        if (!await db.ProcessSteps.AnyAsync())
+        var stations = await db.Stations.ToDictionaryAsync(s => s.Code);
+        foreach (var demo in DemoStations)
         {
-            // 示範設定（使用者 2026-10-09 同意暫用）：每站整批固定加工 10 秒。
-            db.ProcessSteps.Add(new ProcessStep { Sequence = 1, StationCode = "rough", DurationSeconds = 10 });
-            db.ProcessSteps.Add(new ProcessStep { Sequence = 2, StationCode = "fine", DurationSeconds = 10 });
+            if (!stations.TryGetValue(demo.Code, out var station))
+            {
+                db.Stations.Add(new Station
+                {
+                    Code = demo.Code,
+                    Name = demo.Name,
+                    HandoffX = demo.HandoffX,
+                    HandoffZ = demo.HandoffZ,
+                    InboundCapacity = demo.InboundCapacity,
+                    OutboundCapacity = demo.OutboundCapacity,
+                });
+            }
+            else
+            {
+                // 舊資料庫升級：欄位是後來才加的，沒有值就補上示範值。
+                station.OutboundCapacity ??= demo.OutboundCapacity;
+            }
         }
+
+        var steps = await db.ProcessSteps.ToDictionaryAsync(s => s.Sequence);
+        foreach (var demo in DemoSteps)
+        {
+            if (steps.Count == 0)
+            {
+                db.ProcessSteps.Add(new ProcessStep
+                {
+                    Sequence = demo.Sequence,
+                    StationCode = demo.StationCode,
+                    SecondsPerPiece = demo.SecondsPerPiece,
+                    ToolLifePieces = demo.ToolLifePieces,
+                });
+            }
+            else if (steps.TryGetValue(demo.Sequence, out var step) && step.ToolLifePieces <= 0)
+            {
+                step.ToolLifePieces = demo.ToolLifePieces;
+            }
+        }
+
+        // 每個加工站一筆刀具狀態。
+        var tools = await db.StationTools.Select(t => t.StationCode).ToListAsync();
+        var machineStations = steps.Count == 0 ? DemoSteps.Select(s => s.StationCode) : steps.Values.Select(s => s.StationCode);
+        db.StationTools.AddRange(machineStations.Where(code => !tools.Contains(code)).Select(code => new StationTool { StationCode = code }));
 
         if (!await db.ProductionSettings.AnyAsync())
         {
@@ -59,6 +102,9 @@ public static class DatabaseInitializer
                 PartCode = "upper-punch",
                 SourceStationCode = "raw-store",
                 BufferStationCode = "heat",
+                // 上下料每件 5 秒是使用者 2026-10-09 的決定（人工約每件 10 秒）；換刀 20 秒是暫定值。
+                HandoverSecondsPerPiece = 5,
+                ToolChangeSeconds = 20,
             });
         }
 

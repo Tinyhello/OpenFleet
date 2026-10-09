@@ -215,17 +215,23 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<DateTimeOffset?>("DueAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int?>("DurationSeconds")
-                        .HasColumnType("integer");
-
                     b.Property<Guid>("LotId")
                         .HasColumnType("uuid");
 
+                    b.Property<DateTimeOffset?>("PieceStartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PiecesCompleted")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
                     b.Property<DateTimeOffset>("QueuedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<double?>("SecondsPerPiece")
+                        .HasColumnType("double precision");
 
                     b.Property<DateTimeOffset?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
@@ -292,13 +298,16 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<int>("Sequence")
                         .HasColumnType("integer");
 
-                    b.Property<int>("DurationSeconds")
-                        .HasColumnType("integer");
+                    b.Property<double>("SecondsPerPiece")
+                        .HasColumnType("double precision");
 
                     b.Property<string>("StationCode")
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
+
+                    b.Property<int>("ToolLifePieces")
+                        .HasColumnType("integer");
 
                     b.HasKey("Sequence");
 
@@ -306,7 +315,9 @@ namespace OpenFleet.Api.Data.Migrations
 
                     b.ToTable("ProcessSteps", t =>
                         {
-                            t.HasCheckConstraint("CK_ProcessSteps_Duration", "\"DurationSeconds\" > 0");
+                            t.HasCheckConstraint("CK_ProcessSteps_SecondsPerPiece", "\"SecondsPerPiece\" > 0");
+
+                            t.HasCheckConstraint("CK_ProcessSteps_ToolLife", "\"ToolLifePieces\" > 0");
                         });
                 });
 
@@ -320,6 +331,9 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<double>("HandoverSecondsPerPiece")
+                        .HasColumnType("double precision");
+
                     b.Property<int>("LotQuantity")
                         .HasColumnType("integer");
 
@@ -332,6 +346,9 @@ namespace OpenFleet.Api.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
+
+                    b.Property<double>("ToolChangeSeconds")
+                        .HasColumnType("double precision");
 
                     b.HasKey("Id");
 
@@ -361,9 +378,32 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
+                    b.Property<int?>("OutboundCapacity")
+                        .HasColumnType("integer");
+
                     b.HasKey("Code");
 
                     b.ToTable("Stations");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.StationTool", b =>
+                {
+                    b.Property<string>("StationCode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset?>("ChangeDueAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ChangeStartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PiecesSinceChange")
+                        .HasColumnType("integer");
+
+                    b.HasKey("StationCode");
+
+                    b.ToTable("StationTools");
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.TaskEvent", b =>
@@ -407,6 +447,35 @@ namespace OpenFleet.Api.Data.Migrations
                     b.HasIndex("TaskId");
 
                     b.ToTable("TaskEvents");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.ToolChangeRecord", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("PiecesUsed")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StationCode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StationCode", "Id");
+
+                    b.ToTable("ToolChanges", (string)null);
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.TransportTask", b =>
@@ -553,6 +622,15 @@ namespace OpenFleet.Api.Data.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.StationTool", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.Station", null)
+                        .WithOne()
+                        .HasForeignKey("OpenFleet.Api.Data.StationTool", "StationCode")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.TaskEvent", b =>
                 {
                     b.HasOne("OpenFleet.Api.Data.Assignment", "Assignment")
@@ -567,6 +645,15 @@ namespace OpenFleet.Api.Data.Migrations
                         .IsRequired();
 
                     b.Navigation("Assignment");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.ToolChangeRecord", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.Station", null)
+                        .WithMany()
+                        .HasForeignKey("StationCode")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.TransportTask", b =>

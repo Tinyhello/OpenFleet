@@ -9,6 +9,10 @@ namespace OpenFleet.Unity.Editor
     /// </summary>
     internal static class StationModels
     {
+        /// <summary>備料區、成品區「有料時才顯示」的物件名稱；場景產生器依名稱找到它們交給 StationAnchor。</summary>
+        public const string InboundContentsName = "Inbound Contents";
+        public const string OutboundContentsName = "Outbound Contents";
+
         public static void Build(StationKind kind, Transform root)
         {
             switch (kind)
@@ -104,10 +108,23 @@ namespace OpenFleet.Unity.Editor
             Box(panel, "Housing", new Vector3(0f, 1.55f, 0f), new Vector3(0.55f, 0.9f, 0.25f), Palette.MachineDark);
             Box(panel, "Screen", new Vector3(0f, 1.7f, 0.13f), new Vector3(0.42f, 0.32f, 0.01f), Palette.Screen);
 
-            // 機邊緩衝區：待加工料放置處（容量等規則在後端）。
-            var buffer = Group(root, "Machine-side Buffer", new Vector3(2.1f, 0f, 1.3f));
-            Table(buffer, new Vector3(1.0f, 0.7f, 0.8f), Palette.Steel);
-            Box(buffer, "Bin", new Vector3(0f, 0.86f, 0f), new Vector3(0.6f, 0.26f, 0.42f), Palette.Bin);
+            // 備料區（待加工）與成品區（已加工、等待搬走）：各一張台子。容量與數量在後端，畫面上用進度條表示；
+            // 台上的料箱只在有料時顯示（StationAnchor 切換），沒有逐件的動畫。
+            var inbound = Group(root, "Inbound Table", new Vector3(2.1f, 0f, 1.3f));
+            Table(inbound, new Vector3(1.0f, 0.7f, 0.8f), Palette.Steel);
+            var inboundContents = Group(inbound, InboundContentsName, Vector3.zero);
+            Box(inboundContents, "Bin", new Vector3(0f, 0.86f, 0f), new Vector3(0.6f, 0.26f, 0.42f), Palette.Bin);
+            Cylinder(inboundContents, "Blank", new Vector3(-0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.MachineDark, new Vector3(90f, 0f, 0f));
+            Cylinder(inboundContents, "Blank", new Vector3(0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.MachineDark, new Vector3(90f, 0f, 0f));
+            Label(inbound, "備料", new Vector3(0f, 1.25f, 0f), 0.045f, Color.white);
+
+            var outbound = Group(root, "Outbound Table", new Vector3(-2.1f, 0f, 1.3f));
+            Table(outbound, new Vector3(1.0f, 0.7f, 0.8f), Palette.Steel);
+            var outboundContents = Group(outbound, OutboundContentsName, Vector3.zero);
+            Box(outboundContents, "Bin", new Vector3(0f, 0.86f, 0f), new Vector3(0.6f, 0.26f, 0.42f), Palette.Bin);
+            Cylinder(outboundContents, "Part", new Vector3(-0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.Steel, new Vector3(90f, 0f, 0f));
+            Cylinder(outboundContents, "Part", new Vector3(0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.Steel, new Vector3(90f, 0f, 0f));
+            Label(outbound, "成品", new Vector3(0f, 1.25f, 0f), 0.045f, Color.white);
         }
 
         private static void HeatTreatment(Transform root)

@@ -17,12 +17,14 @@ public class SimulatedFleetTests
 
     public SimulatedFleetTests()
     {
-        // 10 x 4 的矩形走道，一台車從 (0, 0) 出發，速度 1 m/s，交接 2 秒。
+        // 10 x 4 的矩形走道，一台車從 (0, 0) 出發，空車 1 m/s、滿載 30 件時 0.5 m/s，指令沒指定時交接 2 秒。
         _fleet = new SimulatedFleet(
             Options.Create(new SimulatorSettings
             {
                 VehicleIds = ["agv"],
                 Speed = 1,
+                FullLoadSpeed = 0.5,
+                LoadCapacity = 30,
                 HandoverDuration = TimeSpan.FromSeconds(2),
                 Route =
                 [
@@ -136,7 +138,44 @@ public class SimulatedFleetTests
         Assert.Equal(new[] { VehicleEventType.Accepted, VehicleEventType.Completed }, DrainEvents().Select(e => e.EventType));
     }
 
-    private MessageEnvelope<VehicleCommand> Transport() => Command(VehicleCommandType.Transport, Pickup, Dropoff, Guid.NewGuid());
+    [Fact]
+    public void Loaded_vehicle_is_slower_and_reports_its_load_and_handover_progress()
+    {
+        // 15 件（半載）：車速 0.75 m/s；交接時間由指令指定為 4 秒。
+        _fleet.HandleCommand("agv", Transport(loadQuantity: 15, handoverSeconds: 4));
+
+        var empty = Advance(1);
+        Assert.Equal((1d, VehicleActivity.Moving, 0), (empty.Speed, empty.Activity, empty.LoadQuantity));
+
+        // 抵達取料點後上料：進度隨時間增加，交接完成前車上還沒有貨。
+        Advance(2);
+        var loading = Advance(1);
+        Assert.Equal((VehicleActivity.Loading, 0, 0d), (loading.Activity, loading.LoadQuantity, loading.Speed));
+        Assert.Equal(0.25, loading.ActivityProgress, 6);
+
+        Advance(3);
+        var loaded = Advance(1);
+        Assert.Equal((VehicleActivity.Moving, 15, "upper-punch"), (loaded.Activity, loaded.LoadQuantity, loaded.LoadCode));
+        Assert.Equal(0.75, loaded.Speed, 6);
+
+        // 16 m 的路程以 0.75 m/s 行駛，約 21.3 秒；下料時貨還在車上，完成後才變回空車。
+        Advance(21);
+        var unloading = Advance(2);
+        Assert.Equal((VehicleActivity.Unloading, 15), (unloading.Activity, unloading.LoadQuantity));
+
+        var done = Advance(4);
+        Assert.Equal((VehicleActivity.Idle, 0, null), (done.Activity, done.LoadQuantity, done.LoadCode));
+        Assert.Equal(VehicleEventType.Completed, DrainEvents()[^1].EventType);
+    }
+
+    private MessageEnvelope<VehicleCommand> Transport(int loadQuantity = 0, double? handoverSeconds = null)
+    {
+        var command = Command(VehicleCommandType.Transport, Pickup, Dropoff, Guid.NewGuid());
+        command.Payload.LoadQuantity = loadQuantity;
+        command.Payload.LoadCode = loadQuantity > 0 ? "upper-punch" : null;
+        command.Payload.HandoverSeconds = handoverSeconds;
+        return command;
+    }
 
     private MessageEnvelope<VehicleCommand> Command(VehicleCommandType type, Position3? pickup = null, Position3? destination = null, Guid? assignmentId = null) =>
         MessageEnvelope.Create("backend", new VehicleCommand

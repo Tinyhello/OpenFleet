@@ -47,6 +47,15 @@ namespace OpenFleet.Contracts
 
         /// <summary>Transport 的卸料交接點，或 MoveTo 的目的地。</summary>
         public Position3? Destination { get; set; }
+
+        /// <summary>Transport 搬運的件數；設備用來決定載貨時的車速，並回報在遙測裡。</summary>
+        public int LoadQuantity { get; set; }
+
+        /// <summary>Transport 搬運的內容（零件代碼）。</summary>
+        public string? LoadCode { get; set; }
+
+        /// <summary>Transport 在取料點、卸料點各需要的交接時間（秒）；省略時使用設備自己的預設值。</summary>
+        public double? HandoverSeconds { get; set; }
     }
 
     public enum VehicleEventType
@@ -69,6 +78,19 @@ namespace OpenFleet.Contracts
         public string? Reason { get; set; }
     }
 
+    /// <summary>車輛此刻在做什麼。只用於顯示；業務狀態仍以事件（Loaded、Completed）為準。</summary>
+    public enum VehicleActivity
+    {
+        Idle,
+        Moving,
+
+        /// <summary>在取料點交接中（上料）。</summary>
+        Loading,
+
+        /// <summary>在卸料點交接中（下料）。</summary>
+        Unloading,
+    }
+
     /// <summary>設備／模擬器 → 後端。高頻位置回報，可遺失。</summary>
     public sealed class VehicleTelemetry
     {
@@ -82,6 +104,17 @@ namespace OpenFleet.Contracts
 
         /// <summary>公尺／秒。</summary>
         public double Speed { get; set; }
+
+        public VehicleActivity Activity { get; set; }
+
+        /// <summary>上料或下料的進度，0～1；其他時候為 0。</summary>
+        public double ActivityProgress { get; set; }
+
+        /// <summary>車上的件數；0 表示空車。取料交接完成後才算在車上，卸料交接完成後歸零。</summary>
+        public int LoadQuantity { get; set; }
+
+        /// <summary>車上的內容（零件代碼）；空車時為 null。</summary>
+        public string? LoadCode { get; set; }
     }
 
     /// <summary>車型。由後端的車輛設定決定；設定裡沒有的車輛為 Unknown。</summary>
@@ -110,6 +143,10 @@ namespace OpenFleet.Contracts
         public VehicleConnectivity Connectivity { get; set; }
         public Position3 Position { get; set; } = new Position3();
         public double Speed { get; set; }
+        public VehicleActivity Activity { get; set; }
+        public double ActivityProgress { get; set; }
+        public int LoadQuantity { get; set; }
+        public string? LoadCode { get; set; }
         public DateTimeOffset LastSeenAt { get; set; }
         public Guid TelemetrySessionId { get; set; }
         public long TelemetrySequence { get; set; }

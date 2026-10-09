@@ -20,6 +20,9 @@ public static class ProductionEndpoints
                 InboundCapacity = s.InboundCapacity,
             }).ToListAsync(ct));
 
+        // 備料區、成品區、加工與刀具的即時狀態；顯示端每秒輪詢數次。
+        api.MapGet("/stations/status", (ProductionService production, CancellationToken ct) => production.GetStationStatusAsync(ct));
+
         api.MapGet("/settings", (ProductionService production, CancellationToken ct) => production.GetSettingsAsync(ct));
 
         api.MapPut("/settings", (ProductionSettingsDto request, ProductionService production, CancellationToken ct) =>
@@ -49,7 +52,9 @@ public static class ProductionEndpoints
                         StepSequence = o.StepSequence,
                         StationCode = o.StationCode,
                         Status = o.Status,
-                        DurationSeconds = o.DurationSeconds,
+                        Quantity = o.Quantity,
+                        PiecesCompleted = o.PiecesCompleted,
+                        SecondsPerPiece = o.SecondsPerPiece,
                         QueuedAt = o.QueuedAt,
                         StartedAt = o.StartedAt,
                         CompletedAt = o.CompletedAt,
@@ -66,10 +71,13 @@ public static class ProductionEndpoints
             return Results.Created($"/api/lots/{lot.Id}", ToDto(lot));
         });
 
-        // 示範用：清掉所有批次與搬運資料（設定、站點、車輛保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
+        // 示範用：清掉所有批次與搬運資料並把刀具計數歸零（設定、站點、車輛保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
         api.MapPost("/demo/reset", async (OpenFleetDbContext db, ILoggerFactory loggers, CancellationToken ct) =>
         {
             await db.Database.ExecuteSqlRawAsync("""TRUNCATE "Lots", "OutboxMessages", "InboxMessages" CASCADE""", ct);
+            // 刀具計數與換刀紀錄也歸零，機台回到剛換好刀的狀態。
+            await db.Database.ExecuteSqlRawAsync(
+                """TRUNCATE "ToolChanges"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL""", ct);
             loggers.CreateLogger(nameof(ProductionEndpoints)).LogWarning("Demo data reset: lots, tasks, movements, outbox and inbox cleared.");
             return Results.NoContent();
         });

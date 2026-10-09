@@ -120,10 +120,11 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
     {
         await EventuallyAsync(async () => (await GetVehiclesAsync()).Count(v => v.Connectivity == VehicleConnectivity.Online) == 2);
 
-        // 經由面板用的 API 把兩站的加工時間改成 1 秒、批量改成 20。
+        // 經由面板用的 API 把批量改成 20，並把加工與上下料調快（每件 0.05 秒、0.01 秒）。
         var settings = (await _http.GetFromJsonAsync<ProductionSettingsDto>("/api/settings", JsonDefaults.Options))!;
         settings.LotQuantity = 20;
-        settings.Steps.ForEach(step => step.DurationSeconds = 1);
+        settings.HandoverSecondsPerPiece = 0.01;
+        settings.Steps.ForEach(step => step.SecondsPerPiece = 0.05);
         (await _http.PutAsJsonAsync("/api/settings", settings, JsonDefaults.Options)).EnsureSuccessStatusCode();
 
         var created = await _http.PostAsJsonAsync("/api/lots", new CreateLotRequest(), JsonDefaults.Options);
@@ -139,9 +140,16 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             new[] { "station:raw-store", "vehicle:agv-t1", "station:rough", "vehicle:agv-t1", "station:fine", "vehicle:agv-t1", "station:heat" },
             trace.Movements.Select(m => m.To));
         Assert.Equal(new[] { "rough", "fine" }, trace.Operations.Select(o => o.StationCode));
-        Assert.All(trace.Operations, o => Assert.Equal(Contracts.OperationStatus.Completed, o.Status));
+        Assert.All(trace.Operations, o => Assert.Equal((Contracts.OperationStatus.Completed, 20, 20), (o.Status, o.PiecesCompleted, o.Quantity)));
         Assert.Equal(3, trace.Tasks.Count);
         Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
+
+        // 站點狀態：兩站的刀具各累計 20 件，暫存點有 20 件；車輛卸完料後是空車。
+        var stations = (await _http.GetFromJsonAsync<List<StationStatusDto>>("/api/stations/status", JsonDefaults.Options))!;
+        Assert.Equal(20, stations.Single(s => s.Code == "rough").Tool!.PiecesUsed);
+        Assert.Equal(20, stations.Single(s => s.Code == "fine").Tool!.PiecesUsed);
+        Assert.Equal(20, stations.Single(s => s.Code == "heat").InboundQuantity);
+        await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });
 
         // 任務歷史：待派工 → 已派工 → 執行中 → 完成。
         var events = (await _http.GetFromJsonAsync<List<TaskEventDto>>($"/api/transport-tasks/{trace.Tasks[0].Id}/events", JsonDefaults.Options))!;

@@ -32,6 +32,9 @@ namespace OpenFleet.Unity
         /// <summary>後端 HTTP API 的位址；其他面板共用這一個設定。</summary>
         public string ApiBaseUrl => apiBaseUrl;
 
+        /// <summary>目前畫面上的車輛（唯讀）。</summary>
+        public IEnumerable<VehicleView> Vehicles => _vehicles.Values;
+
         private void Awake()
         {
             _mqtt = GetComponent<FleetMqttClient>();

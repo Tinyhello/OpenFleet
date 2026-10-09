@@ -12,6 +12,11 @@ public sealed class Station
 
     /// <summary>待加工料容量（件）。null＝這個站的容量還沒建模（P2 的倉庫與暫存點），不代表無限。</summary>
     public int? InboundCapacity { get; set; }
+
+    /// <summary>
+    /// 完工件容量（件），目前只用來畫成品區的進度條。完工件容量依桿徑分 30／45 的對照還沒定，先用 30。
+    /// </summary>
+    public int? OutboundCapacity { get; set; }
 }
 
 /// <summary>P2 的製程路線：依 Sequence 順序加工。只有一條路線，產品與版本留到之後。</summary>
@@ -20,8 +25,61 @@ public sealed class ProcessStep
     public int Sequence { get; set; }
     public required string StationCode { get; set; }
 
-    /// <summary>整批固定加工時間（秒）。示範設定，可由面板修改。</summary>
-    public int DurationSeconds { get; set; }
+    /// <summary>每加工一件的時間（秒）。示範設定，可由面板修改。</summary>
+    public double SecondsPerPiece { get; set; }
+
+    /// <summary>刀具壽命（件）：粗加工 500、精加工 250 是使用者提供的數值。</summary>
+    public int ToolLifePieces { get; set; }
+}
+
+/// <summary>
+/// 某一站機台的刀具狀態。到達壽命時開始換刀，換刀期間機台暫停；
+/// 開始與結束時間都存在資料庫，後端重啟後可以接續。
+/// </summary>
+public sealed class StationTool
+{
+    public required string StationCode { get; set; }
+
+    /// <summary>上次換刀後已加工的件數。</summary>
+    public int PiecesSinceChange { get; private set; }
+    public DateTimeOffset? ChangeStartedAt { get; private set; }
+    public DateTimeOffset? ChangeDueAt { get; private set; }
+
+    public bool IsChanging => ChangeDueAt is not null;
+
+    public void CountPiece() => PiecesSinceChange++;
+
+    public void StartChange(DateTimeOffset now, double seconds)
+    {
+        ChangeStartedAt = now;
+        ChangeDueAt = now.AddSeconds(seconds);
+    }
+
+    /// <summary>換刀完成：計數歸零，回傳這次換刀的紀錄。</summary>
+    public ToolChangeRecord CompleteChange()
+    {
+        var record = new ToolChangeRecord
+        {
+            StationCode = StationCode,
+            PiecesUsed = PiecesSinceChange,
+            StartedAt = ChangeStartedAt!.Value,
+            CompletedAt = ChangeDueAt!.Value,
+        };
+        PiecesSinceChange = 0;
+        ChangeStartedAt = null;
+        ChangeDueAt = null;
+        return record;
+    }
+}
+
+/// <summary>換刀紀錄（只新增）。</summary>
+public sealed class ToolChangeRecord
+{
+    public long Id { get; set; }
+    public required string StationCode { get; set; }
+    public int PiecesUsed { get; set; }
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset CompletedAt { get; set; }
 }
 
 /// <summary>可由面板修改的示範設定，全系統只有一列（Id = 1）。</summary>
@@ -36,6 +94,12 @@ public sealed class ProductionSettings
 
     /// <summary>最後一道工序完成後送往的暫存站。</summary>
     public required string BufferStationCode { get; set; }
+
+    /// <summary>AGV 上料、下料每件需要的時間（秒）。使用者 2026-10-09 決定先用 5 秒。</summary>
+    public double HandoverSecondsPerPiece { get; set; }
+
+    /// <summary>換刀時間（秒）。示範值，尚未定案。</summary>
+    public double ToolChangeSeconds { get; set; }
 }
 
 /// <summary>
@@ -157,7 +221,10 @@ public sealed class InventoryMovement
     };
 }
 
-/// <summary>某批次在某道工序的一次加工。之後反工時會是同一工序的另一筆紀錄。</summary>
+/// <summary>
+/// 某批次在某道工序的一次加工：逐件計數，整批做完才完成。之後反工時會是同一工序的另一筆紀錄。
+/// 進度以「目前這一件從何時開始」（<see cref="PieceStartedAt"/>）表示，存在資料庫，所以後端重啟後能接續。
+/// </summary>
 public sealed class OperationExecution
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -166,35 +233,53 @@ public sealed class OperationExecution
     public int StepSequence { get; set; }
     public required string StationCode { get; set; }
     public OperationStatus Status { get; private set; } = OperationStatus.Queued;
+    public int Quantity { get; set; }
+    public int PiecesCompleted { get; private set; }
 
     /// <summary>開始加工時從 <see cref="ProcessStep"/> 複製過來；之後修改設定不影響已開始的加工。</summary>
-    public int? DurationSeconds { get; private set; }
+    public double? SecondsPerPiece { get; private set; }
     public DateTimeOffset QueuedAt { get; set; }
     public DateTimeOffset? StartedAt { get; private set; }
-    public DateTimeOffset? DueAt { get; private set; }
+    public DateTimeOffset? PieceStartedAt { get; private set; }
     public DateTimeOffset? CompletedAt { get; private set; }
 
-    public void Start(int durationSeconds, DateTimeOffset now)
-    {
-        if (Status != OperationStatus.Queued)
-        {
-            throw new InvalidOperationException($"Operation {Id} cannot start from {Status}.");
-        }
+    /// <summary>目前這一件預計完成的時間。</summary>
+    public DateTimeOffset NextPieceDueAt => PieceStartedAt!.Value.AddSeconds(SecondsPerPiece!.Value);
 
+    public void Start(double secondsPerPiece, DateTimeOffset now)
+    {
+        Require(OperationStatus.Queued, nameof(Start));
         Status = OperationStatus.Running;
-        DurationSeconds = durationSeconds;
+        SecondsPerPiece = secondsPerPiece;
         StartedAt = now;
-        DueAt = now.AddSeconds(durationSeconds);
+        PieceStartedAt = now;
     }
 
-    public void Complete(DateTimeOffset now)
+    /// <summary>完成一件；做完最後一件時整筆加工完成。<paramref name="at"/> 是這一件實際完成的時間。</summary>
+    public void CompletePiece(DateTimeOffset at)
     {
-        if (Status != OperationStatus.Running)
+        Require(OperationStatus.Running, nameof(CompletePiece));
+        PiecesCompleted++;
+        PieceStartedAt = at;
+        if (PiecesCompleted >= Quantity)
         {
-            throw new InvalidOperationException($"Operation {Id} cannot complete from {Status}.");
+            Status = OperationStatus.Completed;
+            CompletedAt = at;
         }
+    }
 
-        Status = OperationStatus.Completed;
-        CompletedAt = now;
+    /// <summary>機台暫停（換刀）結束後，目前這一件從 <paramref name="at"/> 重新開始計時。</summary>
+    public void ResumeAt(DateTimeOffset at)
+    {
+        Require(OperationStatus.Running, nameof(ResumeAt));
+        PieceStartedAt = at;
+    }
+
+    private void Require(OperationStatus expected, string action)
+    {
+        if (Status != expected)
+        {
+            throw new InvalidOperationException($"Operation {Id}: {action} requires {expected}, but it is {Status}.");
+        }
     }
 }

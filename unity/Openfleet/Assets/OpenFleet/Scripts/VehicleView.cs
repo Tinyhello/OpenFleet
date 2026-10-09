@@ -18,6 +18,9 @@ namespace OpenFleet.Unity
         [SerializeField] private Renderer[] statusRenderers = new Renderer[0];
 
         [SerializeField] private TextMesh label;
+
+        [Tooltip("車上有貨時顯示的物件；不載貨的車型留空。")]
+        [SerializeField] private GameObject loadVisual;
         [SerializeField] private float statusEmission = 2f;
         [SerializeField] private float positionSmoothing = 12f;
         [SerializeField] private float rotationSmoothing = 10f;
@@ -68,6 +71,7 @@ namespace OpenFleet.Unity
 
             _target = position;
             var connectivityChanged = State == null || State.Connectivity != state.Connectivity;
+            var loadChanged = State == null || State.LoadQuantity != state.LoadQuantity;
             State = state;
 
             if (connectivityChanged)
@@ -75,7 +79,29 @@ namespace OpenFleet.Unity
                 ShowConnectivity(state, onlineColor, offlineColor);
             }
 
+            if (connectivityChanged || loadChanged)
+            {
+                ShowLoad(state, offlineColor);
+            }
+
             return true;
+        }
+
+        /// <summary>空車或載貨：車上的貨物物件與標籤文字。只切換顯示，沒有動畫。</summary>
+        private void ShowLoad(VehicleState state, Color offlineColor)
+        {
+            var online = state.Connectivity == VehicleConnectivity.Online;
+            if (loadVisual != null)
+            {
+                loadVisual.SetActive(state.LoadQuantity > 0);
+            }
+
+            if (label != null)
+            {
+                var load = state.LoadQuantity > 0 ? $"載 {state.LoadQuantity} 件" : "空車";
+                label.text = online ? $"{state.VehicleId}\n{load}" : $"{state.VehicleId}\nOFFLINE";
+                label.color = online ? Color.white : offlineColor;
+            }
         }
 
         private void ShowConnectivity(VehicleState state, Color onlineColor, Color offlineColor)
@@ -93,12 +119,6 @@ namespace OpenFleet.Unity
             foreach (var r in statusRenderers)
             {
                 r.SetPropertyBlock(_block);
-            }
-
-            if (label != null)
-            {
-                label.text = online ? state.VehicleId : state.VehicleId + "\nOFFLINE";
-                label.color = online ? Color.white : offlineColor;
             }
         }
 

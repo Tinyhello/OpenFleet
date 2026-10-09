@@ -12,6 +12,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<Station> Stations => Set<Station>();
     public DbSet<ProcessStep> ProcessSteps => Set<ProcessStep>();
     public DbSet<ProductionSettings> ProductionSettings => Set<ProductionSettings>();
+    public DbSet<StationTool> StationTools => Set<StationTool>();
+    public DbSet<ToolChangeRecord> ToolChanges => Set<ToolChangeRecord>();
     public DbSet<MaterialLot> Lots => Set<MaterialLot>();
     public DbSet<InventoryMovement> InventoryMovements => Set<InventoryMovement>();
     public DbSet<OperationExecution> Operations => Set<OperationExecution>();
@@ -48,7 +50,27 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(s => s.Sequence).ValueGeneratedNever();
             e.Property(s => s.StationCode).HasMaxLength(32);
             e.HasOne<Station>().WithMany().HasForeignKey(s => s.StationCode).OnDelete(DeleteBehavior.Restrict);
-            e.ToTable(t => t.HasCheckConstraint("CK_ProcessSteps_Duration", "\"DurationSeconds\" > 0"));
+            e.ToTable(t =>
+            {
+                t.HasCheckConstraint("CK_ProcessSteps_SecondsPerPiece", "\"SecondsPerPiece\" > 0");
+                t.HasCheckConstraint("CK_ProcessSteps_ToolLife", "\"ToolLifePieces\" > 0");
+            });
+        });
+
+        model.Entity<StationTool>(e =>
+        {
+            e.HasKey(t => t.StationCode);
+            e.Property(t => t.StationCode).HasMaxLength(32);
+            e.Ignore(t => t.IsChanging);
+            e.HasOne<Station>().WithOne().HasForeignKey<StationTool>(t => t.StationCode).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        model.Entity<ToolChangeRecord>(e =>
+        {
+            e.ToTable("ToolChanges");
+            e.Property(r => r.StationCode).HasMaxLength(32);
+            e.HasIndex(r => new { r.StationCode, r.Id });
+            e.HasOne<Station>().WithMany().HasForeignKey(r => r.StationCode).OnDelete(DeleteBehavior.Cascade);
         });
 
         model.Entity<ProductionSettings>(e =>
@@ -95,6 +117,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.ToTable("Operations");
             e.Property(o => o.Id).ValueGeneratedNever();
             e.Property(o => o.StationCode).HasMaxLength(32);
+            e.Ignore(o => o.NextPieceDueAt);
             e.HasIndex(o => new { o.StationCode, o.Status });
             e.HasOne(o => o.Lot).WithMany().HasForeignKey(o => o.LotId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<Station>().WithMany().HasForeignKey(o => o.StationCode).OnDelete(DeleteBehavior.Restrict);

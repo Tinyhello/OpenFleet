@@ -77,6 +77,16 @@ namespace OpenFleet.Unity.Editor
             var panelObject = new SerializedObject(panel);
             panelObject.FindProperty("fleetView").objectReferenceValue = view;
             panelObject.ApplyModifiedPropertiesWithoutUndo();
+            // 場景物件上方的進度條另外用一個 UIDocument，排在操作面板的下層。
+            var overlayObject = new GameObject("Status Overlay");
+            var overlayDocument = overlayObject.AddComponent<UnityEngine.UIElements.UIDocument>();
+            overlayDocument.panelSettings = document.panelSettings;
+            overlayDocument.sortingOrder = -1;
+            var overlay = overlayObject.AddComponent<StatusOverlay>();
+            var overlaySerialized = new SerializedObject(overlay);
+            overlaySerialized.FindProperty("fleetView").objectReferenceValue = view;
+            overlaySerialized.ApplyModifiedPropertiesWithoutUndo();
+
             if (document.panelSettings == null || document.panelSettings.themeStyleSheet == null)
             {
                 Debug.LogError("[OpenFleet] UI Toolkit panel settings or theme could not be loaded; the production panel will not render.");
@@ -162,7 +172,14 @@ namespace OpenFleet.Unity.Editor
         {
             var root = Group(parent, $"{spec.Id} ({spec.EnName})", ToWorld(spec.Position), spec.FacesSouth ? 180f : 0f);
 
-            StationModels.Build(spec.Kind, Group(root, "Model", Vector3.zero));
+            var model = Group(root, "Model", Vector3.zero);
+            StationModels.Build(spec.Kind, model);
+
+            // 站點代碼必須和後端的站點代碼相同，StatusOverlay 才對得上。
+            root.gameObject.AddComponent<StationAnchor>().Configure(
+                spec.Id,
+                FindChild(model, StationModels.InboundContentsName),
+                FindChild(model, StationModels.OutboundContentsName));
             FloorFrame(root, "Zone", new Vector3(0f, 0f, -0.1f), new Vector2(6.4f, 4.6f), 0.05f, Palette.ZoneLine);
 
             // 交接點：AGV 停靠、由站點設備確認取放的位置。
@@ -214,6 +231,19 @@ namespace OpenFleet.Unity.Editor
         }
 
         private static Vector3 ToWorld(Vector2 p) => new Vector3(p.x, 0f, p.y);
+
+        private static GameObject FindChild(Transform root, string name)
+        {
+            foreach (var child in root.GetComponentsInChildren<Transform>(true))
+            {
+                if (child.name == name)
+                {
+                    return child.gameObject;
+                }
+            }
+
+            return null;
+        }
 
         /// <summary>靜態物件可合併批次繪製；文字標籤會轉向，不能設成靜態。</summary>
         private static void MarkStatic(Transform root)

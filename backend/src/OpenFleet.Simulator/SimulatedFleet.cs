@@ -50,15 +50,26 @@ public sealed class SimulatedFleet
             var result = new List<(string, VehicleTelemetry)>(_vehicles.Count);
             foreach (var vehicle in _vehicles.Values)
             {
-                var moving = Step(vehicle, elapsed);
+                var speed = SpeedFor(vehicle);
+                var moving = Step(vehicle, elapsed, speed);
                 vehicle.Sequence++;
 
+                var job = vehicle.Job;
                 result.Add((vehicle.VehicleId, new VehicleTelemetry
                 {
                     SessionId = SessionId,
                     Sequence = vehicle.Sequence,
-                    Speed = moving ? _settings.Speed : 0,
+                    Speed = moving ? speed : 0,
                     Position = new Position3 { X = vehicle.X, Y = 0, Z = vehicle.Z },
+                    Activity = job?.Phase switch
+                    {
+                        JobPhase.Loading => VehicleActivity.Loading,
+                        JobPhase.Unloading => VehicleActivity.Unloading,
+                        _ => moving ? VehicleActivity.Moving : VehicleActivity.Idle,
+                    },
+                    ActivityProgress = job is { Phase: JobPhase.Loading or JobPhase.Unloading } ? job.HandoverProgress : 0,
+                    LoadQuantity = vehicle.LoadQuantity,
+                    LoadCode = vehicle.LoadQuantity > 0 ? vehicle.LoadCode : null,
                 }));
             }
 
@@ -116,7 +127,8 @@ public sealed class SimulatedFleet
 
                 case VehicleCommandType.Transport:
                     Supersede(vehicle);
-                    vehicle.Job = Job.Transport(source, command.Destination!);
+                    vehicle.Job = Job.Transport(source, command.Destination!, command.LoadQuantity, command.LoadCode,
+                        command.HandoverSeconds is { } seconds ? TimeSpan.FromSeconds(seconds) : _settings.HandoverDuration);
                     vehicle.Job.Waypoints = Plan(vehicle, command.Pickup!);
                     Emit(source, VehicleEventType.Accepted);
                     break;
@@ -165,8 +177,17 @@ public sealed class SimulatedFleet
         }
     }
 
+    /// <summary>
+    /// 目前的車速：空車最快，載貨越多越慢，滿載時是 FullLoadSpeed。
+    /// </summary>
+    private double SpeedFor(SimulatedVehicle vehicle)
+    {
+        var loadRatio = Math.Clamp((double)vehicle.LoadQuantity / _settings.LoadCapacity, 0, 1);
+        return _settings.Speed + (_settings.FullLoadSpeed - _settings.Speed) * loadRatio;
+    }
+
     /// <summary>推進一台車，回傳這一步是否在移動。</summary>
-    private bool Step(SimulatedVehicle vehicle, TimeSpan elapsed)
+    private bool Step(SimulatedVehicle vehicle, TimeSpan elapsed, double speed)
     {
         if (vehicle.Job is not { } job)
         {
@@ -183,13 +204,17 @@ public sealed class SimulatedFleet
 
             if (job.Phase == JobPhase.Loading)
             {
-                // 交接完成才回報 Loaded；抵達取料點本身不代表已取料。
+                // 交接完成才回報 Loaded；抵達取料點本身不代表已取料。物料從這一刻起算在車上，車速也跟著變慢。
+                vehicle.LoadQuantity = job.LoadQuantity;
+                vehicle.LoadCode = job.LoadCode;
                 Emit(job.Source, VehicleEventType.Loaded);
                 job.Phase = JobPhase.ToDestination;
                 job.Waypoints = Plan(vehicle, job.Destination!);
             }
             else
             {
+                vehicle.LoadQuantity = 0;
+                vehicle.LoadCode = null;
                 Emit(job.Source, VehicleEventType.Completed);
                 vehicle.Job = null;
             }
@@ -198,7 +223,7 @@ public sealed class SimulatedFleet
         }
 
         // 容許極小的浮點誤差：累加多步之後差 1e-15 也算到達，直接對齊到目標點。
-        var budget = _settings.Speed * elapsed.TotalSeconds + ArrivalTolerance;
+        var budget = speed * elapsed.TotalSeconds + ArrivalTolerance;
         while (budget > ArrivalTolerance && job.Waypoints.TryPeek(out var target))
         {
             var dx = target.X - vehicle.X;
@@ -227,11 +252,11 @@ public sealed class SimulatedFleet
         {
             case JobPhase.ToPickup:
                 job.Phase = JobPhase.Loading;
-                job.HandoverRemaining = _settings.HandoverDuration;
+                job.HandoverRemaining = job.HandoverDuration;
                 break;
             case JobPhase.ToDestination when job.IsTransport:
                 job.Phase = JobPhase.Unloading;
-                job.HandoverRemaining = _settings.HandoverDuration;
+                job.HandoverRemaining = job.HandoverDuration;
                 break;
             default:
                 Emit(job.Source, VehicleEventType.Completed);
@@ -303,6 +328,17 @@ public sealed class SimulatedFleet
             Destination = destination;
         }
 
+        public int LoadQuantity { get; private init; }
+        public string? LoadCode { get; private init; }
+
+        /// <summary>取料、卸料各需要的交接時間。</summary>
+        public TimeSpan HandoverDuration { get; private init; }
+
+        /// <summary>目前這次交接的進度，0～1。</summary>
+        public double HandoverProgress => HandoverDuration <= TimeSpan.Zero
+            ? 1
+            : Math.Clamp(1 - HandoverRemaining / HandoverDuration, 0, 1);
+
         public CommandSource Source { get; }
         public bool IsTransport { get; }
         public JobPhase Phase { get; set; }
@@ -312,8 +348,13 @@ public sealed class SimulatedFleet
         public Queue<(double X, double Z)> Waypoints { get; set; } = new();
         public TimeSpan HandoverRemaining { get; set; }
 
-        public static Job Transport(CommandSource source, Position3 destination) =>
-            new(source, isTransport: true, JobPhase.ToPickup, destination);
+        public static Job Transport(CommandSource source, Position3 destination, int loadQuantity, string? loadCode, TimeSpan handoverDuration) =>
+            new(source, isTransport: true, JobPhase.ToPickup, destination)
+            {
+                LoadQuantity = loadQuantity,
+                LoadCode = loadCode,
+                HandoverDuration = handoverDuration,
+            };
 
         public static Job Move(CommandSource source) =>
             new(source, isTransport: false, JobPhase.ToDestination, destination: null);
@@ -326,5 +367,9 @@ public sealed class SimulatedFleet
         public double Z { get; set; } = position.Z;
         public long Sequence { get; set; }
         public Job? Job { get; set; }
+
+        /// <summary>車上的件數；取料交接完成後才有值，卸料交接完成後歸零。</summary>
+        public int LoadQuantity { get; set; }
+        public string? LoadCode { get; set; }
     }
 }

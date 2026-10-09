@@ -15,11 +15,19 @@ POST {{api}}/api/vehicles/agv-01/ping
 ### P2：示範設定（批量、各站加工時間）
 GET {{api}}/api/settings
 
-### 修改設定：批量 20、粗加工 15 秒
+### 修改設定（整份取代）：批量 20、上下料每件 2 秒、換刀 20 秒、粗加工每件 1 秒且刀具壽命 100 件
 PUT {{api}}/api/settings
 Content-Type: application/json
 
-{ "lotQuantity": 20, "steps": [ { "sequence": 1, "durationSeconds": 15 } ] }
+{
+  "lotQuantity": 20,
+  "handoverSecondsPerPiece": 2,
+  "toolChangeSeconds": 20,
+  "steps": [ { "sequence": 1, "secondsPerPiece": 1, "toolLifePieces": 100 } ]
+}
+
+### 站點狀態：備料區、成品區、加工進度、刀具
+GET {{api}}/api/stations/status
 
 ### 建立批次（模擬收料）；省略 quantity 時使用設定的批量
 # @name lot
