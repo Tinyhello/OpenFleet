@@ -41,6 +41,15 @@ public sealed class ProcessStep
     /// </summary>
     public bool IsInspection { get; set; }
 
+    /// <summary>
+    /// 這道逐件工序是包裝：逐支包裝（<see cref="SecondsPerPiece"/> 是每支的包裝時間，沒有機台取放）。
+    /// 包完的框留在包裝站，同批次的框全部包完（或報廢）才併成一箱送去出貨。
+    /// </summary>
+    public bool IsPacking { get; set; }
+
+    /// <summary>人工作業的工序（品管、包裝）沒有機台取放一件的時間。</summary>
+    public bool IsManual => IsInspection || IsPacking;
+
     /// <summary>刀具壽命（件）：粗加工 500、精加工 250 是使用者提供的數值。</summary>
     public int ToolLifePieces { get; set; }
 
@@ -262,8 +271,72 @@ public sealed class ProductionSettings
     /// <summary>同一支最多反工幾次，超過就報廢。使用者 2026-10-10：1 次。</summary>
     public int MaxReworkCount { get; set; }
 
+    /// <summary>
+    /// 貨車多久來出貨站一次（秒）。使用者 2026-10-10：貨車定時來；間隔 1 小時是 Claude 挑的示範值。
+    /// </summary>
+    public double TruckIntervalSeconds { get; set; }
+
+    /// <summary>測試模式下貨車間隔加快的倍率（Claude 挑的 60：1 小時 → 1 分鐘）。</summary>
+    public double TestTruckSpeed { get; set; } = 1;
+
+    /// <summary>貨車倒數目前實際採用的倍率。</summary>
+    public double TruckSpeed => TestMode ? TestTruckSpeed : 1;
+
     /// <summary>現在派出的搬運，交接一框要多久。</summary>
     public double EffectiveHandoverSeconds => TestMode ? AgvHandoverSeconds / TestHandoverSpeed : AgvHandoverSeconds;
+}
+
+/// <summary>
+/// 出貨站的貨車班次，全系統只有一列（Id = 1）。和整爐工序一樣用累計扣減：
+/// 每次檢查扣掉實際經過秒數 × 當時的倍率，所以測試模式中途切換、後端重啟都能接續。
+/// </summary>
+public sealed class TruckSchedule
+{
+    public const int SingletonId = 1;
+
+    public int Id { get; private set; } = SingletonId;
+
+    /// <summary>距離下一班還有多久（秒，原本的間隔時間）。</summary>
+    public double RemainingSeconds { get; private set; }
+
+    /// <summary>上次扣減的時間；還沒開始計時為 null。</summary>
+    public DateTimeOffset? AccruedAt { get; private set; }
+    public DateTimeOffset? LastArrivedAt { get; private set; }
+
+    public static TruckSchedule Create(double intervalSeconds) => new() { RemainingSeconds = intervalSeconds };
+
+    /// <summary>扣掉這段時間；貨車到了回傳 true，並開始倒數下一班。後端停機很久也只算一班。</summary>
+    public bool Accrue(DateTimeOffset now, double speed, double intervalSeconds)
+    {
+        if (AccruedAt is { } accrued && now > accrued)
+        {
+            RemainingSeconds -= (now - accrued).TotalSeconds * speed;
+        }
+
+        AccruedAt = now;
+        if (RemainingSeconds > 0)
+        {
+            return false;
+        }
+
+        RemainingSeconds = intervalSeconds;
+        LastArrivedAt = now;
+        return true;
+    }
+
+    /// <summary>間隔被改了：從現在重新倒數。</summary>
+    public void Restart(double intervalSeconds) => RemainingSeconds = intervalSeconds;
+}
+
+/// <summary>出貨紀錄（只新增）：某個批次的出貨箱被貨車載走。</summary>
+public sealed class Shipment
+{
+    public long Id { get; set; }
+    public Guid LotId { get; set; }
+    public required string BatchNumber { get; set; }
+    public required string LotNumber { get; set; }
+    public int Quantity { get; set; }
+    public DateTimeOffset ShippedAt { get; set; }
 }
 
 /// <summary>
@@ -294,6 +367,9 @@ public sealed class MaterialLot
 
     /// <summary>這一框的料已經反工過幾次。品管用它判斷還能不能再反工。</summary>
     public int ReworkCount { get; private set; }
+
+    /// <summary>這一筆是整批包裝後的出貨箱（使用者 2026-10-10：整批一箱），不是料框。</summary>
+    public bool IsBox { get; private set; }
 
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
@@ -433,6 +509,56 @@ public sealed class MaterialLot
         UpdatedAt = now,
     };
 
+    /// <summary>這一框包裝完：留在包裝站，等同批次其他的框。</summary>
+    public void FinishPacking(DateTimeOffset now)
+    {
+        Require(LotStatus.Processing, nameof(FinishPacking));
+        CurrentStepSequence = null;
+        Status = LotStatus.Packed;
+        UpdatedAt = now;
+    }
+
+    /// <summary>這一框的料併進了出貨箱：料框空了，不再流動。數量保留，代表這一框包了幾支。</summary>
+    public void MoveIntoBox(DateTimeOffset now)
+    {
+        Require(LotStatus.Packed, nameof(MoveIntoBox));
+        Status = LotStatus.Boxed;
+        UpdatedAt = now;
+    }
+
+    /// <summary>
+    /// 同批次已包裝的框（<paramref name="packed"/>）併成一箱，在包裝站等待搬運到出貨站。
+    /// 批次編號相同；箱號是批次編號加上 -BOX。
+    /// </summary>
+    public static MaterialLot PackBox(IReadOnlyList<MaterialLot> packed, DateTimeOffset now)
+    {
+        var first = packed[0];
+        return new MaterialLot
+        {
+            Id = Guid.NewGuid(),
+            LotNumber = $"{first.BatchNumber}-BOX",
+            BatchNumber = first.BatchNumber,
+            BinIndex = 1,
+            BinCount = 1,
+            RodDiameterMm = first.RodDiameterMm,
+            PartCode = first.PartCode,
+            Quantity = packed.Sum(l => l.Quantity),
+            Status = LotStatus.AwaitingTransport,
+            StationCode = first.StationCode,
+            IsBox = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+    }
+
+    /// <summary>貨車把這一箱載走：留在出貨站的紀錄上，不再流動。</summary>
+    public void Ship(DateTimeOffset now)
+    {
+        Require(LotStatus.Staged, nameof(Ship));
+        Status = LotStatus.Shipped;
+        UpdatedAt = now;
+    }
+
     private void Require(LotStatus expected, string action) => RequireOneOf(action, expected);
 
     private void RequireOneOf(string action, params LotStatus[] expected)
@@ -488,6 +614,9 @@ public sealed class InventoryMovement
 
     /// <summary>報廢品的去向代碼（不是實體站點）。</summary>
     public const string ScrapLocation = "scrap";
+
+    /// <summary>出貨離廠的去向代碼（不是實體站點）。</summary>
+    public const string ShippedLocation = "shipped";
 
     /// <summary>在批次移動「之後」呼叫：To 取批次的新位置。</summary>
     public static InventoryMovement Record(MaterialLot lot, string? from, string reason, DateTimeOffset now) => new()

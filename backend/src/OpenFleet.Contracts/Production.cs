@@ -25,6 +25,15 @@ namespace OpenFleet.Contracts
 
         /// <summary>品管判定整框報廢（沒有任何一支合格或可以反工）。留在品管站，不再流動。</summary>
         Scrapped,
+
+        /// <summary>這一框已經包裝完，在包裝站等同批次其他的框到齊。</summary>
+        Packed,
+
+        /// <summary>這一框的料已經併進整批的出貨箱（IsBox 的那一筆），料框空了，不再流動。</summary>
+        Boxed,
+
+        /// <summary>出貨箱已經被貨車載走。</summary>
+        Shipped,
     }
 
     /// <summary>品管檢出的不良原因。原因決定怎麼處理：表面與鍍層可以反工，尺寸不良只能報廢。</summary>
@@ -133,6 +142,9 @@ namespace OpenFleet.Contracts
         /// <summary>唯讀：這道逐件工序是品管檢驗（逐支判定合格或不良，沒有機台取放時間）。PUT 時忽略。</summary>
         public bool IsInspection { get; set; }
 
+        /// <summary>唯讀：這道逐件工序是包裝（逐支包裝，沒有機台取放時間；整批到齊後併成一箱）。PUT 時忽略。</summary>
+        public bool IsPacking { get; set; }
+
         /// <summary>有刀具的逐件工序：刀具壽命，加工這麼多件後要換刀。</summary>
         public int ToolLifePieces { get; set; }
 
@@ -218,6 +230,12 @@ namespace OpenFleet.Contracts
         /// <summary>同一支最多可以反工幾次；已經反工這麼多次的料再被判不良就報廢。0 表示不反工。</summary>
         public int MaxReworkCount { get; set; }
 
+        /// <summary>貨車多久來出貨站一次（秒）。來的時候把出貨站上的出貨箱全部載走。</summary>
+        public double TruckIntervalSeconds { get; set; }
+
+        /// <summary>測試模式下貨車間隔加快的倍率。</summary>
+        public double TestTruckSpeed { get; set; } = 1;
+
         /// <summary>PUT 時採用 Sequence 與該種工序自己的數值（時間、刀具壽命、開爐條件、TestSpeed）。</summary>
         public List<ProcessStepDto> Steps { get; set; } = new List<ProcessStepDto>();
     }
@@ -253,6 +271,9 @@ namespace OpenFleet.Contracts
 
         /// <summary>這一框的料已經反工過幾次；0 表示沒有反工過。</summary>
         public int ReworkCount { get; set; }
+
+        /// <summary>這一筆是整批包裝後的出貨箱，不是料框。</summary>
+        public bool IsBox { get; set; }
 
         /// <summary>批次所在站點；在車上時為 null。</summary>
         public string? StationCode { get; set; }
@@ -421,11 +442,14 @@ namespace OpenFleet.Contracts
         /// <summary>這一站的工序是品管檢驗；Machining 的進度是已檢驗的支數。</summary>
         public bool IsInspection { get; set; }
 
+        /// <summary>這一站的工序是包裝；Machining 的進度是已包裝的支數。</summary>
+        public bool IsPacking { get; set; }
+
         /// <summary>備料區：等待加工的件數（排隊中的批次＋加工中批次還沒做的件數）；暫存點則是已暫存的件數。</summary>
         public int InboundQuantity { get; set; }
         public int? InboundCapacity { get; set; }
 
-        /// <summary>成品區：已加工完成、還沒被搬走的件數；倉庫則是等待搬運的件數。</summary>
+        /// <summary>成品區：已加工完成、還沒被搬走的件數（包裝站包含已包好、在等同批次到齊的）；倉庫則是等待搬運的件數。</summary>
         public int OutboundQuantity { get; set; }
         public int? OutboundCapacity { get; set; }
 
@@ -443,6 +467,19 @@ namespace OpenFleet.Contracts
 
         /// <summary>叫不到車是因為車都在忙（缺車）還是全部離線（重大事故）；沒有時為 null。</summary>
         public ShortageReason? ShortageReason { get; set; }
+
+        /// <summary>出貨站才有：下一班貨車的倒數；其他站為 null。</summary>
+        public TruckStatusDto? Truck { get; set; }
+    }
+
+    /// <summary>出貨站的貨車：每隔固定時間來一次，把站上的出貨箱載走。</summary>
+    public sealed class TruckStatusDto
+    {
+        /// <summary>距離下一班貨車的進度，0～1。</summary>
+        public double Progress { get; set; }
+
+        /// <summary>下一班貨車還要多久（秒，原本的間隔時間）。測試模式下會走得比實際時鐘快。</summary>
+        public double RemainingSeconds { get; set; }
     }
 
     /// <summary>叫不到車的原因。兩者分開記錄、分開統計。</summary>
@@ -566,6 +603,37 @@ namespace OpenFleet.Contracts
         public int SurfaceDefects { get; set; }
         public int PlatingDefects { get; set; }
         public int DimensionDefects { get; set; }
+    }
+
+    /// <summary>一次出貨：一個批次的出貨箱被貨車載走。</summary>
+    public sealed class ShipmentDto
+    {
+        public string BatchNumber { get; set; } = string.Empty;
+        public string LotNumber { get; set; } = string.Empty;
+        public int Quantity { get; set; }
+        public DateTimeOffset ShippedAt { get; set; }
+    }
+
+    /// <summary>出貨的現況與累計（GET /api/shipping）。</summary>
+    public sealed class ShippingSummaryDto
+    {
+        /// <summary>下一班貨車還要多久（秒，原本的間隔時間）。</summary>
+        public double TruckRemainingSeconds { get; set; }
+        public double TruckIntervalSeconds { get; set; }
+
+        /// <summary>在包裝站已經包好、還在等同批次其他框的支數。</summary>
+        public int PackedPieces { get; set; }
+
+        /// <summary>已到出貨站、等貨車的箱數與支數。</summary>
+        public int WaitingBoxes { get; set; }
+        public int WaitingPieces { get; set; }
+
+        /// <summary>累計已出貨的箱數（一個批次一箱）與支數。</summary>
+        public int ShippedBoxes { get; set; }
+        public int ShippedPieces { get; set; }
+
+        /// <summary>最近的出貨紀錄，新的在前。</summary>
+        public List<ShipmentDto> Shipments { get; set; } = new List<ShipmentDto>();
     }
 
     /// <summary>一個批次的完整追蹤：位置異動、加工紀錄與搬運任務。</summary>

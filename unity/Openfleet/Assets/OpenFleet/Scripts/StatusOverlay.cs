@@ -472,6 +472,15 @@ namespace OpenFleet.Unity
                 if (!_isMachine)
                 {
                     _hasTool = false;
+                    if (status.Truck != null)
+                    {
+                        // 出貨站：等貨車的支數與下一班貨車的倒數，沒有箱子時也顯示。
+                        _summary.text = $"待出貨 {status.InboundQuantity} 支\n貨車 {Remaining(status.Truck.RemainingSeconds)}";
+                        HasContent = true;
+                        ShowToolRow();
+                        return;
+                    }
+
                     // 倉庫：等待搬運的件數；暫存點：已暫存的件數。
                     var total = status.InboundQuantity + status.OutboundQuantity;
                     _summary.text = status.OutboundQuantity > 0 ? $"待搬運 {status.OutboundQuantity} 件" : $"暫存 {status.InboundQuantity} 件";
@@ -509,8 +518,8 @@ namespace OpenFleet.Unity
                     }
                     else
                     {
-                        // 品管站的進度是已檢驗的支數。
-                        _machining.Set(status.IsInspection ? "檢驗" : "加工", Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
+                        // 品管站的進度是已檢驗的支數，包裝站是已包裝的支數。
+                        _machining.Set(WorkName(status), Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
                     }
                 }
                 else if (status.ShortageCause.HasValue)
@@ -535,7 +544,7 @@ namespace OpenFleet.Unity
                 }
                 else
                 {
-                    _machining.Set(status.IsInspection ? "檢驗" : "加工", 0f, "待機", Colors.Machining);
+                    _machining.Set(WorkName(status), 0f, "待機", Colors.Machining);
                 }
 
                 if (tool != null)
@@ -570,6 +579,11 @@ namespace OpenFleet.Unity
             }
 
             /// <summary>剩餘時間（原本的工序時間，測試模式下走得比較快）：一小時以上顯示「時h分m」，不到一小時顯示「分m秒s」。</summary>
+            private static string WorkName(StationStatusDto status)
+            {
+                return status.IsInspection ? "檢驗" : status.IsPacking ? "包裝" : "加工";
+            }
+
             private static string Remaining(double seconds)
             {
                 var total = Mathf.Max(0, Mathf.CeilToInt((float)seconds));

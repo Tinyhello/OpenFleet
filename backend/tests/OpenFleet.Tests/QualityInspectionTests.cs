@@ -12,7 +12,7 @@ namespace OpenFleet.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLifetime
 {
-    private const int Plating = 5, Polish = 6, Inspection = 7;
+    private const int Plating = 5, Polish = 6, Inspection = 7, Packing = 8;
 
     private TestDatabase _database = null!;
 
@@ -44,9 +44,9 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         await using var scope = _database.NewScope();
         var bins = await scope.Db.Lots.OrderBy(l => l.LotNumber).ToListAsync();
 
-        // 原本的框留下合格的 7 支，送往包裝站入口暫存（品管之後的流程還沒做）。
+        // 原本的框留下合格的 7 支，送往包裝站。
         Assert.Equal(new[] { lot.LotNumber, $"{lot.LotNumber}-RP", $"{lot.LotNumber}-RS" }, bins.Select(b => b.LotNumber));
-        Assert.Equal((7, LotStatus.AwaitingTransport, "qc", null, 0), (bins[0].Quantity, bins[0].Status, bins[0].StationCode, bins[0].CurrentStepSequence, bins[0].ReworkCount));
+        Assert.Equal((7, LotStatus.AwaitingTransport, "qc", Packing, 0), (bins[0].Quantity, bins[0].Status, bins[0].StationCode, bins[0].CurrentStepSequence!.Value, bins[0].ReworkCount));
 
         // 要反工的另外裝框，批次編號相同：鍍層不良回電鍍、表面不良回拋光，各記一次反工。
         Assert.All(bins, b => Assert.Equal(lot.BatchNumber, b.BatchNumber));
@@ -86,7 +86,7 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         _database.Defects.Enqueue(null, DefectReason.Surface);
         await AdvanceAsync(0);
         await AdvanceAsync(4);
-        Assert.Equal((1, LotStatus.AwaitingTransport, "qc", null, 1), await StateAsync(lot.Id));
+        Assert.Equal((1, LotStatus.AwaitingTransport, "qc", Packing, 1), await StateAsync(lot.Id));
 
         await using var scope = _database.NewScope();
         Assert.Equal(1, await scope.Db.Lots.CountAsync());
@@ -128,7 +128,7 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         await AdvanceAsync(0);
         await AdvanceAsync(6);
 
-        Assert.Equal((1, LotStatus.AwaitingTransport, "qc", null, 0), await StateAsync(lot.Id));
+        Assert.Equal((1, LotStatus.AwaitingTransport, "qc", Packing, 0), await StateAsync(lot.Id));
         var summary = await SummaryAsync();
         Assert.Equal((3, 1, 0, 2), (summary.Inspected, summary.Passed, summary.Reworked, summary.Scrapped));
     }

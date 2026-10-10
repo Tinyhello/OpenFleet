@@ -26,3 +26,7 @@ TestResults/
 Thumbs.db
 /unity/Openfleet/Assets/_Recovery/
 /unity/Openfleet/Assets/_Recovery.meta
+
+# Blender（unity/Openfleet/Blender）
+__pycache__/
+*.blend1

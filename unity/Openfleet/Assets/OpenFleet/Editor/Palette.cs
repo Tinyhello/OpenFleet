@@ -1,3 +1,5 @@
+using System.Linq;
+using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 
@@ -54,6 +56,42 @@ namespace OpenFleet.Unity.Editor
 
         /// <summary>顏色由 VehicleView 依連線狀態以 MaterialPropertyBlock 覆寫，這裡只是預設值。</summary>
         public static Material Status => Get("AgvStatus", Rgb(0.45f, 0.45f, 0.45f), 0.5f, emission: Color.black);
+
+        /// <summary>建立或更新所有材質。FBX 依名稱對應材質，所以要在匯入模型前確保 .mat 都存在。</summary>
+        public static void EnsureAll()
+        {
+            foreach (var property in typeof(Palette).GetProperties(BindingFlags.Public | BindingFlags.Static).Where(p => p.PropertyType == typeof(Material)))
+            {
+                property.GetValue(null);
+            }
+        }
+
+        /// <summary>依名稱找 Palette 材質（Blender 的 ".001" 之類尾碼會忽略）。找不到時回傳 null。</summary>
+        public static Material Find(string name)
+        {
+            var dot = name.IndexOf('.');
+            var key = (dot > 0 ? name.Substring(0, dot) : name).Replace(" (Instance)", string.Empty).Trim();
+            return AssetDatabase.LoadAssetAtPath<Material>($"{Folder}/{key}.mat");
+        }
+
+        /// <summary>把模型內嵌的材質換成同名的 Palette 材質；已經是 Palette 材質或找不到對應時保留原本的。</summary>
+        public static Material[] Remap(Material[] materials, string context)
+        {
+            var result = new Material[materials.Length];
+            for (var i = 0; i < materials.Length; i++)
+            {
+                var source = materials[i];
+                var mapped = source == null ? null : Find(source.name);
+                if (source != null && mapped == null)
+                {
+                    Debug.LogWarning($"[OpenFleet] {context}: material '{source.name}' has no match in {Folder}.");
+                }
+
+                result[i] = mapped != null ? mapped : source;
+            }
+
+            return result;
+        }
 
         private static Material Get(string name, Color color, float smoothness, float metallic = 0f, Color? emission = null)
         {

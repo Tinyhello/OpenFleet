@@ -32,7 +32,9 @@
 | `Assets/OpenFleet/Resources/Prefabs/` | AGV Prefab（`AGV_Large`、`AGV_Small`、`AGV_Unknown`），執行時以 `Resources.Load` 載入 |
 | `Assets/OpenFleet/Resources/UI/` | UI Toolkit 的 PanelSettings 與主題（由 Build Factory Scene 產生），執行時以 `Resources.Load` 載入 |
 | `Assets/OpenFleet/Editor/FactoryLayout.cs` | 暫定佈局：站點位置、內外兩條車道（須與後端的示範路網 `DemoRoadNetwork` 相同） |
-| `Assets/OpenFleet/Editor/StationModels.cs`、`VehicleModels.cs` | 用基本幾何組裝的站點與 AGV 模型 |
+| `Assets/OpenFleet/Editor/StationModels.cs`、`VehicleModels.cs` | 站點與 AGV：擺放 Blender 模型，並產生執行時會切換的物件（料箱、狀態燈、標籤） |
+| `Assets/OpenFleet/Models/*.fbx`、`Editor/ModelImport.cs` | Blender 匯出的模型與匯入設定；材質依名稱換成 `Palette` 的材質 |
+| `Blender/` | 模型的原始檔（`Models/*.blend`）與產生模型的腳本（`scripts/*.py`、`ofkit.py`）；不在 `Assets` 底下，Unity 不會匯入 |
 | `Assets/OpenFleet/Editor/Palette.cs` | 模型的材質顏色（建場景時使用）；執行時會變化的顏色在 `PresentationController.Colors` |
 | `Assets/OpenFleet/Scenes/Factory.unity` | 工廠場景（由選單產生，不要手動修改） |
 | `Assets/OpenFleet/Scripts/FleetJson.cs` | Newtonsoft 設定，對應後端 `JsonDefaults` |
@@ -49,8 +51,9 @@
    - **需要人工處理**（平常不顯示）：搬運失敗、而且系統不能自己重派的任務（物料可能在車上）。到現場確認後按「已放回取料站」或「已送到卸料站」。
    - **重大事故**（平常不顯示）：某個車型全部離線時，以紅字顯示在「缺車耽誤」上方；事故結束後留下累計時間。
    - **品管**：累計檢了幾支、合格／反工／報廢各幾支，以及表面、鍍層、尺寸三種不良的支數。不良率與反工上限在示範設定裡。
+   - **出貨**：下一班貨車還要多久、已包裝在等同批次到齊的支數、在出貨站等貨車的箱數、累計出貨。貨車間隔在示範設定裡。
    - **缺車耽誤**：車都在忙、叫不到車時，此刻有幾個任務在等、任務等車的累計，以及各工序機台因此停下來的時間（等料／成品未搬走／等刀）。不含離線事故。時間是實際時間，顯示成「分:秒」；測試模式下機台比車快很多，這裡的數字會偏高。
-   - **建立批次 Φ30／Φ24**：在原料倉建立一個批次（數量是示範設定的「批量」，最多 300 支）。Φ30 一框 30 支、Φ24 一框 45 支，超過一框就分成多框，AGV 一趟送一框。每一框依序經過粗加工、精加工、淬火、回火、電鍍、拋光、品管，合格的送到包裝站入口暫存；品管判不良的另外裝框送回拋光或電鍍反工，或報廢。清單每秒更新一次，每個批次一段，列出幾框在哪裡。
+   - **建立批次 Φ30／Φ24**：在原料倉建立一個批次（數量是示範設定的「批量」，最多 300 支）。Φ30 一框 30 支、Φ24 一框 45 支，超過一框就分成多框，AGV 一趟送一框。每一框依序經過粗加工、精加工、淬火、回火、電鍍、拋光、品管、包裝；品管判不良的另外裝框送回拋光或電鍍反工，或報廢。同批次的框全部包裝完才併成一箱送到出貨站，貨車定時來載走。清單每秒更新一次，每個批次一段，列出幾框在哪裡。
    - **清除示範資料**：刪除所有批次與搬運紀錄，設定保留。
 
 5. 場景上的顯示：

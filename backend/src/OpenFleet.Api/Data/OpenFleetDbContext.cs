@@ -19,6 +19,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<InventoryMovement> InventoryMovements => Set<InventoryMovement>();
     public DbSet<OperationExecution> Operations => Set<OperationExecution>();
     public DbSet<InspectionResult> InspectionResults => Set<InspectionResult>();
+    public DbSet<TruckSchedule> TruckSchedules => Set<TruckSchedule>();
+    public DbSet<Shipment> Shipments => Set<Shipment>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
     public DbSet<RouteNode> RouteNodes => Set<RouteNode>();
     public DbSet<RouteEdge> RouteEdges => Set<RouteEdge>();
@@ -61,6 +63,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(s => s.StationCode).HasMaxLength(32);
             e.HasOne<Station>().WithMany().HasForeignKey(s => s.StationCode).OnDelete(DeleteBehavior.Restrict);
             e.Property(s => s.StageName).HasMaxLength(32);
+            e.Ignore(s => s.IsManual);
             // 每種工序只檢查自己用到的欄位。
             e.ToTable(t =>
             {
@@ -109,6 +112,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(s => s.BufferStationCode).HasMaxLength(32);
             e.Property(s => s.ToolStoreStationCode).HasMaxLength(32);
             e.Ignore(s => s.EffectiveHandoverSeconds);
+            e.Ignore(s => s.TruckSpeed);
             e.ToTable(t => t.HasCheckConstraint("CK_ProductionSettings_Singleton", "\"Id\" = 1"));
         });
 
@@ -139,6 +143,19 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         {
             e.Property(r => r.StationCode).HasMaxLength(32);
             e.HasOne<MaterialLot>().WithMany().HasForeignKey(r => r.LotId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        model.Entity<TruckSchedule>(e =>
+        {
+            e.Property(s => s.Id).ValueGeneratedNever();
+            e.ToTable(t => t.HasCheckConstraint("CK_TruckSchedules_Singleton", "\"Id\" = 1"));
+        });
+
+        model.Entity<Shipment>(e =>
+        {
+            e.Property(s => s.BatchNumber).HasMaxLength(32);
+            e.Property(s => s.LotNumber).HasMaxLength(32);
+            e.HasOne<MaterialLot>().WithMany().HasForeignKey(s => s.LotId).OnDelete(DeleteBehavior.Cascade);
         });
 
         model.Entity<InventoryMovement>(e =>

@@ -12,8 +12,8 @@ using Colors = OpenFleet.Unity.PresentationController.Colors;
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件、品管的不良率）、開關測試模式、建立批次、
-    /// 查看缺車耽誤的時間、品管的累計結果與批次目前的狀態與位置。
+    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件、品管的不良率、貨車間隔）、開關測試模式、建立批次、
+    /// 查看缺車耽誤的時間、品管的累計結果、出貨的現況與批次目前的狀態與位置。
     /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；批次清單與缺車統計以輪詢更新。
     /// 由 PresentationController 在執行時建立。
     /// </summary>
@@ -40,6 +40,9 @@ namespace OpenFleet.Unity
         private SliderInt _defectPercent;
         private SliderInt _maxReworkCount;
         private Label _inspection;
+        private SliderInt _truckMinutes;
+        private SliderInt _testTruckSpeed;
+        private Label _shipping;
         private Label _quantityHint;
         private Label _status;
         private Label _shortage;
@@ -166,6 +169,12 @@ namespace OpenFleet.Unity
             _maxReworkCount = NumberField("反工上限（次）", 0, 3);
             settings.Add(_maxReworkCount);
 
+            // 出貨：貨車每隔這麼久來一次，把出貨站上的箱子載走；測試模式下用右邊的倍率加快。
+            _truckMinutes = NumberField("貨車間隔（分）", 1, 240);
+            settings.Add(_truckMinutes);
+            _testTruckSpeed = NumberField("測試：貨車（×）", 1, 300);
+            settings.Add(_testTruckSpeed);
+
             _stepRows = new VisualElement();
             settings.Add(_stepRows);
 
@@ -206,6 +215,12 @@ namespace OpenFleet.Unity
             _inspection = Hint("尚未讀到資料。");
             _inspection.style.whiteSpace = WhiteSpace.Normal;
             _panel.Add(_inspection);
+
+            // 包裝與出貨：同批次的框全部包完才併成一箱送到出貨站，貨車定時來載走。
+            _panel.Add(Heading("出貨"));
+            _shipping = Hint("尚未讀到資料。");
+            _shipping.style.whiteSpace = WhiteSpace.Normal;
+            _panel.Add(_shipping);
 
             _panel.Add(Heading("批次"));
             var lotButtons = Row();
@@ -307,6 +322,8 @@ namespace OpenFleet.Unity
             // 這兩個欄位 0 是有意義的值（不產生不良、不反工），不能用 SetValue（它會把 0 當成 1）。
             _defectPercent.value = Mathf.RoundToInt((float)(settings.DefectRate * 100d));
             _maxReworkCount.value = settings.MaxReworkCount;
+            SetValue(_truckMinutes, settings.TruckIntervalSeconds / 60d);
+            SetValue(_testTruckSpeed, settings.TestTruckSpeed);
 
             _stepRows.Clear();
             _stepAppliers.Clear();
@@ -327,7 +344,7 @@ namespace OpenFleet.Unity
                     continue;
                 }
 
-                var seconds = NumberField(step.IsInspection ? "檢驗（秒／支）" : "加工（秒／件）", 1, 120);
+                var seconds = NumberField(step.IsInspection ? "檢驗（秒／支）" : step.IsPacking ? "包裝（秒／支）" : "加工（秒／件）", 1, 120);
                 SetValue(seconds, step.SecondsPerPiece);
                 _stepRows.Add(seconds);
                 _stepAppliers.Add(() => step.SecondsPerPiece = seconds.value);
@@ -405,6 +422,8 @@ namespace OpenFleet.Unity
             _settings.TestEmptyVehicleSpeed = _testEmptyVehicleSpeed.value;
             _settings.DefectRate = _defectPercent.value / 100d;
             _settings.MaxReworkCount = _maxReworkCount.value;
+            _settings.TruckIntervalSeconds = _truckMinutes.value * 60d;
+            _settings.TestTruckSpeed = _testTruckSpeed.value;
             foreach (var apply in _stepAppliers)
             {
                 apply();
@@ -441,6 +460,7 @@ namespace OpenFleet.Unity
                 yield return RefreshLots();
                 yield return RefreshShortage();
                 yield return RefreshInspection();
+                yield return RefreshShipping();
                 yield return RefreshAttention();
                 yield return new WaitForSecondsRealtime(RefreshSeconds);
             }
@@ -576,6 +596,26 @@ namespace OpenFleet.Unity
             }
         }
 
+        private IEnumerator RefreshShipping()
+        {
+            using (var request = UnityWebRequest.Get($"{Api}/api/shipping"))
+            {
+                yield return request.SendWebRequest();
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    yield break;
+                }
+
+                var summary = FleetJson.Deserialize<ShippingSummaryDto>(request.downloadHandler.text);
+                var remaining = Mathf.Max(0, Mathf.CeilToInt((float)summary.TruckRemainingSeconds));
+                _shipping.text =
+                    $"下一班貨車：{remaining / 60} 分 {remaining % 60:00} 秒後\n" +
+                    $"已包裝、等同批次到齊：{summary.PackedPieces} 支\n" +
+                    $"在出貨站等貨車：{summary.WaitingBoxes} 箱／{summary.WaitingPieces} 支\n" +
+                    $"累計已出貨：{summary.ShippedBoxes} 箱／{summary.ShippedPieces} 支";
+            }
+        }
+
         /// <summary>
         /// 車輛全部離線是重大事故，和缺車分開顯示：事故進行中，或曾經因此耽誤過，才顯示這一段。
         /// </summary>
@@ -660,6 +700,18 @@ namespace OpenFleet.Unity
                 foreach (var batchNumber in order)
                 {
                     var bins = batches[batchNumber];
+                    // 整批包裝完會併成一箱：之後只列那一箱，原本的料框（已空）與報廢的框不再列。
+                    var box = bins.Find(b => b.IsBox);
+                    if (box != null)
+                    {
+                        var boxRow = new Label($"{batchNumber}　{box.Quantity} 支／1 箱（Φ{box.RodDiameterMm}）\n{Describe(box)}");
+                        boxRow.style.whiteSpace = WhiteSpace.Normal;
+                        boxRow.style.marginBottom = 6;
+                        boxRow.style.color = box.Status == LotStatus.Shipped ? Colors.Muted : Color.white;
+                        _lotRows.Add(boxRow);
+                        continue;
+                    }
+
                     var pieces = 0;
                     var finished = true;
                     var places = new List<string>();
@@ -704,8 +756,10 @@ namespace OpenFleet.Unity
                 case LotStatus.InTransit: return $"在 {place} 車上運送中{rework}";
                 case LotStatus.Queued: return $"在 {place} 排隊等待加工{rework}";
                 case LotStatus.Processing: return $"在 {place} 加工中{rework}";
-                case LotStatus.Staged: return $"已送達 {place} 暫存";
+                case LotStatus.Staged: return lot.IsBox ? $"在 {place} 等貨車" : $"已送達 {place} 暫存";
                 case LotStatus.Scrapped: return $"在 {place} 整框報廢";
+                case LotStatus.Packed: return $"在 {place} 已包裝，等同批次到齊";
+                case LotStatus.Shipped: return "已出貨";
                 default: return lot.Status.ToString();
             }
         }

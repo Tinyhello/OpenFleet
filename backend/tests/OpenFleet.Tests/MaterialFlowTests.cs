@@ -532,20 +532,22 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await using (var seeded = (await TestDatabase.CreateAsync(postgres)).NewScope())
         {
             var defaults = await seeded.Production.GetSettingsAsync(default);
-            Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish", "qc" }, defaults.Steps.Select(step => step.StationCode));
-            // 逐件工序：粗加工、精加工、拋光，以及品管（逐支檢驗 60 秒）。
-            Assert.Equal(new[] { (30d, 500, false), (60d, 250, false), (20d, 0, false), (60d, 0, true) },
-                defaults.Steps.Where(step => step.Kind == ProcessStepKind.Piece).Select(step => (step.SecondsPerPiece, step.ToolLifePieces, step.IsInspection)));
+            Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish", "qc", "packing" }, defaults.Steps.Select(step => step.StationCode));
+            // 逐件工序：粗加工、精加工、拋光，以及品管（逐支檢驗 60 秒）、包裝（逐支 60 秒）。
+            Assert.Equal(new[] { (30d, 500, false, false), (60d, 250, false, false), (20d, 0, false, false), (60d, 0, true, false), (60d, 0, false, true) },
+                defaults.Steps.Where(step => step.Kind == ProcessStepKind.Piece)
+                    .Select(step => (step.SecondsPerPiece, step.ToolLifePieces, step.IsInspection, step.IsPacking)));
             // 淬火 4 小時、回火 8 小時，各 150～300 支；電鍍 1 小時，有料就開，一爐 30 mm 40 支／24 mm 56 支。
             Assert.Equal(new[] { (150, 300, 0, 14400d), (150, 300, 0, 28800d), (1, 40, 56, 3600d) },
                 defaults.Steps.Where(step => step.Kind == ProcessStepKind.Batch)
                     .Select(step => (step.BatchMinPieces, step.BatchMaxPieces, step.BatchMaxPiecesRod24, step.BatchSeconds)));
-            Assert.Equal("packing", defaults.BufferStationCode);
+            // 包好的出貨箱送到出貨站；貨車每小時一班，測試模式 60 倍。
+            Assert.Equal(("shipping", 3600d, 60d), (defaults.BufferStationCode, defaults.TruckIntervalSeconds, defaults.TestTruckSpeed));
             // 品管：不良率 10%，同一支最多反工 1 次。
             Assert.Equal((0.1, 1), (defaults.DefectRate, defaults.MaxReworkCount));
-            // 測試模式預設關閉；各站的專用倍率：粗加工與精加工 20、淬火與回火 250、電鍍 60、拋光 10、品管 20；AGV 交接 40、空車 2。
+            // 測試模式預設關閉；各站的專用倍率：粗加工與精加工 20、淬火與回火 250、電鍍 60、拋光 10、品管 20、包裝 20；AGV 交接 40、空車 2。
             Assert.False(defaults.TestMode);
-            Assert.Equal(new[] { 20d, 20d, 250d, 250d, 60d, 10d, 20d }, defaults.Steps.Select(step => step.TestSpeed));
+            Assert.Equal(new[] { 20d, 20d, 250d, 250d, 60d, 10d, 20d, 20d }, defaults.Steps.Select(step => step.TestSpeed));
             Assert.Equal((600d, 40d, 2d), (defaults.ChangeoverSeconds, defaults.TestHandoverSpeed, defaults.TestEmptyVehicleSpeed));
             Assert.Equal((5d, 30d, 90d, 50, true),
                 (defaults.PieceHandlingSeconds, defaults.AgvHandoverSeconds, defaults.ToolChangeSeconds, defaults.ToolRequestThresholdPieces, defaults.ToolDeliveryEnabled));

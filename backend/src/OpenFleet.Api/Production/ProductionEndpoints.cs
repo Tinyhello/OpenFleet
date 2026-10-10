@@ -68,6 +68,9 @@ public static class ProductionEndpoints
         // 品管的累計結果：檢了幾支、合格、反工、報廢，以及各種不良原因的支數。
         api.MapGet("/inspection", (ProductionService production, CancellationToken ct) => production.GetInspectionSummaryAsync(ct));
 
+        // 出貨：下一班貨車的倒數、等貨車的箱數、累計出貨與最近的出貨紀錄。
+        api.MapGet("/shipping", (ProductionService production, CancellationToken ct) => production.GetShippingSummaryAsync(ct));
+
         // 缺車統計：各工序機台因缺車停下來的時間、任務等車的累計；車輛全部離線的重大事故另外列出。
         api.MapGet("/shortage", (Transport.VehicleShortageService shortage, Fleet.FleetStateStore fleet, CancellationToken ct) =>
             shortage.GetSummaryAsync(fleet.Snapshot(), ct));
@@ -116,6 +119,9 @@ public static class ProductionEndpoints
             // 刀具計數與換刀紀錄也歸零，機台回到剛換好刀的狀態。
             await db.Database.ExecuteSqlRawAsync(
                 """TRUNCATE "ToolChanges", "BatchRuns"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
+            // 貨車從頭倒數。
+            await db.Database.ExecuteSqlRawAsync(
+                """UPDATE "TruckSchedules" SET "RemainingSeconds" = (SELECT "TruckIntervalSeconds" FROM "ProductionSettings"), "AccruedAt" = NULL, "LastArrivedAt" = NULL""", ct);
             loggers.CreateLogger(nameof(ProductionEndpoints)).LogWarning("Demo data reset: lots, tasks, movements, outbox and inbox cleared.");
             return Results.NoContent();
         });
@@ -135,6 +141,7 @@ public static class ProductionEndpoints
         Quantity = lot.Quantity,
         Status = lot.Status,
         ReworkCount = lot.ReworkCount,
+        IsBox = lot.IsBox,
         StationCode = lot.StationCode,
         VehicleId = lot.VehicleId,
         CurrentStepSequence = lot.CurrentStepSequence,

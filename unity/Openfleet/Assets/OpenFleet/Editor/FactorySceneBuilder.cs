@@ -8,7 +8,7 @@ using static OpenFleet.Unity.Editor.ModelKit;
 namespace OpenFleet.Unity.Editor
 {
     /// <summary>
-    /// 產生材質、AGV Prefab 與工廠場景。模型全部由程式組裝，修改後重新執行選單即可重建。
+    /// 產生材質、AGV Prefab 與工廠場景。設備與車體來自 Blender 模型（Assets/OpenFleet/Models），擺放與地面標線由程式組裝，修改後重新執行選單即可重建。
     /// 注意：會覆寫 Factory.unity 與 Resources 底下的 Prefab，手動修改會被蓋掉。
     /// 場景裡的腳本都不設定欄位：執行時需要的 Prefab 與 UI 設定放在 Resources，由 PresentationController 載入。
     /// </summary>
@@ -25,6 +25,10 @@ namespace OpenFleet.Unity.Editor
         {
             EnsureFolder(Palette.Folder);
             EnsureFolder(PrefabFolder);
+            // 模型依名稱對應材質：先確保材質都在，再重新匯入模型，讓 FBX 內的材質換成 Palette 材質。
+            Palette.EnsureAll();
+            AssetDatabase.SaveAssets();
+            AssetDatabase.ImportAsset(ModelImport.Folder, ImportAssetOptions.ImportRecursive | ImportAssetOptions.ForceUpdate);
 
             // 檔名要和 PresentationController 載入時用的名稱一致。
             SavePrefab(VehicleModels.BuildLarge(), PresentationController.LargeVehiclePrefab);
@@ -158,11 +162,7 @@ namespace OpenFleet.Unity.Editor
             FloorFrame(root, "Zone", Vector3.zero, new Vector2(7.6f, 3.6f), 0.06f, Palette.ChargerLight);
             foreach (var x in new[] { -2.3f, 0f, 2.3f })
             {
-                var bay = Group(root, "Charging Bay", new Vector3(x, 0f, 0f));
-                Box(bay, "Pad", new Vector3(0f, 0.02f, 0.2f), new Vector3(1.6f, 0.04f, 2.2f), Palette.ChargerPad);
-                Box(bay, "Charger", new Vector3(0f, 0.6f, -1.3f), new Vector3(0.5f, 1.2f, 0.35f), Palette.MachineBody);
-                Box(bay, "Light", new Vector3(0f, 0.95f, -1.12f), new Vector3(0.3f, 0.08f, 0.02f), Palette.ChargerLight);
-                Box(bay, "Contact", new Vector3(0f, 0.15f, -1.05f), new Vector3(0.3f, 0.1f, 0.15f), Palette.Steel);
+                Model(root, "ChargingBay", new Vector3(x, 0f, 0f));
             }
 
             Label(root, "充電維護區\nCharging / Maintenance", new Vector3(0f, 2.2f, -1.2f), 0.08f, Color.white);

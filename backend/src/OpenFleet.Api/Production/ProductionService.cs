@@ -18,6 +18,7 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 車床接著做的那一框桿徑不同時要先換線。
 /// 整爐（淬火、回火、電鍍）：站內累積到下限才開爐，不同批次可以混在一起，時間到整爐一起放行。
 /// 品管（逐件工序的一種）：逐支檢驗，整框檢完後在品管站分框，合格的往下走、可反工的送回去重做、其餘報廢。
+/// 包裝（逐件工序的一種）：逐支包裝，同批次的框全部包完才併成一箱送去出貨站；貨車定時來把箱子載走。
 /// 測試模式開啟時，每一站依自己的專用倍率加快（<see cref="ProductionSettings.SpeedOf"/>）。
 /// </summary>
 public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defects, TimeProvider time, ILogger<ProductionService> logger)
@@ -39,6 +40,8 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
     public const double MaxTestEmptyVehicleSpeed = 5;
 
     public const int MaxReworkLimit = 3;
+    public const double MinTruckIntervalSeconds = 60;
+    public const double MaxTruckIntervalSeconds = 24 * 3600;
 
     /// <summary>
     /// 不良原因 → 回哪一站重做；null 表示不能反工，直接報廢（使用者 2026-10-10 選定的三種原因）。
@@ -85,6 +88,8 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
             TestEmptyVehicleSpeed = settings.TestEmptyVehicleSpeed,
             DefectRate = settings.DefectRate,
             MaxReworkCount = settings.MaxReworkCount,
+            TruckIntervalSeconds = settings.TruckIntervalSeconds,
+            TestTruckSpeed = settings.TestTruckSpeed,
             Steps = steps.Select(s => new ProcessStepDto
             {
                 Sequence = s.Sequence,
@@ -94,6 +99,7 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                 SecondsPerPiece = s.SecondsPerPiece,
                 UsesTool = s.UsesTool,
                 IsInspection = s.IsInspection,
+                IsPacking = s.IsPacking,
                 ToolLifePieces = s.ToolLifePieces,
                 BatchMinPieces = s.BatchMinPieces,
                 BatchMaxPieces = s.BatchMaxPieces,
@@ -125,6 +131,8 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
         ValidateRange(request.TestEmptyVehicleSpeed, 1, MaxTestEmptyVehicleSpeed, "testEmptyVehicleSpeed");
         ValidateRange(request.DefectRate, 0, 1, "defectRate");
         ValidateRange(request.MaxReworkCount, 0, MaxReworkLimit, "maxReworkCount");
+        ValidateRange(request.TruckIntervalSeconds, MinTruckIntervalSeconds, MaxTruckIntervalSeconds, "truckIntervalSeconds");
+        ValidateRange(request.TestTruckSpeed, 1, MaxTestSpeed, "testTruckSpeed");
 
         settings.LotQuantity = request.LotQuantity;
         settings.PieceHandlingSeconds = request.PieceHandlingSeconds;
@@ -137,6 +145,13 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
         settings.TestEmptyVehicleSpeed = request.TestEmptyVehicleSpeed;
         settings.DefectRate = request.DefectRate;
         settings.MaxReworkCount = request.MaxReworkCount;
+        settings.TestTruckSpeed = request.TestTruckSpeed;
+        if (settings.TruckIntervalSeconds != request.TruckIntervalSeconds)
+        {
+            // 間隔改了：下一班從現在用新的間隔重新倒數。
+            settings.TruckIntervalSeconds = request.TruckIntervalSeconds;
+            (await db.TruckSchedules.SingleAsync(cancellationToken)).Restart(request.TruckIntervalSeconds);
+        }
 
         var speedsBefore = steps.Select(settings.SpeedOf).ToList();
         settings.TestMode = request.TestMode;
@@ -362,6 +377,13 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                 {
                     Inspect(operation, steps, settings, now);
                 }
+                else if (step.IsPacking)
+                {
+                    // 包完的框留在包裝站，等同批次到齊（BoxPackedBatchesAsync）。
+                    operation.Lot.FinishPacking(now);
+                    logger.LogInformation("Lot {LotNumber} packed at {Station}; waiting for the rest of batch {Batch}.",
+                        operation.Lot.LotNumber, operation.StationCode, operation.Lot.BatchNumber);
+                }
                 else
                 {
                     Release(operation, steps, settings, now);
@@ -392,8 +414,84 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
 
         var changed = db.ChangeTracker.HasChanges();
         await db.SaveChangesAsync(cancellationToken);
+        changed |= await BoxPackedBatchesAsync(settings, now, cancellationToken);
+        changed |= await AdvanceTruckAsync(settings, now, cancellationToken);
         var started = await StartQueuedOperationsAsync(steps, tools, settings, now, cancellationToken);
         return await StartBatchRunsAsync(steps, now, cancellationToken) || started || changed;
+    }
+
+    /// <summary>
+    /// 整批一箱（使用者 2026-10-10）：同批次的每一框都包完了（或已經報廢），就把包好的併成一箱，
+    /// 建立送往出貨站的搬運。還有框在前面的工序（包含反工中的）就繼續等。
+    /// 在品管報廢的那一輪之後也會檢查，所以最後一框是報廢而不是包裝完的批次一樣會裝箱。
+    /// </summary>
+    private async Task<bool> BoxPackedBatchesAsync(ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var batches = await db.Lots.Where(l => l.Status == LotStatus.Packed).Select(l => l.BatchNumber).Distinct().ToListAsync(cancellationToken);
+        var boxed = false;
+        foreach (var batch in batches)
+        {
+            var bins = await db.Lots.Where(l => l.BatchNumber == batch && !l.IsBox).ToListAsync(cancellationToken);
+            if (bins.Any(l => l.Status is not (LotStatus.Packed or LotStatus.Scrapped or LotStatus.Boxed)))
+            {
+                continue;
+            }
+
+            var packed = bins.Where(l => l.Status == LotStatus.Packed).OrderBy(l => l.LotNumber).ToList();
+            var box = MaterialLot.PackBox(packed, now);
+            var station = box.StationCode!;
+            db.Lots.Add(box);
+            db.InventoryMovements.Add(InventoryMovement.Record(box, LocationCode.Station(station), "Boxed", now));
+            foreach (var bin in packed)
+            {
+                bin.MoveIntoBox(now);
+            }
+
+            db.TransportTasks.Add(TransportTask.Create(box, station, settings.BufferStationCode, TransportTaskKind.WipTransfer, now));
+            boxed = true;
+            logger.LogInformation("Batch {Batch}: {Bins} packed bin(s) boxed as {LotNumber} ({Quantity} piece(s)); transport to {Destination} requested.",
+                batch, packed.Count, box.LotNumber, box.Quantity, settings.BufferStationCode);
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+        return boxed;
+    }
+
+    /// <summary>
+    /// 貨車定時來（使用者 2026-10-10）：倒數到了就把出貨站上的出貨箱全部載走，寫入出貨紀錄與位置異動。
+    /// 站上沒有箱子時貨車空車離開，照樣開始倒數下一班。
+    /// </summary>
+    private async Task<bool> AdvanceTruckAsync(ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var truck = await db.TruckSchedules.SingleAsync(cancellationToken);
+        var shipped = false;
+        if (truck.Accrue(now, settings.TruckSpeed, settings.TruckIntervalSeconds))
+        {
+            var boxes = await db.Lots
+                .Where(l => l.IsBox && l.Status == LotStatus.Staged && l.StationCode == settings.BufferStationCode)
+                .ToListAsync(cancellationToken);
+            foreach (var box in boxes)
+            {
+                box.Ship(now);
+                db.Shipments.Add(new Shipment { LotId = box.Id, BatchNumber = box.BatchNumber, LotNumber = box.LotNumber, Quantity = box.Quantity, ShippedAt = now });
+                db.InventoryMovements.Add(new InventoryMovement
+                {
+                    LotId = box.Id,
+                    Quantity = box.Quantity,
+                    From = box.Location,
+                    To = InventoryMovement.ShippedLocation,
+                    Reason = "Shipped",
+                    OccurredAt = now,
+                });
+            }
+
+            shipped = boxes.Count > 0;
+            logger.LogInformation("Truck arrived at {Station}: {Boxes} box(es), {Quantity} piece(s) shipped.",
+                settings.BufferStationCode, boxes.Count, boxes.Sum(b => b.Quantity));
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+        return shipped;
     }
 
     /// <summary>整框（或整爐）完成才放行：改為等待搬運，並建立送往下一站（或暫存點）的任務。</summary>
@@ -696,8 +794,8 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
             var changeover = step.UsesTool && last is not null && last.RodDiameterMm != operation.Lot.RodDiameterMm
                 ? settings.ChangeoverSeconds / settings.SpeedOf(step)
                 : 0;
-            // 品管是人或量具逐支檢驗，沒有機台取放的時間。
-            operation.Start(step.SecondsPerPiece, step.IsInspection ? 0 : settings.PieceHandlingSeconds, changeover, now);
+            // 品管與包裝是人工逐支作業，沒有機台取放的時間。
+            operation.Start(step.SecondsPerPiece, step.IsManual ? 0 : settings.PieceHandlingSeconds, changeover, now);
             operation.Lot.StartProcessing(now);
             started = true;
             logger.LogInformation("Lot {LotNumber} started step {Step} at {Station}: {Quantity} piece(s), {Seconds}s each, changeover {Changeover:0.#}s.",
@@ -733,6 +831,8 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
         var shortages = await db.MachineDelays.AsNoTracking()
             .Where(d => d.EndedAt == null)
             .ToDictionaryAsync(d => d.StationCode, d => new { d.Cause, d.Reason }, cancellationToken);
+        var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
+        var truck = await db.TruckSchedules.AsNoTracking().SingleAsync(cancellationToken);
 
         int Sum(string station, LotStatus status) =>
             lots.Where(l => l.StationCode == station && l.Status == status).Sum(l => l.Quantity);
@@ -747,11 +847,13 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                 Name = station.Name,
                 IsMachine = step is not null,
                 IsInspection = step is { IsInspection: true },
+                IsPacking = step is { IsPacking: true },
                 // 加工中的那一框：還沒做的件數在備料區，做完的件數在成品區。爐裡的不算在兩邊。
                 InboundQuantity = Sum(station.Code, LotStatus.Queued) + Sum(station.Code, LotStatus.Staged)
                     + (machining is null ? 0 : machining.Quantity - machining.PiecesCompleted),
                 InboundCapacity = station.InboundCapacity,
-                OutboundQuantity = Sum(station.Code, LotStatus.AwaitingTransport) + (machining?.PiecesCompleted ?? 0),
+                // 包裝站：包好、在等同批次到齊的框也算在成品區。
+                OutboundQuantity = Sum(station.Code, LotStatus.AwaitingTransport) + Sum(station.Code, LotStatus.Packed) + (machining?.PiecesCompleted ?? 0),
                 OutboundCapacity = station.OutboundCapacity,
                 Machining = machining is null ? null : new MachiningStatusDto
                 {
@@ -777,6 +879,15 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                     StageName = run is null ? null : step.StageName,
                     StageProgress = run?.Progress ?? 0,
                     RemainingSeconds = run?.RemainingSeconds ?? 0,
+                };
+            }
+
+            if (station.Code == settings.BufferStationCode)
+            {
+                status.Truck = new TruckStatusDto
+                {
+                    RemainingSeconds = truck.RemainingSeconds,
+                    Progress = settings.TruckIntervalSeconds <= 0 ? 0 : Math.Clamp(1 - truck.RemainingSeconds / settings.TruckIntervalSeconds, 0, 1),
                 };
             }
 
@@ -815,6 +926,29 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
             })
             .SingleOrDefaultAsync(cancellationToken);
         return summary ?? new InspectionSummaryDto();
+    }
+
+    public async Task<ShippingSummaryDto> GetShippingSummaryAsync(CancellationToken cancellationToken)
+    {
+        var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
+        var truck = await db.TruckSchedules.AsNoTracking().SingleAsync(cancellationToken);
+        var waiting = await db.Lots.AsNoTracking()
+            .Where(l => l.IsBox && l.Status == LotStatus.Staged && l.StationCode == settings.BufferStationCode)
+            .Select(l => l.Quantity)
+            .ToListAsync(cancellationToken);
+        return new ShippingSummaryDto
+        {
+            TruckRemainingSeconds = truck.RemainingSeconds,
+            TruckIntervalSeconds = settings.TruckIntervalSeconds,
+            PackedPieces = await db.Lots.AsNoTracking().Where(l => l.Status == LotStatus.Packed).SumAsync(l => l.Quantity, cancellationToken),
+            WaitingBoxes = waiting.Count,
+            WaitingPieces = waiting.Sum(),
+            ShippedBoxes = await db.Shipments.AsNoTracking().CountAsync(cancellationToken),
+            ShippedPieces = await db.Shipments.AsNoTracking().SumAsync(s => s.Quantity, cancellationToken),
+            Shipments = await db.Shipments.AsNoTracking().OrderByDescending(s => s.Id).Take(20)
+                .Select(s => new ShipmentDto { BatchNumber = s.BatchNumber, LotNumber = s.LotNumber, Quantity = s.Quantity, ShippedAt = s.ShippedAt })
+                .ToListAsync(cancellationToken),
+        };
     }
 
     private void FinishToolChange(StationTool tool)
