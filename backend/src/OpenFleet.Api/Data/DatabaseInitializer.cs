@@ -37,6 +37,7 @@ public static class DatabaseInitializer
     /// 電鍍一爐 30 mm 最多 40 支／24 mm 最多 56 支可以混夾，都是使用者提供的數值；
     /// 電鍍一爐 1 小時、拋光每支 20 秒是 Claude 提議、使用者同意先用的示範值。
     /// 回火的開爐條件沿用淬火的 150～300 支、電鍍有料就開（下限 1 支），是 Claude 的推定，待使用者確認。
+    /// 品管逐支全檢、每支 60 秒是使用者提供的數值（2026-10-10）；品管的測試倍率 20 是 Claude 挑的。
     /// 測試模式的專用倍率（TestSpeed）：粗加工與精加工 20、淬火與回火 250 是使用者指定的；電鍍 60、拋光 10 是 Claude 挑的。面板可以改。
     /// </summary>
     private static readonly ProcessStep[] DemoSteps =
@@ -59,10 +60,11 @@ public static class DatabaseInitializer
             BatchSeconds = 3600, StageName = "電鍍", TestSpeed = 60,
         },
         new() { Sequence = 6, StationCode = "polish", Kind = ProcessStepKind.Piece, SecondsPerPiece = 20, TestSpeed = 10 },
+        new() { Sequence = 7, StationCode = "qc", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, IsInspection = true, TestSpeed = 20 },
     ];
 
-    /// <summary>最後一道工序（拋光）完成後送到品管站入口暫存；品管之後的流程還沒做。</summary>
-    private const string DemoBufferStation = "qc";
+    /// <summary>品管合格的料送到包裝站入口暫存；包裝之後的流程還沒做。</summary>
+    private const string DemoBufferStation = "packing";
 
     public static async Task InitializeDatabaseAsync(this WebApplication app)
     {
@@ -121,6 +123,7 @@ public static class DatabaseInitializer
             Kind = demo.Kind,
             SecondsPerPiece = demo.SecondsPerPiece,
             UsesTool = demo.UsesTool,
+            IsInspection = demo.IsInspection,
             ToolLifePieces = demo.ToolLifePieces,
             BatchMinPieces = demo.BatchMinPieces,
             BatchMaxPieces = demo.BatchMaxPieces,
@@ -154,6 +157,9 @@ public static class DatabaseInitializer
                 ChangeoverSeconds = 600,
                 TestHandoverSpeed = 40,
                 TestEmptyVehicleSpeed = 2,
+                // 使用者 2026-10-10：示範用不良率 10%，同一支最多反工 1 次。
+                DefectRate = 0.1,
+                MaxReworkCount = 1,
             });
         }
 

@@ -17,9 +17,10 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 逐件（車床、拋光）：每站一台、一次一框、逐件計數、整框做完才放行；有刀具的站快到壽命時預先叫刀，到壽命時換刀或停機等刀；
 /// 車床接著做的那一框桿徑不同時要先換線。
 /// 整爐（淬火、回火、電鍍）：站內累積到下限才開爐，不同批次可以混在一起，時間到整爐一起放行。
-/// 測試模式開啟時，每一站依自己的專用倍率加快（<see cref="ProductionSettings.SpeedOf"/>）；車輛不加快。
+/// 品管（逐件工序的一種）：逐支檢驗，整框檢完後在品管站分框，合格的往下走、可反工的送回去重做、其餘報廢。
+/// 測試模式開啟時，每一站依自己的專用倍率加快（<see cref="ProductionSettings.SpeedOf"/>）。
 /// </summary>
-public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, ILogger<ProductionService> logger)
+public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defects, TimeProvider time, ILogger<ProductionService> logger)
 {
     public const double MaxSecondsPerPiece = 600;
     public const double MaxPieceHandlingSeconds = 60;
@@ -36,6 +37,19 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
 
     /// <summary>空車倍率的上限：再快交通控制的放行會跟不上。</summary>
     public const double MaxTestEmptyVehicleSpeed = 5;
+
+    public const int MaxReworkLimit = 3;
+
+    /// <summary>
+    /// 不良原因 → 回哪一站重做；null 表示不能反工，直接報廢（使用者 2026-10-10 選定的三種原因）。
+    /// 回電鍍的料之後照路線再經過拋光與品管。
+    /// </summary>
+    private static readonly (DefectReason Reason, string? StationCode, string Suffix)[] ReworkRoutes =
+    [
+        (DefectReason.Surface, "polish", "RS"),
+        (DefectReason.Plating, "plating", "RP"),
+        (DefectReason.Dimension, null, string.Empty),
+    ];
 
     /// <summary>目前支援的桿徑（mm）。</summary>
     public static readonly int[] RodDiameters = [24, 30];
@@ -69,6 +83,8 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
             ChangeoverSeconds = settings.ChangeoverSeconds,
             TestHandoverSpeed = settings.TestHandoverSpeed,
             TestEmptyVehicleSpeed = settings.TestEmptyVehicleSpeed,
+            DefectRate = settings.DefectRate,
+            MaxReworkCount = settings.MaxReworkCount,
             Steps = steps.Select(s => new ProcessStepDto
             {
                 Sequence = s.Sequence,
@@ -77,6 +93,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                 Kind = s.Kind,
                 SecondsPerPiece = s.SecondsPerPiece,
                 UsesTool = s.UsesTool,
+                IsInspection = s.IsInspection,
                 ToolLifePieces = s.ToolLifePieces,
                 BatchMinPieces = s.BatchMinPieces,
                 BatchMaxPieces = s.BatchMaxPieces,
@@ -106,6 +123,8 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         ValidateRange(request.ChangeoverSeconds, 0, MaxChangeoverSeconds, "changeoverSeconds");
         ValidateRange(request.TestHandoverSpeed, 1, MaxTestSpeed, "testHandoverSpeed");
         ValidateRange(request.TestEmptyVehicleSpeed, 1, MaxTestEmptyVehicleSpeed, "testEmptyVehicleSpeed");
+        ValidateRange(request.DefectRate, 0, 1, "defectRate");
+        ValidateRange(request.MaxReworkCount, 0, MaxReworkLimit, "maxReworkCount");
 
         settings.LotQuantity = request.LotQuantity;
         settings.PieceHandlingSeconds = request.PieceHandlingSeconds;
@@ -116,6 +135,8 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         settings.ChangeoverSeconds = request.ChangeoverSeconds;
         settings.TestHandoverSpeed = request.TestHandoverSpeed;
         settings.TestEmptyVehicleSpeed = request.TestEmptyVehicleSpeed;
+        settings.DefectRate = request.DefectRate;
+        settings.MaxReworkCount = request.MaxReworkCount;
 
         var speedsBefore = steps.Select(settings.SpeedOf).ToList();
         settings.TestMode = request.TestMode;
@@ -337,7 +358,14 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
 
             if (operation.Status == OperationStatus.Completed)
             {
-                Release(operation, steps, settings, now);
+                if (step.IsInspection)
+                {
+                    Inspect(operation, steps, settings, now);
+                }
+                else
+                {
+                    Release(operation, steps, settings, now);
+                }
             }
         }
 
@@ -377,6 +405,114 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         db.TransportTasks.Add(TransportTask.Create(operation.Lot, operation.StationCode, destination, TransportTaskKind.WipTransfer, now));
         logger.LogInformation("Lot {LotNumber} finished step {Step} at {Station}; transport to {Next} requested.",
             operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, destination);
+    }
+
+    /// <summary>
+    /// 品管檢完一框：逐支判定，然後在品管站分框。
+    /// 合格的往下一站（或暫存點）；表面不良回拋光、鍍層不良回電鍍，各自另裝一框；尺寸不良報廢。
+    /// 這一框已經反工到上限的話，再被判不良一律報廢（避免無限循環）。同一筆交易內寫入檢驗結果、分出來的框、位置異動與搬運任務。
+    /// 原本的框盡量留給合格的料；沒有合格的就留給第一種要反工的料；全部報廢時整框標記為報廢。
+    /// </summary>
+    private void Inspect(OperationExecution operation, IReadOnlyList<ProcessStep> steps, ProductionSettings settings, DateTimeOffset now)
+    {
+        var lot = operation.Lot;
+        var station = operation.StationCode;
+        var counts = ReworkRoutes.ToDictionary(r => r.Reason, _ => 0);
+        for (var piece = 0; piece < operation.Quantity; piece++)
+        {
+            if (defects.Inspect(settings.DefectRate) is { } reason)
+            {
+                counts[reason]++;
+            }
+        }
+
+        // 每種原因要回到哪一道工序；不能反工的原因、反工次數用完、或路線上沒有那一站，都是報廢。
+        var canRework = lot.ReworkCount < settings.MaxReworkCount;
+        var rework = new List<(int Quantity, ProcessStep Step, string Suffix)>();
+        var scrapped = 0;
+        foreach (var (reason, stationCode, suffix) in ReworkRoutes)
+        {
+            var target = stationCode is null ? null : steps.FirstOrDefault(s => s.StationCode == stationCode);
+            if (counts[reason] == 0)
+            {
+                continue;
+            }
+
+            if (canRework && target is not null)
+            {
+                rework.Add((counts[reason], target, suffix));
+            }
+            else
+            {
+                scrapped += counts[reason];
+            }
+        }
+
+        var defective = counts.Values.Sum();
+        var passed = operation.Quantity - defective;
+        db.InspectionResults.Add(new InspectionResult
+        {
+            LotId = lot.Id,
+            StationCode = station,
+            ReworkRound = lot.ReworkCount,
+            Inspected = operation.Quantity,
+            Passed = passed,
+            Reworked = defective - scrapped,
+            Scrapped = scrapped,
+            SurfaceDefects = counts[DefectReason.Surface],
+            PlatingDefects = counts[DefectReason.Plating],
+            DimensionDefects = counts[DefectReason.Dimension],
+            CompletedAt = now,
+        });
+
+        if (scrapped > 0)
+        {
+            db.InventoryMovements.Add(new InventoryMovement
+            {
+                LotId = lot.Id,
+                Quantity = scrapped,
+                From = LocationCode.Station(station),
+                To = InventoryMovement.ScrapLocation,
+                Reason = "Scrapped",
+                OccurredAt = now,
+            });
+        }
+
+        var reworkRound = lot.ReworkCount + 1;
+        var next = steps.FirstOrDefault(s => s.Sequence > operation.StepSequence);
+        var keptByLot = false;
+        if (passed > 0)
+        {
+            lot.FinishInspection(passed, next?.Sequence, rework: false, now);
+            db.TransportTasks.Add(TransportTask.Create(lot, station, next?.StationCode ?? settings.BufferStationCode, TransportTaskKind.WipTransfer, now));
+            keptByLot = true;
+        }
+
+        foreach (var (quantity, target, suffix) in rework)
+        {
+            var bin = lot;
+            if (keptByLot)
+            {
+                bin = MaterialLot.SplitForRework(lot, quantity, suffix, target.Sequence, reworkRound, now);
+                db.Lots.Add(bin);
+                db.InventoryMovements.Add(InventoryMovement.Record(bin, LocationCode.Station(station), "ReworkSplit", now));
+            }
+            else
+            {
+                lot.FinishInspection(quantity, target.Sequence, rework: true, now);
+                keptByLot = true;
+            }
+
+            db.TransportTasks.Add(TransportTask.Create(bin, station, target.StationCode, TransportTaskKind.WipTransfer, now));
+        }
+
+        if (!keptByLot)
+        {
+            lot.ScrapAll(now);
+        }
+
+        logger.LogInformation("Lot {LotNumber} inspected at {Station}: {Passed} passed, {Reworked} to rework, {Scrapped} scrapped.",
+            lot.LotNumber, station, passed, defective - scrapped, scrapped);
     }
 
     /// <summary>
@@ -560,7 +696,8 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
             var changeover = step.UsesTool && last is not null && last.RodDiameterMm != operation.Lot.RodDiameterMm
                 ? settings.ChangeoverSeconds / settings.SpeedOf(step)
                 : 0;
-            operation.Start(step.SecondsPerPiece, settings.PieceHandlingSeconds, changeover, now);
+            // 品管是人或量具逐支檢驗，沒有機台取放的時間。
+            operation.Start(step.SecondsPerPiece, step.IsInspection ? 0 : settings.PieceHandlingSeconds, changeover, now);
             operation.Lot.StartProcessing(now);
             started = true;
             logger.LogInformation("Lot {LotNumber} started step {Step} at {Station}: {Quantity} piece(s), {Seconds}s each, changeover {Changeover:0.#}s.",
@@ -609,6 +746,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                 Code = station.Code,
                 Name = station.Name,
                 IsMachine = step is not null,
+                IsInspection = step is { IsInspection: true },
                 // 加工中的那一框：還沒做的件數在備料區，做完的件數在成品區。爐裡的不算在兩邊。
                 InboundQuantity = Sum(station.Code, LotStatus.Queued) + Sum(station.Code, LotStatus.Staged)
                     + (machining is null ? 0 : machining.Quantity - machining.PiecesCompleted),
@@ -659,6 +797,24 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
 
             return status;
         }).ToList();
+    }
+
+    public async Task<InspectionSummaryDto> GetInspectionSummaryAsync(CancellationToken cancellationToken)
+    {
+        var summary = await db.InspectionResults.AsNoTracking()
+            .GroupBy(_ => 1)
+            .Select(g => new InspectionSummaryDto
+            {
+                Inspected = g.Sum(r => r.Inspected),
+                Passed = g.Sum(r => r.Passed),
+                Reworked = g.Sum(r => r.Reworked),
+                Scrapped = g.Sum(r => r.Scrapped),
+                SurfaceDefects = g.Sum(r => r.SurfaceDefects),
+                PlatingDefects = g.Sum(r => r.PlatingDefects),
+                DimensionDefects = g.Sum(r => r.DimensionDefects),
+            })
+            .SingleOrDefaultAsync(cancellationToken);
+        return summary ?? new InspectionSummaryDto();
     }
 
     private void FinishToolChange(StationTool tool)

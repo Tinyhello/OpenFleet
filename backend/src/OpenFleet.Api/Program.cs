@@ -30,6 +30,7 @@ builder.Services.AddSingleton(sp => new TrafficController(
     sp.GetRequiredService<TimeProvider>()));
 
 // 用到 DbContext 的服務也必須是 Scoped（Singleton 不能依賴 Scoped）。
+builder.Services.AddSingleton<IDefectSource, RandomDefectSource>();
 builder.Services.AddScoped<ProductionService>();
 builder.Services.AddScoped<VehicleShortageService>();
 builder.Services.AddScoped<TransportService>();

@@ -509,7 +509,8 @@ namespace OpenFleet.Unity
                     }
                     else
                     {
-                        _machining.Set("加工", Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
+                        // 品管站的進度是已檢驗的支數。
+                        _machining.Set(status.IsInspection ? "檢驗" : "加工", Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
                     }
                 }
                 else if (status.ShortageCause.HasValue)
@@ -534,7 +535,7 @@ namespace OpenFleet.Unity
                 }
                 else
                 {
-                    _machining.Set("加工", 0f, "待機", Colors.Machining);
+                    _machining.Set(status.IsInspection ? "檢驗" : "加工", 0f, "待機", Colors.Machining);
                 }
 
                 if (tool != null)

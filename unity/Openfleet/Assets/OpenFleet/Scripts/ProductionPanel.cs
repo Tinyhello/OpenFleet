@@ -12,8 +12,8 @@ using Colors = OpenFleet.Unity.PresentationController.Colors;
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件）、開關測試模式、建立批次、
-    /// 查看缺車耽誤的時間與批次目前的狀態與位置。
+    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件、品管的不良率）、開關測試模式、建立批次、
+    /// 查看缺車耽誤的時間、品管的累計結果與批次目前的狀態與位置。
     /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；批次清單與缺車統計以輪詢更新。
     /// 由 PresentationController 在執行時建立。
     /// </summary>
@@ -37,6 +37,9 @@ namespace OpenFleet.Unity
         private SliderInt _changeoverMinutes;
         private SliderInt _testHandoverSpeed;
         private SliderInt _testEmptyVehicleSpeed;
+        private SliderInt _defectPercent;
+        private SliderInt _maxReworkCount;
+        private Label _inspection;
         private Label _quantityHint;
         private Label _status;
         private Label _shortage;
@@ -157,6 +160,12 @@ namespace OpenFleet.Unity
             _testEmptyVehicleSpeed = NumberField("測試：空車車速（×）", 1, 5);
             settings.Add(_testEmptyVehicleSpeed);
 
+            // 品管：每一支以這個機率被判不良（三種原因機率相同）；同一支最多反工幾次，超過就報廢，0 表示不反工。
+            _defectPercent = NumberField("品管不良率（%）", 0, 50);
+            settings.Add(_defectPercent);
+            _maxReworkCount = NumberField("反工上限（次）", 0, 3);
+            settings.Add(_maxReworkCount);
+
             _stepRows = new VisualElement();
             settings.Add(_stepRows);
 
@@ -191,6 +200,12 @@ namespace OpenFleet.Unity
             _shortage = Hint("尚未讀到資料。");
             _shortage.style.whiteSpace = WhiteSpace.Normal;
             _panel.Add(_shortage);
+
+            // 品管的累計結果：合格、反工（表面回拋光、鍍層回電鍍）、報廢（尺寸不良，或反工次數用完）。
+            _panel.Add(Heading("品管"));
+            _inspection = Hint("尚未讀到資料。");
+            _inspection.style.whiteSpace = WhiteSpace.Normal;
+            _panel.Add(_inspection);
 
             _panel.Add(Heading("批次"));
             var lotButtons = Row();
@@ -289,6 +304,9 @@ namespace OpenFleet.Unity
             SetValue(_changeoverMinutes, settings.ChangeoverSeconds / 60d);
             SetValue(_testHandoverSpeed, settings.TestHandoverSpeed);
             SetValue(_testEmptyVehicleSpeed, settings.TestEmptyVehicleSpeed);
+            // 這兩個欄位 0 是有意義的值（不產生不良、不反工），不能用 SetValue（它會把 0 當成 1）。
+            _defectPercent.value = Mathf.RoundToInt((float)(settings.DefectRate * 100d));
+            _maxReworkCount.value = settings.MaxReworkCount;
 
             _stepRows.Clear();
             _stepAppliers.Clear();
@@ -309,7 +327,7 @@ namespace OpenFleet.Unity
                     continue;
                 }
 
-                var seconds = NumberField("加工（秒／件）", 1, 120);
+                var seconds = NumberField(step.IsInspection ? "檢驗（秒／支）" : "加工（秒／件）", 1, 120);
                 SetValue(seconds, step.SecondsPerPiece);
                 _stepRows.Add(seconds);
                 _stepAppliers.Add(() => step.SecondsPerPiece = seconds.value);
@@ -385,6 +403,8 @@ namespace OpenFleet.Unity
             _settings.ChangeoverSeconds = _changeoverMinutes.value * 60d;
             _settings.TestHandoverSpeed = _testHandoverSpeed.value;
             _settings.TestEmptyVehicleSpeed = _testEmptyVehicleSpeed.value;
+            _settings.DefectRate = _defectPercent.value / 100d;
+            _settings.MaxReworkCount = _maxReworkCount.value;
             foreach (var apply in _stepAppliers)
             {
                 apply();
@@ -420,6 +440,7 @@ namespace OpenFleet.Unity
             {
                 yield return RefreshLots();
                 yield return RefreshShortage();
+                yield return RefreshInspection();
                 yield return RefreshAttention();
                 yield return new WaitForSecondsRealtime(RefreshSeconds);
             }
@@ -532,6 +553,29 @@ namespace OpenFleet.Unity
             }
         }
 
+        private IEnumerator RefreshInspection()
+        {
+            using (var request = UnityWebRequest.Get($"{Api}/api/inspection"))
+            {
+                yield return request.SendWebRequest();
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    yield break;
+                }
+
+                var summary = FleetJson.Deserialize<InspectionSummaryDto>(request.downloadHandler.text);
+                if (summary.Inspected == 0)
+                {
+                    _inspection.text = "還沒有檢驗紀錄。";
+                    yield break;
+                }
+
+                _inspection.text =
+                    $"已檢 {summary.Inspected} 支：合格 {summary.Passed}／反工 {summary.Reworked}／報廢 {summary.Scrapped}\n" +
+                    $"不良原因：表面 {summary.SurfaceDefects}／鍍層 {summary.PlatingDefects}／尺寸 {summary.DimensionDefects}";
+            }
+        }
+
         /// <summary>
         /// 車輛全部離線是重大事故，和缺車分開顯示：事故進行中，或曾經因此耽誤過，才顯示這一段。
         /// </summary>
@@ -623,7 +667,7 @@ namespace OpenFleet.Unity
                     foreach (var bin in bins)
                     {
                         pieces += bin.Quantity;
-                        finished &= bin.Status == LotStatus.Staged;
+                        finished &= bin.Status == LotStatus.Staged || bin.Status == LotStatus.Scrapped;
                         var place = Describe(bin);
                         if (!counts.ContainsKey(place))
                         {
@@ -652,13 +696,16 @@ namespace OpenFleet.Unity
         private string Describe(LotDto lot)
         {
             var place = lot.VehicleId ?? (_stationNames.TryGetValue(lot.StationCode ?? string.Empty, out var name) ? name : lot.StationCode);
+            // 品管分出來要反工的料另外裝框，和同批次其他的框分開列。
+            var rework = lot.ReworkCount > 0 && lot.Status != LotStatus.Staged ? "（反工）" : string.Empty;
             switch (lot.Status)
             {
-                case LotStatus.AwaitingTransport: return $"在 {place} 等待搬運";
-                case LotStatus.InTransit: return $"在 {place} 車上運送中";
-                case LotStatus.Queued: return $"在 {place} 排隊等待加工";
-                case LotStatus.Processing: return $"在 {place} 加工中";
+                case LotStatus.AwaitingTransport: return $"在 {place} 等待搬運{rework}";
+                case LotStatus.InTransit: return $"在 {place} 車上運送中{rework}";
+                case LotStatus.Queued: return $"在 {place} 排隊等待加工{rework}";
+                case LotStatus.Processing: return $"在 {place} 加工中{rework}";
                 case LotStatus.Staged: return $"已送達 {place} 暫存";
+                case LotStatus.Scrapped: return $"在 {place} 整框報廢";
                 default: return lot.Status.ToString();
             }
         }

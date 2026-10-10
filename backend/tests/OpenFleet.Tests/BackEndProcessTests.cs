@@ -203,16 +203,14 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
 
         // 做完搬走後，先做同桿徑的 B-C（不用換線），不是先到的 B-B。
         await AdvanceAsync(10);
-        Assert.Equal(1, await DispatchAsync());
-        await _database.CompleteDeliveryAsync("agv-a");
+        await DeliverAllAsync();
         await AdvanceAsync(0);
         Assert.Equal("B-C", await RunningBatchAsync("rough"));
         Assert.False((await StationAsync("rough")).Machining!.ChangingOver);
 
         // 輪到 24 mm 的 B-B：先換線。測試模式下換線也依這一站的倍率加快（10 倍：60 秒變 6 秒，每件 0.2 秒）。
         await AdvanceAsync(10);
-        Assert.Equal(1, await DispatchAsync());
-        await _database.CompleteDeliveryAsync("agv-a");
+        await DeliverAllAsync();
         await ConfigureAsync(settings =>
         {
             settings.TestMode = true;
@@ -255,23 +253,22 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         var polish = await StationAsync("polish");
         Assert.Equal((10, null), (polish.OutboundQuantity, polish.Tool));
 
-        // 做完的那一框搬到品管站入口暫存（流程目前的終點）；接著做的是同批次的另一框，不是先到的 B。
+        // 做完的那一框搬到品管站，在那裡開始檢驗；拋光接著做的是同批次的另一框，不是先到的 B。
         Assert.Equal(1, await DispatchAsync());
         await _database.CompleteDeliveryAsync("agv-a");
         await AdvanceAsync(0);
-        Assert.Equal("B-A", await RunningBatchAsync());
+        Assert.Equal("B-A", await RunningBatchAsync("polish"));
         await using (var scope = _database.NewScope())
         {
-            var done = await scope.Db.Lots.SingleAsync(l => l.Status == LotStatus.Staged);
-            Assert.Equal(("qc", null), (done.StationCode, done.CurrentStepSequence));
+            var done = await scope.Db.Lots.SingleAsync(l => l.StationCode == "qc");
+            Assert.Equal((LotStatus.Processing, 7), (done.Status, done.CurrentStepSequence!.Value));
         }
 
-        // A 都做完了才輪到 B。
+        // A 都做完了才輪到 B。這 20 秒裡品管也檢完了第一框，所以有兩趟搬運要送（拋光 → 品管、品管 → 包裝）。
         await AdvanceAsync(20);
-        Assert.Equal(1, await DispatchAsync());
-        await _database.CompleteDeliveryAsync("agv-a");
+        await DeliverAllAsync();
         await AdvanceAsync(0);
-        Assert.Equal("B-B", await RunningBatchAsync());
+        Assert.Equal("B-B", await RunningBatchAsync("polish"));
     }
 
     /// <summary>把幾框桿徑 30 mm 的物料直接放到某站排隊（省略前面的工序）。</summary>
@@ -315,6 +312,15 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     {
         await using var scope = _database.NewScope();
         return await scope.Transport.DispatchPendingAsync([Online("agv-a")], default);
+    }
+
+    /// <summary>把所有等待中的搬運一趟一趟派出並送達（做完的框會在下一站開始加工，所以可能不只一趟）。</summary>
+    private async Task DeliverAllAsync()
+    {
+        while (await DispatchAsync() == 1)
+        {
+            await _database.CompleteDeliveryAsync("agv-a");
+        }
     }
 
     /// <summary>正在加工的批次；指定站點時只看那一站（搬走的框會在下一站開始加工）。</summary>

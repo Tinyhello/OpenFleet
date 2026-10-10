@@ -66,6 +66,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `GET /api/lots`、`GET /api/lots/{id}` | 料框清單（同一批次的框有相同的 `batchNumber`）；單一框的完整追蹤 |
 | `GET /api/transport-tasks`、`GET /api/transport-tasks/{id}`、`.../{id}/events` | 搬運任務、派工狀態與狀態歷史。`needsAttention` 為 true 表示搬運失敗、等人工處理 |
 | `POST /api/transport-tasks/{id}/resolve` | 人工處理失敗的搬運：`{"resolution": "returnToSource"}`（已放回取料站，系統重新派一趟）或 `"deliverToDestination"`（已由人工送達）。車輛在線且任務還在進行時回 400 |
+| `GET /api/inspection` | 品管的累計結果：檢驗、合格、反工、報廢的支數，以及表面／鍍層／尺寸三種不良原因的支數 |
 | `GET /api/shortage` | 缺車統計（車都在忙）：此刻叫不到車的任務數、任務等車的累計，以及各工序機台因缺車停下來的時間（等不到料、成品沒被搬走、等刀）。車型全部離線是重大事故，另外列在 `offline…` 欄位，不算進缺車。秒數是實際時間 |
 | `GET /api/shortage/waits`、`GET /api/shortage/delays` | 最近 100 筆缺車等待區間（每個任務）與機台耽誤區間（每台機台） |
 | `POST /api/demo/reset` | 清除所有批次與搬運資料、刀具計數歸零（設定、站點、車輛保留）。只供本機示範 |

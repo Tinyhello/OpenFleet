@@ -150,6 +150,56 @@ namespace OpenFleet.Api.Data.Migrations
                     b.ToTable("InboxMessages");
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.InspectionResult", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("DimensionDefects")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Inspected")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("LotId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Passed")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PlatingDefects")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ReworkRound")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Reworked")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Scrapped")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("StationCode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("SurfaceDefects")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LotId");
+
+                    b.ToTable("InspectionResults");
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.InventoryMovement", b =>
                 {
                     b.Property<long>("Id")
@@ -276,6 +326,9 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ReworkCount")
                         .HasColumnType("integer");
 
                     b.Property<int>("RodDiameterMm")
@@ -437,6 +490,9 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<double>("BatchSeconds")
                         .HasColumnType("double precision");
 
+                    b.Property<bool>("IsInspection")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -495,7 +551,13 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<double>("ChangeoverSeconds")
                         .HasColumnType("double precision");
 
+                    b.Property<double>("DefectRate")
+                        .HasColumnType("double precision");
+
                     b.Property<int>("LotQuantity")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("MaxReworkCount")
                         .HasColumnType("integer");
 
                     b.Property<string>("PartCode")
@@ -866,6 +928,15 @@ namespace OpenFleet.Api.Data.Migrations
                         .WithMany()
                         .HasForeignKey("StationCode")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.InspectionResult", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.MaterialLot", null)
+                        .WithMany()
+                        .HasForeignKey("LotId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

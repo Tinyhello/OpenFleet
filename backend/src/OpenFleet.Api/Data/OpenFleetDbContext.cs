@@ -18,6 +18,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<MaterialLot> Lots => Set<MaterialLot>();
     public DbSet<InventoryMovement> InventoryMovements => Set<InventoryMovement>();
     public DbSet<OperationExecution> Operations => Set<OperationExecution>();
+    public DbSet<InspectionResult> InspectionResults => Set<InspectionResult>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
     public DbSet<RouteNode> RouteNodes => Set<RouteNode>();
     public DbSet<RouteEdge> RouteEdges => Set<RouteEdge>();
@@ -132,6 +133,12 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.HasIndex(l => new { l.StationCode, l.Status });
             e.HasOne<Station>().WithMany().HasForeignKey(l => l.StationCode).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<Vehicle>().WithMany().HasForeignKey(l => l.VehicleId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        model.Entity<InspectionResult>(e =>
+        {
+            e.Property(r => r.StationCode).HasMaxLength(32);
+            e.HasOne<MaterialLot>().WithMany().HasForeignKey(r => r.LotId).OnDelete(DeleteBehavior.Cascade);
         });
 
         model.Entity<InventoryMovement>(e =>

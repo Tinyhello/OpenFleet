@@ -35,6 +35,12 @@ public sealed class ProcessStep
     /// <summary>這道工序有沒有刀具（壽命、換刀、配送）。拋光與整爐工序沒有。</summary>
     public bool UsesTool { get; set; }
 
+    /// <summary>
+    /// 這道逐件工序是品管檢驗：逐支檢驗（<see cref="SecondsPerPiece"/> 是每支的檢驗時間，沒有機台取放），
+    /// 整框檢完後依結果分成合格、反工、報廢，而不是整框送往下一站。
+    /// </summary>
+    public bool IsInspection { get; set; }
+
     /// <summary>刀具壽命（件）：粗加工 500、精加工 250 是使用者提供的數值。</summary>
     public int ToolLifePieces { get; set; }
 
@@ -250,6 +256,12 @@ public sealed class ProductionSettings
     /// <summary>某一站目前實際採用的倍率。</summary>
     public double SpeedOf(ProcessStep step) => TestMode ? step.TestSpeed : 1;
 
+    /// <summary>品管的不良率（0～1）。使用者 2026-10-10：示範用 10%。</summary>
+    public double DefectRate { get; set; }
+
+    /// <summary>同一支最多反工幾次，超過就報廢。使用者 2026-10-10：1 次。</summary>
+    public int MaxReworkCount { get; set; }
+
     /// <summary>現在派出的搬運，交接一框要多久。</summary>
     public double EffectiveHandoverSeconds => TestMode ? AgvHandoverSeconds / TestHandoverSpeed : AgvHandoverSeconds;
 }
@@ -279,6 +291,9 @@ public sealed class MaterialLot
 
     /// <summary>目前所在或前往的工序；流程走完後為 null。</summary>
     public int? CurrentStepSequence { get; private set; }
+
+    /// <summary>這一框的料已經反工過幾次。品管用它判斷還能不能再反工。</summary>
+    public int ReworkCount { get; private set; }
 
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
@@ -368,6 +383,56 @@ public sealed class MaterialLot
         UpdatedAt = now;
     }
 
+    /// <summary>
+    /// 品管檢驗完，這一框留下 <paramref name="quantity"/> 支繼續流動，其餘的已經分到別的框或報廢。
+    /// <paramref name="rework"/> 為 true 表示留下的是要反工的料，<paramref name="nextStep"/> 是返回的工序。
+    /// </summary>
+    public void FinishInspection(int quantity, int? nextStep, bool rework, DateTimeOffset now)
+    {
+        Require(LotStatus.Processing, nameof(FinishInspection));
+        if (quantity < 1 || quantity > Quantity)
+        {
+            throw new InvalidOperationException($"Lot {LotNumber}: cannot keep {quantity} of {Quantity} piece(s) after inspection.");
+        }
+
+        Quantity = quantity;
+        CurrentStepSequence = nextStep;
+        ReworkCount += rework ? 1 : 0;
+        Status = LotStatus.AwaitingTransport;
+        UpdatedAt = now;
+    }
+
+    /// <summary>品管檢驗完，整框都報廢：留在原站，不再流動。數量保留，代表報廢了幾支。</summary>
+    public void ScrapAll(DateTimeOffset now)
+    {
+        Require(LotStatus.Processing, nameof(ScrapAll));
+        CurrentStepSequence = null;
+        Status = LotStatus.Scrapped;
+        UpdatedAt = now;
+    }
+
+    /// <summary>
+    /// 品管把要反工的料從 <paramref name="source"/> 分出來另裝一框，在同一站等待搬運回 <paramref name="step"/> 重做。
+    /// 批次編號相同，所以追蹤時仍看得出是同一個批次；框號加上 <paramref name="suffix"/>。
+    /// </summary>
+    public static MaterialLot SplitForRework(MaterialLot source, int quantity, string suffix, int step, int reworkCount, DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid(),
+        LotNumber = $"{source.LotNumber}-{suffix}",
+        BatchNumber = source.BatchNumber,
+        BinIndex = source.BinIndex,
+        BinCount = source.BinCount,
+        RodDiameterMm = source.RodDiameterMm,
+        PartCode = source.PartCode,
+        Quantity = quantity,
+        Status = LotStatus.AwaitingTransport,
+        StationCode = source.StationCode,
+        CurrentStepSequence = step,
+        ReworkCount = reworkCount,
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
     private void Require(LotStatus expected, string action) => RequireOneOf(action, expected);
 
     private void RequireOneOf(string action, params LotStatus[] expected)
@@ -386,7 +451,29 @@ public static class LocationCode
     public static string Vehicle(string id) => $"vehicle:{id}";
 }
 
-/// <summary>批次位置異動紀錄（只新增、不修改）：收料、取料上車、卸料到站。</summary>
+/// <summary>
+/// 一框的品管結果（只新增）。合格、反工、報廢的支數相加等於檢驗的支數；
+/// 三種原因的支數相加等於不良的支數。反工次數用完的不良會算在報廢，但原因照實記錄。
+/// </summary>
+public sealed class InspectionResult
+{
+    public long Id { get; set; }
+    public Guid LotId { get; set; }
+    public required string StationCode { get; set; }
+
+    /// <summary>檢驗時這一框已經反工過幾次。</summary>
+    public int ReworkRound { get; set; }
+    public int Inspected { get; set; }
+    public int Passed { get; set; }
+    public int Reworked { get; set; }
+    public int Scrapped { get; set; }
+    public int SurfaceDefects { get; set; }
+    public int PlatingDefects { get; set; }
+    public int DimensionDefects { get; set; }
+    public DateTimeOffset CompletedAt { get; set; }
+}
+
+/// <summary>批次位置異動紀錄（只新增、不修改）：收料、取料上車、卸料到站、品管分框與報廢。</summary>
 public sealed class InventoryMovement
 {
     public long Id { get; set; }
@@ -398,6 +485,9 @@ public sealed class InventoryMovement
     public required string To { get; set; }
     public required string Reason { get; set; }
     public DateTimeOffset OccurredAt { get; set; }
+
+    /// <summary>報廢品的去向代碼（不是實體站點）。</summary>
+    public const string ScrapLocation = "scrap";
 
     /// <summary>在批次移動「之後」呼叫：To 取批次的新位置。</summary>
     public static InventoryMovement Record(MaterialLot lot, string? from, string reason, DateTimeOffset now) => new()

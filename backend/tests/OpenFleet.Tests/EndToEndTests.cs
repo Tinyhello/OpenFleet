@@ -26,7 +26,7 @@ namespace OpenFleet.Tests;
 [Collection(PostgresCollection.Name)]
 public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
     private readonly int _port = GetFreePort();
     private MqttServer _broker = null!;
@@ -129,6 +129,8 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         settings.LotQuantity = 20;
         settings.PieceHandlingSeconds = 0;
         settings.AgvHandoverSeconds = 0.01;
+        // 品管不產生不良：這個測試只驗證整條線接得起來，反工與報廢另有測試。
+        settings.DefectRate = 0;
         // 後段的整爐工序：有料就開、一下就做完，這個測試只驗證整條線接得起來。
         settings.Steps.ForEach(step =>
         {
@@ -146,17 +148,18 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         await EventuallyAsync(async () => (await GetTraceAsync(lot.Id)).Lot.Status == LotStatus.Staged);
 
         var trace = await GetTraceAsync(lot.Id);
-        Assert.Equal("qc", trace.Lot.StationCode);
+        Assert.Equal("packing", trace.Lot.StationCode);
         Assert.Equal(
             new[]
             {
                 "station:raw-store", "vehicle:agv-t1", "station:rough", "vehicle:agv-t1", "station:fine", "vehicle:agv-t1", "station:heat",
                 "vehicle:agv-t1", "station:temper", "vehicle:agv-t1", "station:plating", "vehicle:agv-t1", "station:polish", "vehicle:agv-t1", "station:qc",
+                "vehicle:agv-t1", "station:packing",
             },
             trace.Movements.Select(m => m.To));
-        Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish" }, trace.Operations.Select(o => o.StationCode));
+        Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish", "qc" }, trace.Operations.Select(o => o.StationCode));
         Assert.All(trace.Operations, o => Assert.Equal((Contracts.OperationStatus.Completed, 20, 20), (o.Status, o.PiecesCompleted, o.Quantity)));
-        Assert.Equal(7, trace.Tasks.Count);
+        Assert.Equal(8, trace.Tasks.Count);
         Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
 
         // 站點狀態：兩站的刀具各累計 20 件，暫存點有 20 件；車輛卸完料後是空車。
@@ -164,7 +167,7 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(20, stations.Single(s => s.Code == "rough").Tool!.PiecesUsed);
         Assert.Equal(20, stations.Single(s => s.Code == "fine").Tool!.PiecesUsed);
         Assert.Null(stations.Single(s => s.Code == "polish").Tool);
-        Assert.Equal(20, stations.Single(s => s.Code == "qc").InboundQuantity);
+        Assert.Equal(20, stations.Single(s => s.Code == "packing").InboundQuantity);
         await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });
 
         // 任務歷史：待派工 → 已派工 → 執行中 → 完成。

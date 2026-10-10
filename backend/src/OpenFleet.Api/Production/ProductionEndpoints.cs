@@ -65,6 +65,9 @@ public static class ProductionEndpoints
             return Results.Ok(trace);
         });
 
+        // 品管的累計結果：檢了幾支、合格、反工、報廢，以及各種不良原因的支數。
+        api.MapGet("/inspection", (ProductionService production, CancellationToken ct) => production.GetInspectionSummaryAsync(ct));
+
         // 缺車統計：各工序機台因缺車停下來的時間、任務等車的累計；車輛全部離線的重大事故另外列出。
         api.MapGet("/shortage", (Transport.VehicleShortageService shortage, Fleet.FleetStateStore fleet, CancellationToken ct) =>
             shortage.GetSummaryAsync(fleet.Snapshot(), ct));
@@ -131,6 +134,7 @@ public static class ProductionEndpoints
         PartCode = lot.PartCode,
         Quantity = lot.Quantity,
         Status = lot.Status,
+        ReworkCount = lot.ReworkCount,
         StationCode = lot.StationCode,
         VehicleId = lot.VehicleId,
         CurrentStepSequence = lot.CurrentStepSequence,

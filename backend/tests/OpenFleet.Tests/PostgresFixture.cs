@@ -52,6 +52,9 @@ public sealed class TestDatabase
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 10, 9, 8, 0, 0, TimeSpan.Zero));
 
+    /// <summary>品管每一支的檢驗結果由測試指定；沒有指定的都是合格。</summary>
+    public ScriptedDefects Defects { get; } = new();
+
     /// <summary>示範路網（和後端啟動時寫進資料庫的是同一份定義）。</summary>
     public RoadNetwork Network { get; } = BuildNetwork();
 
@@ -141,7 +144,7 @@ public sealed class TestDatabase
     public Scope NewScope()
     {
         var db = NewContext();
-        var production = new ProductionService(db, Time, NullLogger<ProductionService>.Instance);
+        var production = new ProductionService(db, Defects, Time, NullLogger<ProductionService>.Instance);
         var shortage = new VehicleShortageService(db, Time, NullLogger<VehicleShortageService>.Instance);
         var transport = new TransportService(db, production, shortage, Network, Options.Create(Fleet),
             Options.Create(new MqttSettings { ProducerId = "backend", FactoryId = "demo" }), Time, NullLogger<TransportService>.Instance);
@@ -169,4 +172,22 @@ public sealed class TestDatabase
     {
         public ValueTask DisposeAsync() => Db.DisposeAsync();
     }
+}
+
+/// <summary>
+/// 測試用的檢驗結果：依序回傳事先排好的結果（null＝合格），排完之後都是合格。不看不良率。
+/// </summary>
+public sealed class ScriptedDefects : OpenFleet.Api.Production.IDefectSource
+{
+    private readonly Queue<DefectReason?> _results = new();
+
+    public void Enqueue(params DefectReason?[] results)
+    {
+        foreach (var result in results)
+        {
+            _results.Enqueue(result);
+        }
+    }
+
+    public DefectReason? Inspect(double defectRate) => _results.TryDequeue(out var result) ? result : null;
 }

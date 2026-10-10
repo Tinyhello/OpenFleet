@@ -20,8 +20,24 @@ namespace OpenFleet.Contracts
 
         Processing,
 
-        /// <summary>P2 流程終點：已送到暫存位置。</summary>
+        /// <summary>流程目前的終點：已送到暫存位置。</summary>
         Staged,
+
+        /// <summary>品管判定整框報廢（沒有任何一支合格或可以反工）。留在品管站，不再流動。</summary>
+        Scrapped,
+    }
+
+    /// <summary>品管檢出的不良原因。原因決定怎麼處理：表面與鍍層可以反工，尺寸不良只能報廢。</summary>
+    public enum DefectReason
+    {
+        /// <summary>表面不良：回拋光重做。</summary>
+        Surface,
+
+        /// <summary>鍍層不良：回電鍍重鍍，之後再經過拋光。</summary>
+        Plating,
+
+        /// <summary>尺寸不良：熱處理之後無法再車，報廢。</summary>
+        Dimension,
     }
 
     public enum TransportTaskStatus
@@ -114,6 +130,9 @@ namespace OpenFleet.Contracts
         /// <summary>唯讀：這道工序有沒有刀具。PUT 時忽略。</summary>
         public bool UsesTool { get; set; }
 
+        /// <summary>唯讀：這道逐件工序是品管檢驗（逐支判定合格或不良，沒有機台取放時間）。PUT 時忽略。</summary>
+        public bool IsInspection { get; set; }
+
         /// <summary>有刀具的逐件工序：刀具壽命，加工這麼多件後要換刀。</summary>
         public int ToolLifePieces { get; set; }
 
@@ -193,6 +212,12 @@ namespace OpenFleet.Contracts
         /// <summary>測試模式下空車車速的倍率；載貨時的車速不變。</summary>
         public double TestEmptyVehicleSpeed { get; set; } = 1;
 
+        /// <summary>品管的不良率（0～1），示範用：每一支以這個機率被判不良，三種原因機率相同。</summary>
+        public double DefectRate { get; set; }
+
+        /// <summary>同一支最多可以反工幾次；已經反工這麼多次的料再被判不良就報廢。0 表示不反工。</summary>
+        public int MaxReworkCount { get; set; }
+
         /// <summary>PUT 時採用 Sequence 與該種工序自己的數值（時間、刀具壽命、開爐條件、TestSpeed）。</summary>
         public List<ProcessStepDto> Steps { get; set; } = new List<ProcessStepDto>();
     }
@@ -225,6 +250,9 @@ namespace OpenFleet.Contracts
         public string PartCode { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public LotStatus Status { get; set; }
+
+        /// <summary>這一框的料已經反工過幾次；0 表示沒有反工過。</summary>
+        public int ReworkCount { get; set; }
 
         /// <summary>批次所在站點；在車上時為 null。</summary>
         public string? StationCode { get; set; }
@@ -390,6 +418,9 @@ namespace OpenFleet.Contracts
         /// <summary>是否為加工站（有工序）。</summary>
         public bool IsMachine { get; set; }
 
+        /// <summary>這一站的工序是品管檢驗；Machining 的進度是已檢驗的支數。</summary>
+        public bool IsInspection { get; set; }
+
         /// <summary>備料區：等待加工的件數（排隊中的批次＋加工中批次還沒做的件數）；暫存點則是已暫存的件數。</summary>
         public int InboundQuantity { get; set; }
         public int? InboundCapacity { get; set; }
@@ -516,6 +547,25 @@ namespace OpenFleet.Contracts
         public DateTimeOffset StartedAt { get; set; }
         public DateTimeOffset? EndedAt { get; set; }
         public double SimulatedSeconds { get; set; }
+    }
+
+    /// <summary>
+    /// 品管的累計結果（GET /api/inspection）。Inspected ＝ Passed ＋ Reworked ＋ Scrapped；
+    /// 三種原因的支數相加等於不良的總數（Reworked ＋ Scrapped）。
+    /// </summary>
+    public sealed class InspectionSummaryDto
+    {
+        public int Inspected { get; set; }
+        public int Passed { get; set; }
+
+        /// <summary>送回去反工的支數。</summary>
+        public int Reworked { get; set; }
+
+        /// <summary>報廢的支數：尺寸不良，以及反工次數用完之後又被判不良的。</summary>
+        public int Scrapped { get; set; }
+        public int SurfaceDefects { get; set; }
+        public int PlatingDefects { get; set; }
+        public int DimensionDefects { get; set; }
     }
 
     /// <summary>一個批次的完整追蹤：位置異動、加工紀錄與搬運任務。</summary>
