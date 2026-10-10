@@ -89,26 +89,64 @@ namespace OpenFleet.Contracts
         public int? InboundCapacity { get; set; }
     }
 
+    /// <summary>工序的做法。</summary>
+    public enum ProcessStepKind
+    {
+        /// <summary>逐件：一次一框，一件一件做（車床、拋光）。</summary>
+        Piece,
+
+        /// <summary>整爐：站內累積到下限才開，不同批次可以混在一起，時間到整爐一起完成（淬火／回火、電鍍）。</summary>
+        Batch,
+    }
+
     public sealed class ProcessStepDto
     {
         public int Sequence { get; set; }
         public string StationCode { get; set; } = string.Empty;
         public string StationName { get; set; } = string.Empty;
 
-        /// <summary>每加工一件需要的時間（秒）。</summary>
+        /// <summary>唯讀：逐件或整爐。PUT 時忽略。</summary>
+        public ProcessStepKind Kind { get; set; }
+
+        /// <summary>逐件工序：每加工一件需要的時間（秒）。</summary>
         public double SecondsPerPiece { get; set; }
 
-        /// <summary>刀具壽命：加工這麼多件後要換刀。</summary>
+        /// <summary>唯讀：這道工序有沒有刀具。PUT 時忽略。</summary>
+        public bool UsesTool { get; set; }
+
+        /// <summary>有刀具的逐件工序：刀具壽命，加工這麼多件後要換刀。</summary>
         public int ToolLifePieces { get; set; }
+
+        /// <summary>整爐工序：站內累積到這麼多支才開爐。</summary>
+        public int BatchMinPieces { get; set; }
+
+        /// <summary>整爐工序：一爐最多幾支。</summary>
+        public int BatchMaxPieces { get; set; }
+
+        /// <summary>整爐工序：第一段（或唯一一段）的時間（秒）。</summary>
+        public double BatchSeconds { get; set; }
+
+        /// <summary>整爐工序：第二段的時間（秒）；只有一段時為 0。兩段在同一站連續進行，中間不搬運。</summary>
+        public double BatchSecondStageSeconds { get; set; }
+
+        /// <summary>唯讀：兩段的名稱（例如淬火、回火）。</summary>
+        public string? StageName { get; set; }
+        public string? SecondStageName { get; set; }
+
+        /// <summary>
+        /// 測試模式下這一站的專用倍率：這一站的加工、機台取放、換刀（或整爐的時間）加快這麼多倍。
+        /// 測試模式關閉時不使用。顯示的時間仍是原本的長度，只是走得比較快。
+        /// </summary>
+        public double TestSpeed { get; set; } = 1;
     }
 
     /// <summary>可由面板修改的示範設定；GET 與 PUT /api/settings 共用。</summary>
     public sealed class ProductionSettingsDto
     {
-        /// <summary>新批次的預設數量（件）。</summary>
+        /// <summary>新批次的預設數量（支）。一個批次會依料框容量分成好幾框。</summary>
         public int LotQuantity { get; set; }
 
-        /// <summary>唯讀：批量上限，等於流程中最小的待加工料容量。PUT 時忽略。</summary>
+        /// <summary>唯讀：一個批次的數量上限。PUT 時忽略。</summary>
         public int MaxLotQuantity { get; set; }
 
         public string PartCode { get; set; } = string.Empty;
@@ -135,20 +173,41 @@ namespace OpenFleet.Contracts
         /// </summary>
         public bool ToolDeliveryEnabled { get; set; } = true;
 
-        /// <summary>PUT 時只採用 Sequence、SecondsPerPiece 與 ToolLifePieces。</summary>
+        /// <summary>
+        /// 測試模式：開啟時每一站依各自的 <see cref="ProcessStepDto.TestSpeed"/> 加快，讓長時間的工序在示範時看得完。
+        /// 車輛（行駛與交接）不加快，永遠是實際速度。
+        /// </summary>
+        public bool TestMode { get; set; }
+
+        /// <summary>PUT 時採用 Sequence 與該種工序自己的數值（時間、刀具壽命、開爐條件、TestSpeed）。</summary>
         public List<ProcessStepDto> Steps { get; set; } = new List<ProcessStepDto>();
     }
 
+    /// <summary>建立一個批次（POST /api/lots）；回應是這個批次分成的每一框。</summary>
     public sealed class CreateLotRequest
     {
-        /// <summary>省略時使用設定的 LotQuantity。</summary>
+        /// <summary>整個批次的支數；省略時使用設定的 LotQuantity。</summary>
         public int? Quantity { get; set; }
+
+        /// <summary>桿徑（mm）：24 或 30，決定一框裝幾支；省略時為 30。</summary>
+        public int? RodDiameterMm { get; set; }
     }
 
+    /// <summary>一框物料。同一個批次的每一框有相同的 BatchNumber，各自搬運、各自加工。</summary>
     public sealed class LotDto
     {
         public Guid Id { get; set; }
         public string LotNumber { get; set; } = string.Empty;
+
+        /// <summary>所屬的批次。</summary>
+        public string BatchNumber { get; set; } = string.Empty;
+
+        /// <summary>這是批次裡的第幾框（從 1 起），以及批次共有幾框。</summary>
+        public int BinIndex { get; set; }
+        public int BinCount { get; set; }
+
+        /// <summary>桿徑（mm）。</summary>
+        public int RodDiameterMm { get; set; }
         public string PartCode { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public LotStatus Status { get; set; }
@@ -209,6 +268,30 @@ namespace OpenFleet.Contracts
         public string? FailureReason { get; set; }
         public DateTimeOffset CreatedAt { get; set; }
         public DateTimeOffset? CompletedAt { get; set; }
+
+        /// <summary>
+        /// 搬運失敗、而且系統不能自己重派（物料可能在車上，或重派次數用完）：要有人到現場確認，
+        /// 再用 POST /api/transport-tasks/{id}/resolve 告訴系統怎麼處理。
+        /// </summary>
+        public bool NeedsAttention { get; set; }
+
+        /// <summary>人工處理的結果；還沒處理或不需要處理時為 null。</summary>
+        public TaskResolution? Resolution { get; set; }
+    }
+
+    /// <summary>失敗的搬運經人工確認後怎麼處理。</summary>
+    public enum TaskResolution
+    {
+        /// <summary>物料（或刀具）已放回取料站：系統重新建立一趟搬運。</summary>
+        ReturnToSource,
+
+        /// <summary>物料（或刀具）已由人工送到卸料站：視同送達。</summary>
+        DeliverToDestination,
+    }
+
+    public sealed class ResolveTaskRequest
+    {
+        public TaskResolution Resolution { get; set; }
     }
 
     public sealed class TaskEventDto
@@ -218,6 +301,28 @@ namespace OpenFleet.Contracts
         public string? VehicleId { get; set; }
         public string? Reason { get; set; }
         public DateTimeOffset OccurredAt { get; set; }
+    }
+
+    /// <summary>整爐工序的站：開爐的門檻與目前這一爐的進度。排隊中的支數在 StationStatusDto.InboundQuantity。</summary>
+    public sealed class BatchStatusDto
+    {
+        public int MinPieces { get; set; }
+        public int MaxPieces { get; set; }
+
+        /// <summary>是否有一爐正在進行。</summary>
+        public bool Running { get; set; }
+
+        /// <summary>這一爐的支數。</summary>
+        public int Quantity { get; set; }
+
+        /// <summary>目前這一段的名稱（例如淬火、回火）；沒有在進行時為 null。</summary>
+        public string? StageName { get; set; }
+
+        /// <summary>目前這一段的進度，0～1。</summary>
+        public double StageProgress { get; set; }
+
+        /// <summary>整爐還剩多久（秒，原本的工序時間，含還沒開始的第二段）。測試模式下會走得比實際時鐘快。</summary>
+        public double RemainingSeconds { get; set; }
     }
 
     /// <summary>機台正在加工的批次與進度。</summary>
@@ -276,6 +381,9 @@ namespace OpenFleet.Contracts
         /// <summary>沒有在加工時為 null。</summary>
         public MachiningStatusDto? Machining { get; set; }
 
+        /// <summary>整爐工序的站才有；其他站為 null。</summary>
+        public BatchStatusDto? Batch { get; set; }
+
         /// <summary>不是加工站時為 null。</summary>
         public ToolStatusDto? Tool { get; set; }
 
@@ -309,7 +417,7 @@ namespace OpenFleet.Contracts
         WaitingForTool,
     }
 
-    /// <summary>某道工序因缺車耽誤的加工時間。秒數都是模擬時間（1 倍速時等於實際時間）。</summary>
+    /// <summary>某道工序因缺車耽誤的加工時間（實際秒數）。</summary>
     public sealed class StepDelayDto
     {
         public int Sequence { get; set; }
@@ -342,7 +450,7 @@ namespace OpenFleet.Contracts
         /// <summary>累計的缺車等待次數（一個任務可能等待不只一次）。</summary>
         public int WaitCount { get; set; }
 
-        /// <summary>任務等車的累計時間（模擬秒）。這是任務的等待，不等於機台的耽誤。</summary>
+        /// <summary>任務等車的累計時間（秒）。這是任務的等待，不等於機台的耽誤。</summary>
         public double WaitSeconds { get; set; }
 
         /// <summary>重大事故：此刻全部離線的車型（有開放派工的車型裡，沒有任何一台在線）。空的表示沒有事故。</summary>
@@ -352,7 +460,7 @@ namespace OpenFleet.Contracts
         public int OfflineWaitingTasks { get; set; }
         public int OfflineWaitCount { get; set; }
 
-        /// <summary>任務因離線事故等待的累計時間（模擬秒）。</summary>
+        /// <summary>任務因離線事故等待的累計時間（秒）。</summary>
         public double OfflineWaitSeconds { get; set; }
 
         /// <summary>各工序機台真的停下來的時間。</summary>

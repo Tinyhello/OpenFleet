@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
-using OpenFleet.Api.Simulation;
 using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Transport;
@@ -16,13 +15,12 @@ public sealed record WaitingTask(TransportTask Task, ShortageReason Reason);
 /// 該車型全部離線是「重大事故」，另外標記，不算進缺車的統計。
 /// 缺料（沒有批次）、目的站放不下、派出之後的行駛與交通等待都不會進到這裡，所以不會混在一起算。
 /// </summary>
-public sealed class VehicleShortageService(OpenFleetDbContext db, SimulationSpeed speed, TimeProvider time, ILogger<VehicleShortageService> logger)
+public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider time, ILogger<VehicleShortageService> logger)
 {
     /// <summary><paramref name="waiting"/> 依派工優先順序排列。</summary>
     public async Task RecordAsync(IReadOnlyList<WaitingTask> waiting, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
-        var timeScale = speed.Current.TimeScale;
 
         var openWaits = await db.VehicleWaits.Where(w => w.EndedAt == null).ToListAsync(cancellationToken);
         var openDelays = await db.MachineDelays.Where(d => d.EndedAt == null).ToListAsync(cancellationToken);
@@ -34,7 +32,7 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, SimulationSpee
         var newWaits = waiting.ToDictionary(w => w.Task.Id);
         foreach (var wait in openWaits)
         {
-            wait.Accrue(now, timeScale);
+            wait.Accrue(now);
             if (newWaits.TryGetValue(wait.TaskId, out var current) && current.Reason == wait.Reason)
             {
                 newWaits.Remove(wait.TaskId);
@@ -48,7 +46,7 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, SimulationSpee
         var stopped = await FindStoppedMachinesAsync(waiting, cancellationToken);
         foreach (var delay in openDelays)
         {
-            delay.Accrue(now, timeScale);
+            delay.Accrue(now);
             if (stopped.TryGetValue(delay.StationCode, out var current) && current.Cause == delay.Cause && current.Reason == delay.Reason)
             {
                 stopped.Remove(delay.StationCode);
@@ -104,7 +102,10 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, SimulationSpee
             return stopped;
         }
 
-        var steps = await db.ProcessSteps.AsNoTracking().ToDictionaryAsync(s => s.StationCode, s => s.Sequence, cancellationToken);
+        // 只看逐件工序的機台。整爐工序本來就要等料累積到下限，站內沒有料不代表是缺車造成的停機。
+        var steps = await db.ProcessSteps.AsNoTracking()
+            .Where(s => s.Kind == ProcessStepKind.Piece)
+            .ToDictionaryAsync(s => s.StationCode, s => s.Sequence, cancellationToken);
         var stations = waiting.SelectMany(w => new[] { w.Task.FromStationCode, w.Task.ToStationCode }).Where(steps.ContainsKey).Distinct().ToList();
         if (stations.Count == 0)
         {
@@ -164,7 +165,10 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, SimulationSpee
     public async Task<VehicleShortageDto> GetSummaryAsync(IReadOnlyCollection<VehicleState> vehicles, CancellationToken cancellationToken)
     {
         var stations = await db.Stations.AsNoTracking().ToDictionaryAsync(s => s.Code, s => s.Name, cancellationToken);
-        var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
+        var steps = await db.ProcessSteps.AsNoTracking()
+            .Where(s => s.Kind == ProcessStepKind.Piece)
+            .OrderBy(s => s.Sequence)
+            .ToListAsync(cancellationToken);
         var delays = await db.MachineDelays.AsNoTracking()
             .GroupBy(d => new { d.StepSequence, d.Cause, d.Reason })
             .Select(g => new { g.Key.StepSequence, g.Key.Cause, g.Key.Reason, Seconds = g.Sum(d => d.SimulatedSeconds) })

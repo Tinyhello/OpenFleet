@@ -6,7 +6,6 @@ using Npgsql;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Production;
-using OpenFleet.Api.Simulation;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Api.Transport;
 using OpenFleet.Contracts;
@@ -49,12 +48,9 @@ public sealed class TestDatabase
     private TestDatabase(string connectionString)
     {
         _options = new DbContextOptionsBuilder<OpenFleetDbContext>().UseNpgsql(connectionString).Options;
-        Speed = new SimulationSpeed(Time);
     }
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 10, 9, 8, 0, 0, TimeSpan.Zero));
-
-    public SimulationSpeed Speed { get; }
 
     /// <summary>示範路網（和後端啟動時寫進資料庫的是同一份定義）。</summary>
     public RoadNetwork Network { get; } = BuildNetwork();
@@ -80,14 +76,18 @@ public sealed class TestDatabase
     public OpenFleetDbContext NewContext() => new(_options);
 
     /// <summary>
-    /// 測試用的簡化加工：每件 2 秒、機台取放不花時間、換刀 20 秒、新刀視為已在機邊（不配送刀具）。
-    /// 示範值（30／60 秒、取放 5 秒、換刀 90 秒、小型車送刀）數字太大，時間點不好算；刀具配送另有專門的測試。
+    /// 測試用的簡化流程：只有粗加工、精加工兩道工序，做完送到淬火站入口暫存（P2 的範圍）；
+    /// 每件 2 秒、機台取放不花時間、換刀 20 秒、新刀視為已在機邊（不配送刀具）。
+    /// 示範值（30／60 秒、取放 5 秒、換刀 90 秒、小型車送刀、後段製程）數字太大，時間點不好算；
+    /// 刀具配送與後段製程另有專門的測試。
     /// </summary>
     public async Task UseSimpleMachiningAsync()
     {
         await using var db = NewContext();
+        await db.ProcessSteps.Where(s => s.Sequence > 2).ExecuteDeleteAsync();
         await db.ProcessSteps.ExecuteUpdateAsync(s => s.SetProperty(step => step.SecondsPerPiece, 2d));
         await db.ProductionSettings.ExecuteUpdateAsync(s => s
+            .SetProperty(x => x.BufferStationCode, "heat")
             .SetProperty(x => x.PieceHandlingSeconds, 0d)
             .SetProperty(x => x.ToolChangeSeconds, 20d)
             .SetProperty(x => x.ToolDeliveryEnabled, false));
@@ -98,7 +98,7 @@ public sealed class TestDatabase
     {
         await using var db = NewContext();
         var now = Time.GetUtcNow();
-        var lot = MaterialLot.Receive("occupied", 1, "packing", null, now);
+        var lot = MaterialLot.Receive("occupied", 1, "packing", null, $"OCC-{Guid.NewGuid():N}"[..20], 1, 1, 30, now);
         var task = TransportTask.Create(lot, "packing", "shipping", TransportTaskKind.WipTransfer, now);
         db.Lots.Add(lot);
         db.TransportTasks.Add(task);
@@ -141,8 +141,8 @@ public sealed class TestDatabase
     public Scope NewScope()
     {
         var db = NewContext();
-        var production = new ProductionService(db, Speed, Time, NullLogger<ProductionService>.Instance);
-        var shortage = new VehicleShortageService(db, Speed, Time, NullLogger<VehicleShortageService>.Instance);
+        var production = new ProductionService(db, Time, NullLogger<ProductionService>.Instance);
+        var shortage = new VehicleShortageService(db, Time, NullLogger<VehicleShortageService>.Instance);
         var transport = new TransportService(db, production, shortage, Network, Options.Create(Fleet),
             Options.Create(new MqttSettings { ProducerId = "backend", FactoryId = "demo" }), Time, NullLogger<TransportService>.Instance);
         return new Scope(db, production, transport, shortage, new VehicleEventProcessor(db, transport, Time));

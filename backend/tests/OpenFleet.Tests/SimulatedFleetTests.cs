@@ -185,26 +185,6 @@ public class SimulatedFleetTests
     }
 
     [Fact]
-    public void Time_scale_speeds_up_driving_and_handover_together()
-    {
-        _fleet.TimeScale = 10;
-        _fleet.HandleCommand("agv", Transport(handoverSeconds: 4));
-        _fleet.ApplyClearance("agv", Clearance(Guid.NewGuid(), 1, 3, ToPickup));
-        DrainEvents();
-
-        // 到取料點 3 m 只要 0.3 秒；上料 4 秒只要 0.4 秒。回報的車速仍是 1 倍時的數值。
-        var arrived = Advance(0.3);
-        Assert.Equal((2, -1, 1d), (arrived.Position.X, arrived.Position.Z, arrived.Speed));
-
-        var loading = Advance(0.2);
-        Assert.Equal(VehicleActivity.Loading, loading.Activity);
-        Assert.Equal(0.5, loading.ActivityProgress, 6);
-
-        Advance(0.2);
-        Assert.Equal(new[] { VehicleEventType.Loaded }, DrainEvents().Select(e => e.EventType));
-    }
-
-    [Fact]
     public void Loaded_vehicle_is_slower_and_reports_its_load_and_handover_progress()
     {
         // 15 件（半載）：車速 0.75 m/s；交接時間由指令指定為 4 秒。

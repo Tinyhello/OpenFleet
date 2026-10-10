@@ -30,7 +30,13 @@ public sealed class FleetOptions
 
     public TimeSpan OutboxPollInterval { get; set; } = TimeSpan.FromMilliseconds(500);
 
-    /// <summary>同一個任務被設備拒絕這麼多次後標記為 Failed，避免無限重派。</summary>
+    /// <summary>
+    /// 對帳的寬限時間：在線的車輛連續這麼久都回報「沒有在執行這道指令」，才認定設備弄丟了這趟搬運（例如設備重啟）。
+    /// 留一點時間是因為設備做完之後，「完成」的回報可能比遙測晚到。
+    /// </summary>
+    public TimeSpan LostCommandGrace { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>同一個任務被設備拒絕或執行失敗這麼多次後標記為 Failed，避免無限重派。</summary>
     public int MaxDispatchAttempts { get; set; } = 3;
 
     /// <summary>

@@ -32,7 +32,8 @@ public sealed class RouteEdge
 
 /// <summary>
 /// 一趟單車搬運：物料批次，或一把刀具（<see cref="TransportTaskKind.ToolDelivery"/>，沒有批次）。合法的狀態轉移：Pending → Assigned → Executing → Completed；
-/// Assigned／Executing 可以 Failed；設備拒絕時 Assigned 回到 Pending 等待重新派工。
+/// Assigned／Executing 可以 Failed；物料還在取料站時（設備拒絕、還沒取料就失敗）回到 Pending 等待重新派工。
+/// Failed 之後由人工確認現場狀況再決定怎麼處理（<see cref="Resolve"/>）。
 /// 每次轉移都留下一筆 <see cref="TaskEvent"/>。
 /// </summary>
 public sealed class TransportTask
@@ -49,7 +50,14 @@ public sealed class TransportTask
     public string? FailureReason { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset? CompletedAt { get; private set; }
+
+    /// <summary>失敗後的人工處理結果與時間；還沒處理時為 null。</summary>
+    public TaskResolution? Resolution { get; private set; }
+    public DateTimeOffset? ResolvedAt { get; private set; }
     public uint Version { get; private set; }
+
+    /// <summary>失敗而且還沒有人處理。</summary>
+    public bool NeedsAttention => Status == TransportTaskStatus.Failed && Resolution is null;
 
     public List<Assignment> Assignments { get; } = [];
     public List<TaskEvent> Events { get; } = [];
@@ -115,9 +123,21 @@ public sealed class TransportTask
         CompletedAt = now;
     }
 
-    /// <summary>設備沒有接受指令（拒絕或過期）：物料還在原地，可以重新派工。</summary>
+    /// <summary>設備沒有接受指令（拒絕或過期），或還沒取料就失敗：物料還在原地，可以重新派工。</summary>
     public void Requeue(Assignment assignment, string? reason, DateTimeOffset now) =>
-        Transition(TransportTaskStatus.Pending, now, assignment, reason, TransportTaskStatus.Assigned);
+        Transition(TransportTaskStatus.Pending, now, assignment, reason, TransportTaskStatus.Assigned, TransportTaskStatus.Executing);
+
+    /// <summary>記錄人工處理的結果。物料的移動與後續的任務由呼叫端處理。</summary>
+    public void Resolve(TaskResolution resolution, DateTimeOffset now)
+    {
+        if (!NeedsAttention)
+        {
+            throw new InvalidOperationException($"Task {Id} is {Status} and does not need to be resolved.");
+        }
+
+        Resolution = resolution;
+        ResolvedAt = now;
+    }
 
     public void Fail(Assignment assignment, string? reason, DateTimeOffset now)
     {
@@ -177,9 +197,19 @@ public sealed class Assignment
     public DateTimeOffset? LoadedAt { get; private set; }
     public DateTimeOffset? ClosedAt { get; private set; }
     public string? Reason { get; private set; }
+
+    /// <summary>對帳用：從這個時間起，在線的車輛一直回報沒有在執行這道指令；設備有在執行時為 null。</summary>
+    public DateTimeOffset? MissingSince { get; private set; }
     public uint Version { get; private set; }
 
     public bool IsActive => ActiveStatuses.Contains(Status);
+
+    /// <summary>物料已經在車上（已回報取料）。</summary>
+    public bool IsLoaded => Status == AssignmentStatus.Loaded;
+
+    public void MarkMissing(DateTimeOffset now) => MissingSince ??= now;
+
+    public void MarkPresent() => MissingSince = null;
 
     /// <summary>還沒收到設備任何回覆。</summary>
     public bool IsAwaitingReply => Status is AssignmentStatus.Dispatched or AssignmentStatus.Unconfirmed;

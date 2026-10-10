@@ -29,6 +29,22 @@ public static class TransportEndpoints
                 })
                 .ToListAsync(ct));
 
+        // 人工處理失敗的搬運：到現場確認之後，告訴系統物料放回了取料站，還是已經送到卸料站。
+        tasks.MapPost("/{id:guid}/resolve", async (
+            Guid id, ResolveTaskRequest request, TransportService transport, Fleet.FleetStateStore fleet, OpenFleetDbContext db, CancellationToken ct) =>
+        {
+            try
+            {
+                await transport.ResolveAsync(id, request.Resolution, fleet.Snapshot(), ct);
+            }
+            catch (Production.RequestValidationException ex)
+            {
+                return Results.ValidationProblem(ex.Errors);
+            }
+
+            return Results.Ok(await QueryTasks(db).SingleAsync(t => t.Id == id, ct));
+        });
+
         return app;
     }
 
@@ -50,5 +66,7 @@ public static class TransportEndpoints
             FailureReason = t.FailureReason,
             CreatedAt = t.CreatedAt,
             CompletedAt = t.CompletedAt,
+            NeedsAttention = t.Status == TransportTaskStatus.Failed && t.Resolution == null,
+            Resolution = t.Resolution,
         });
 }

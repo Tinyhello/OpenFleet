@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Traffic;
+using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Data;
 
@@ -29,14 +30,31 @@ public static class DatabaseInitializer
     ];
 
     /// <summary>
-    /// 示範製程。每件加工時間（粗加工 30 秒、精加工 60 秒）是使用者 2026-10-10 提供的數值；
-    /// 刀具壽命（粗加工 500 件、精加工 250 件）是使用者 2026-10-09 提供的數值。
+    /// 示範製程。逐件工序的每件加工時間（粗加工 30 秒、精加工 60 秒）與刀具壽命（500／250 件）、
+    /// 淬火 4 小時＋回火 8 小時、滿 150 支開爐最多 300 支、電鍍滿 100 支開槽最多 150 支，都是使用者提供的數值；
+    /// 電鍍一槽 1 小時、拋光每支 20 秒是 Claude 提議、使用者同意先用的示範值。
+    /// 測試模式的專用倍率（TestSpeed）是 Claude 挑的示範值，目標是每一站做一框或一爐約 1～4 分鐘：
+    /// 粗加工 10、精加工 20、淬火／回火 200（12 小時 → 3.6 分鐘）、電鍍 60（1 小時 → 1 分鐘）、拋光 10。面板可以改。
     /// </summary>
     private static readonly ProcessStep[] DemoSteps =
     [
-        new() { Sequence = 1, StationCode = "rough", SecondsPerPiece = 30, ToolLifePieces = 500 },
-        new() { Sequence = 2, StationCode = "fine", SecondsPerPiece = 60, ToolLifePieces = 250 },
+        new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = 10 },
+        new() { Sequence = 2, StationCode = "fine", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, UsesTool = true, ToolLifePieces = 250, TestSpeed = 20 },
+        new()
+        {
+            Sequence = 3, StationCode = "heat", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300,
+            BatchSeconds = 4 * 3600, BatchSecondStageSeconds = 8 * 3600, StageName = "淬火", SecondStageName = "回火", TestSpeed = 200,
+        },
+        new()
+        {
+            Sequence = 4, StationCode = "plating", Kind = ProcessStepKind.Batch, BatchMinPieces = 100, BatchMaxPieces = 150,
+            BatchSeconds = 3600, StageName = "電鍍", TestSpeed = 60,
+        },
+        new() { Sequence = 5, StationCode = "polish", Kind = ProcessStepKind.Piece, SecondsPerPiece = 20, TestSpeed = 10 },
     ];
+
+    /// <summary>最後一道工序（拋光）完成後送到品管站入口暫存；品管之後的流程還沒做。</summary>
+    private const string DemoBufferStation = "qc";
 
     public static async Task InitializeDatabaseAsync(this WebApplication app)
     {
@@ -84,29 +102,28 @@ public static class DatabaseInitializer
             db.RouteEdges.AddRange(edges.Select(e => new RouteEdge { FromCode = e.From, ToCode = e.To }));
         }
 
-        var steps = await db.ProcessSteps.ToDictionaryAsync(s => s.Sequence);
-        foreach (var demo in DemoSteps)
+        // 補上缺少的工序（舊資料庫只有粗加工、精加工）；已經有的不動，面板改過的數值會保留。
+        var steps = await db.ProcessSteps.Select(s => s.Sequence).ToListAsync();
+        db.ProcessSteps.AddRange(DemoSteps.Where(demo => !steps.Contains(demo.Sequence)).Select(demo => new ProcessStep
         {
-            if (steps.Count == 0)
-            {
-                db.ProcessSteps.Add(new ProcessStep
-                {
-                    Sequence = demo.Sequence,
-                    StationCode = demo.StationCode,
-                    SecondsPerPiece = demo.SecondsPerPiece,
-                    ToolLifePieces = demo.ToolLifePieces,
-                });
-            }
-            else if (steps.TryGetValue(demo.Sequence, out var step) && step.ToolLifePieces <= 0)
-            {
-                step.ToolLifePieces = demo.ToolLifePieces;
-            }
-        }
+            Sequence = demo.Sequence,
+            StationCode = demo.StationCode,
+            Kind = demo.Kind,
+            SecondsPerPiece = demo.SecondsPerPiece,
+            UsesTool = demo.UsesTool,
+            ToolLifePieces = demo.ToolLifePieces,
+            BatchMinPieces = demo.BatchMinPieces,
+            BatchMaxPieces = demo.BatchMaxPieces,
+            BatchSeconds = demo.BatchSeconds,
+            BatchSecondStageSeconds = demo.BatchSecondStageSeconds,
+            StageName = demo.StageName,
+            SecondStageName = demo.SecondStageName,
+            TestSpeed = demo.TestSpeed,
+        }));
 
-        // 每個加工站一筆刀具狀態。
+        // 有刀具的工序各一筆刀具狀態。
         var tools = await db.StationTools.Select(t => t.StationCode).ToListAsync();
-        var machineStations = steps.Count == 0 ? DemoSteps.Select(s => s.StationCode) : steps.Values.Select(s => s.StationCode);
-        db.StationTools.AddRange(machineStations.Where(code => !tools.Contains(code)).Select(code => new StationTool { StationCode = code }));
+        db.StationTools.AddRange(DemoSteps.Where(s => s.UsesTool && !tools.Contains(s.StationCode)).Select(s => new StationTool { StationCode = s.StationCode }));
 
         if (!await db.ProductionSettings.AnyAsync())
         {
@@ -115,7 +132,7 @@ public static class DatabaseInitializer
                 LotQuantity = 30,
                 PartCode = "upper-punch",
                 SourceStationCode = "raw-store",
-                BufferStationCode = "heat",
+                BufferStationCode = DemoBufferStation,
                 ToolStoreStationCode = "tool-store",
                 // 使用者 2026-10-10：機台取放每件 5 秒（取料、取出各一次）、AGV 交接一框 30 秒、換刀 90 秒。
                 // 叫刀門檻 50 件是示範值。

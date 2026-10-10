@@ -67,6 +67,7 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
             state.RoutePlanId = telemetry.RoutePlanId;
             state.RouteRevision = telemetry.RouteRevision;
             state.RouteReachedCount = telemetry.RouteReachedCount;
+            state.ActiveCommandId = telemetry.ActiveCommandId;
             MarkSeen(state);
             Publish(state);
             return TelemetryOutcome.Applied;
@@ -177,6 +178,7 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
         RoutePlanId = s.RoutePlanId,
         RouteRevision = s.RouteRevision,
         RouteReachedCount = s.RouteReachedCount,
+        ActiveCommandId = s.ActiveCommandId,
         LastSeenAt = s.LastSeenAt,
         TelemetrySessionId = s.TelemetrySessionId,
         TelemetrySequence = s.TelemetrySequence,

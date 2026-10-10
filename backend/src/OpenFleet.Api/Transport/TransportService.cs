@@ -14,6 +14,7 @@ namespace OpenFleet.Api.Transport;
 /// 派工與搬運狀態（Scoped）。兩個入口：派工迴圈呼叫 <see cref="DispatchPendingAsync"/>，
 /// 收到車輛事件時呼叫 <see cref="ApplyVehicleEventAsync"/>。
 /// 後端不會自己判定搬運成功：任務只會因為設備回報而前進。
+/// 搬運出問題時的恢復流程：物料還在取料站的可以自動重派；物料可能在車上的要等人工確認（<see cref="ResolveAsync"/>）。
 /// </summary>
 /// <summary>一台車目前的有效派工：交通控制用它決定車要去取料點還是卸料點。</summary>
 public sealed record MovementGoal(string VehicleId, AssignmentStatus Status, string FromStationCode, string ToStationCode);
@@ -241,9 +242,7 @@ public sealed class TransportService(
                 break;
 
             case VehicleEventType.Failed when assignment.IsActive:
-                // 物料（或刀具）停在失敗當下的位置（原站或車上），不自動重派；恢復流程留到之後的階段。
-                assignment.Close(AssignmentStatus.Failed, vehicleEvent.Reason, now);
-                task.Fail(assignment, vehicleEvent.Reason, now);
+                FailAssignment(assignment, vehicleEvent.Reason, now);
                 break;
 
             default:
@@ -261,6 +260,141 @@ public sealed class TransportService(
             assignment.Accept(now);
             task.Start(assignment, now);
         }
+    }
+
+    /// <summary>
+    /// 一趟搬運失敗之後怎麼辦，依「物料在哪裡」決定：
+    /// 還沒取料 → 物料還在取料站，任務回到等待中重新派工（次數用完才標記失敗）。
+    /// 已經取料 → 物料在車上，系統無法確認實際狀況，標記失敗等人工處理。
+    /// </summary>
+    private void FailAssignment(Assignment assignment, string? reason, DateTimeOffset now)
+    {
+        var task = assignment.Task;
+        var loaded = assignment.IsLoaded;
+        assignment.Close(AssignmentStatus.Failed, reason, now);
+
+        if (!loaded && assignment.Attempt < fleetOptions.Value.MaxDispatchAttempts)
+        {
+            task.Requeue(assignment, reason, now);
+            logger.LogWarning("Assignment {AssignmentId} on {VehicleId} failed before pickup ({Reason}); task {TaskId} will be dispatched again.",
+                assignment.Id, assignment.VehicleId, reason, task.Id);
+        }
+        else
+        {
+            task.Fail(assignment, loaded ? $"Failed with the load on {assignment.VehicleId}: {reason}" : $"Failed {assignment.Attempt} time(s): {reason}", now);
+            logger.LogError("Task {TaskId} ({From} -> {To}) failed on {VehicleId} and needs attention: {Reason}.",
+                task.Id, task.FromStationCode, task.ToStationCode, assignment.VehicleId, task.FailureReason);
+        }
+    }
+
+    /// <summary>
+    /// 對帳：後端認為還在進行的派工，設備是否真的在執行。車輛在線、指令的有效期限已過，
+    /// 卻持續 <see cref="FleetOptions.LostCommandGrace"/> 都回報沒有這道指令，就當作這趟搬運失敗（例如設備重啟、指令遺失）。
+    /// 車輛離線時無法判斷，維持原狀；那種情況只能人工處理。回傳這一輪認定失敗的數量。
+    /// </summary>
+    public async Task<int> ReconcileAsync(IReadOnlyCollection<VehicleState> vehicles, CancellationToken cancellationToken)
+    {
+        var active = await db.Assignments.Include(a => a.Task)
+            .Where(a => Assignment.ActiveStatuses.Contains(a.Status))
+            .ToListAsync(cancellationToken);
+        if (active.Count == 0)
+        {
+            return 0;
+        }
+
+        var now = time.GetUtcNow();
+        var states = vehicles.ToDictionary(v => v.VehicleId, StringComparer.Ordinal);
+        var lost = 0;
+
+        foreach (var assignment in active)
+        {
+            if (!states.TryGetValue(assignment.VehicleId, out var vehicle)
+                || vehicle.Connectivity != VehicleConnectivity.Online
+                || now <= assignment.ExpiresAt)
+            {
+                continue;
+            }
+
+            if (vehicle.ActiveCommandId == assignment.CommandId)
+            {
+                assignment.MarkPresent();
+                continue;
+            }
+
+            assignment.MarkMissing(now);
+            if (now - assignment.MissingSince >= fleetOptions.Value.LostCommandGrace)
+            {
+                FailAssignment(assignment, "Vehicle no longer reports this command", now);
+                lost++;
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+        return lost;
+    }
+
+    /// <summary>
+    /// 人工處理失敗的搬運：有人到現場確認之後，告訴系統物料（或刀具）放回了取料站，還是已經送到卸料站。
+    /// 任務還在進行、但車輛離線而無法對帳時也可以用：先把那筆派工結束，再照同樣的方式處理。
+    /// </summary>
+    public async Task ResolveAsync(
+        Guid taskId, TaskResolution resolution, IReadOnlyCollection<VehicleState> vehicles, CancellationToken cancellationToken)
+    {
+        var task = await db.TransportTasks
+            .Include(t => t.Lot)
+            .Include(t => t.Assignments)
+            .SingleOrDefaultAsync(t => t.Id == taskId, cancellationToken)
+            ?? throw new RequestValidationException("id", "Task does not exist.");
+        var now = time.GetUtcNow();
+
+        if (task.Assignments.SingleOrDefault(a => a.IsActive) is { } active)
+        {
+            var online = vehicles.Any(v => v.VehicleId == active.VehicleId && v.Connectivity == VehicleConnectivity.Online);
+            if (online)
+            {
+                throw new RequestValidationException("id", $"Task is still being carried out by {active.VehicleId}, which is online.");
+            }
+
+            active.Close(AssignmentStatus.Failed, "Closed by operator while the vehicle was offline", now);
+            task.Fail(active, $"Vehicle {active.VehicleId} went offline during the task", now);
+        }
+
+        if (!task.NeedsAttention)
+        {
+            throw new RequestValidationException("id", $"Task is {task.Status} and does not need to be resolved.");
+        }
+
+        task.Resolve(resolution, now);
+        var lot = task.Lot;
+        var from = lot?.Location;
+
+        if (resolution == TaskResolution.ReturnToSource)
+        {
+            // 放回取料站，另開一趟新的搬運；這一筆任務留著失敗的紀錄。
+            if (lot is not null)
+            {
+                lot.ReturnTo(task.FromStationCode, now);
+                db.InventoryMovements.Add(InventoryMovement.Record(lot, from, "ManualReturn", now));
+                db.TransportTasks.Add(TransportTask.Create(lot, task.FromStationCode, task.ToStationCode, task.Kind, now));
+            }
+            else
+            {
+                db.TransportTasks.Add(TransportTask.CreateToolDelivery(task.FromStationCode, task.ToStationCode, now));
+            }
+        }
+        else if (lot is not null)
+        {
+            lot.PlaceAt(task.ToStationCode, now);
+            db.InventoryMovements.Add(InventoryMovement.Record(lot, from, "ManualDelivery", now));
+            production.OnLotArrived(lot, now);
+        }
+        else
+        {
+            await production.OnToolDeliveredAsync(task.ToStationCode, now, cancellationToken);
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+        logger.LogWarning("Task {TaskId} ({From} -> {To}) resolved by operator: {Resolution}.", task.Id, task.FromStationCode, task.ToStationCode, resolution);
     }
 
     /// <summary>
@@ -286,7 +420,8 @@ public sealed class TransportService(
                 && (t.Status == TransportTaskStatus.Assigned || t.Status == TransportTaskStatus.Executing))
             .SumAsync(t => t.Quantity, cancellationToken);
 
-        return waiting + remaining + inbound + quantity <= capacity;
+        // 容量以支計；料框比容量大的桿徑（24 mm 一框 45 支）至少放得下一框，否則永遠送不進去。
+        return waiting + remaining + inbound + quantity <= Math.Max(capacity, quantity);
     }
 
     private OutboxMessage CreateCommandMessage(

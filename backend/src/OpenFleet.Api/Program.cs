@@ -2,7 +2,6 @@ using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Production;
-using OpenFleet.Api.Simulation;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Api.Transport;
 using OpenFleet.Messaging;
@@ -21,7 +20,6 @@ builder.Services.AddOptions<FleetOptions>().Bind(builder.Configuration.GetSectio
 builder.Services.AddOptions<ProductionOptions>().Bind(builder.Configuration.GetSection(ProductionOptions.SectionName));
 builder.Services.AddSingleton<StateChangeQueue>();
 builder.Services.AddSingleton<FleetStateStore>();
-builder.Services.AddSingleton<SimulationSpeed>();
 
 // 路網與交通控制的狀態都在記憶體：路網啟動時從資料庫載入，預約狀況由車輛的遙測重建。
 builder.Services.AddOptions<TrafficOptions>().Bind(builder.Configuration.GetSection(TrafficOptions.SectionName));
@@ -47,7 +45,6 @@ builder.Services.AddHostedService<OutboxPublisher>();
 builder.Services.AddHostedService<DispatchWorker>();
 builder.Services.AddHostedService<TrafficWorker>();
 builder.Services.AddHostedService<ProductionWorker>();
-builder.Services.AddHostedService<SimulationSpeedPublisher>();
 
 var app = builder.Build();
 
@@ -63,7 +60,6 @@ app.MapGet("/health", (IMqttPublisher mqtt) => Results.Ok(new
 app.MapVehicleEndpoints();
 app.MapProductionEndpoints();
 app.MapTransportEndpoints();
-app.MapSimulationEndpoints();
 
 app.Run();
 

@@ -21,7 +21,6 @@ public static class SimulatorApp
         builder.Services.AddOpenFleetMqtt(builder.Configuration);
         builder.Services.AddMqttHandler<CommandHandler>();
         builder.Services.AddMqttHandler<ClearanceHandler>();
-        builder.Services.AddMqttHandler<SimulationSpeedHandler>();
         builder.Services.AddHostedService<TelemetryLoop>();
 
         return builder;

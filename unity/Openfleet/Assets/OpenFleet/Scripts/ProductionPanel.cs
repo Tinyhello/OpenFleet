@@ -12,7 +12,7 @@ using Colors = OpenFleet.Unity.PresentationController.Colors;
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間）、切換模擬速度、建立批次、
+    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件）、開關測試模式、建立批次、
     /// 查看缺車耽誤的時間與批次目前的狀態與位置。
     /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；批次清單與缺車統計以輪詢更新。
     /// 由 PresentationController 在執行時建立。
@@ -22,10 +22,8 @@ namespace OpenFleet.Unity
     {
         private const float RefreshSeconds = 1f;
 
-        /// <summary>模擬時間倍率的級距（使用者 2026-10-10 指定）；上限要和後端的 SimulationSpeed.MaxTimeScale 一致。</summary>
-        private static readonly double[] SpeedOptions = { 1, 10, 20, 30 };
-
-        private readonly List<(ProcessStepDto Step, SliderInt Seconds, SliderInt ToolLife)> _stepFields = new List<(ProcessStepDto, SliderInt, SliderInt)>();
+        /// <summary>按「套用」時，把各工序滑桿上的值寫回要送出的設定。</summary>
+        private readonly List<Action> _stepAppliers = new List<Action>();
         private readonly Dictionary<string, string> _stationNames = new Dictionary<string, string>();
         private VisualElement _root;
         private VisualElement _panel;
@@ -40,8 +38,10 @@ namespace OpenFleet.Unity
         private Label _status;
         private Label _shortage;
         private Label _incident;
+        private VisualElement _attention;
+        private string _attentionShown = string.Empty;
         private ProductionSettingsDto _settings;
-        private readonly List<(double Scale, Button Button)> _speedButtons = new List<(double, Button)>();
+        private Button _testMode;
 
         /// <summary>滑鼠是否在面板上；攝影機用來避免捲動清單時同時縮放畫面。</summary>
         public static bool PointerOverPanel { get; private set; }
@@ -130,7 +130,7 @@ namespace OpenFleet.Unity
 
             settings.Add(Hint("暫用數值，尚未定案；套用後存進後端資料庫。"));
 
-            _lotQuantity = NumberField("批量（件）", 1, 30);
+            _lotQuantity = NumberField("批量（支）", 1, 300);
             settings.Add(_lotQuantity);
             _quantityHint = Hint(string.Empty);
             settings.Add(_quantityHint);
@@ -153,18 +153,13 @@ namespace OpenFleet.Unity
             settingButtons.Add(ActionButton("重新載入", () => StartCoroutine(LoadSettings())));
             settings.Add(settingButtons);
 
-            // 測試用：加快模擬時間。倍率由後端保存並轉給模擬器，行駛、交接、加工、換刀一起變快。
-            _panel.Add(Heading("模擬速度（測試用）"));
-            var speedButtons = Row();
-            foreach (var scale in SpeedOptions)
-            {
-                var value = scale;
-                var button = ActionButton($"{value:0}×", () => StartCoroutine(SetSpeed(value)));
-                _speedButtons.Add((value, button));
-                speedButtons.Add(button);
-            }
-
-            _panel.Add(speedButtons);
+            // 測試模式：每一站依自己的專用倍率加快（倍率在示範設定裡調整），車輛維持實際速度。
+            // 沒有整體的時間加速（使用者 2026-10-10 取消）。
+            var testRow = Row();
+            _testMode = ActionButton("測試模式", () => StartCoroutine(ToggleTestMode()));
+            testRow.Add(_testMode);
+            _panel.Add(testRow);
+            _panel.Add(Hint("開啟後各站依自己的倍率加快，車輛不加快。"));
 
             // 重大事故：某個車型全部離線。平常隱藏，發生時用紅字顯示在最上面。
             _incident = new Label();
@@ -175,6 +170,10 @@ namespace OpenFleet.Unity
             _incident.style.display = DisplayStyle.None;
             _panel.Add(_incident);
 
+            // 需要人工處理的搬運：失敗而且系統不能自己重派（物料可能在車上）。平常是空的。
+            _attention = new VisualElement();
+            _panel.Add(_attention);
+
             // 缺車統計：車都在忙、叫不到車時，機台真的停下來的時間，按工序列出。
             _panel.Add(Heading("缺車耽誤"));
             _shortage = Hint("尚未讀到資料。");
@@ -183,7 +182,9 @@ namespace OpenFleet.Unity
 
             _panel.Add(Heading("批次"));
             var lotButtons = Row();
-            lotButtons.Add(ActionButton("建立批次", () => StartCoroutine(Post("/api/lots", "{}", "已建立批次"))));
+            // 桿徑決定一框裝幾支（Φ30 裝 30 支、Φ24 裝 45 支）；批次超過一框就分成多框，AGV 一趟送一框。
+            lotButtons.Add(ActionButton("建立批次 Φ30", () => StartCoroutine(Post("/api/lots", "{\"rodDiameterMm\":30}", "已建立批次"))));
+            lotButtons.Add(ActionButton("Φ24", () => StartCoroutine(Post("/api/lots", "{\"rodDiameterMm\":24}", "已建立批次"))));
             lotButtons.Add(ActionButton("清除示範資料", () => StartCoroutine(Post("/api/demo/reset", null, "已清除批次與搬運資料"))));
             _panel.Add(lotButtons);
 
@@ -198,49 +199,43 @@ namespace OpenFleet.Unity
             _panel.Add(scroll);
         }
 
-        private IEnumerator LoadSpeed()
+        /// <summary>
+        /// 開關測試模式：立刻送出，不必按「套用」。送的是上次從後端讀到的設定，只改這一個開關；
+        /// 示範設定裡還沒套用的修改不會跟著送出。
+        /// </summary>
+        private IEnumerator ToggleTestMode()
         {
-            using (var request = UnityWebRequest.Get($"{Api}/api/simulation"))
+            if (_settings == null)
+            {
+                SetStatus("尚未讀到設定，請先按「重新載入」。", Colors.Error);
+                yield break;
+            }
+
+            _settings.TestMode = !_settings.TestMode;
+            using (var request = JsonRequest(UnityWebRequest.kHttpVerbPUT, "/api/settings", FleetJson.Serialize(_settings)))
             {
                 yield return request.SendWebRequest();
-                if (request.result == UnityWebRequest.Result.Success)
+                if (!Succeeded(request, "切換測試模式"))
                 {
-                    ShowSpeed(FleetJson.Deserialize<SimulationSettingsDto>(request.downloadHandler.text).TimeScale);
+                    _settings.TestMode = !_settings.TestMode;
+                    yield break;
                 }
+
+                ShowSettings(FleetJson.Deserialize<ProductionSettingsDto>(request.downloadHandler.text));
+                SetStatus(_settings.TestMode ? "測試模式已開啟：各站依自己的倍率加快，車輛維持實際速度。" : "測試模式已關閉：各站恢復原本的時間。", Colors.Ok);
             }
         }
 
-        private IEnumerator SetSpeed(double scale)
+        /// <summary>顯示的是後端回報的狀態，不是剛按下的按鈕。</summary>
+        private void ShowTestMode(bool on)
         {
-            var json = FleetJson.Serialize(new SimulationSettingsDto { TimeScale = scale });
-            using (var request = JsonRequest(UnityWebRequest.kHttpVerbPUT, "/api/simulation", json))
-            {
-                yield return request.SendWebRequest();
-                if (Succeeded(request, "切換模擬速度"))
-                {
-                    var applied = FleetJson.Deserialize<SimulationSettingsDto>(request.downloadHandler.text).TimeScale;
-                    ShowSpeed(applied);
-                    SetStatus(applied > 1 ? $"模擬時間 {applied:0} 倍速。後端重啟後會回到 1 倍。" : "模擬時間恢復正常速度。", Colors.Ok);
-                }
-            }
-        }
-
-        /// <summary>目前的倍率用不同底色標出來；顯示的是後端回報的值，不是剛按下的按鈕。</summary>
-        private void ShowSpeed(double scale)
-        {
-            foreach (var (value, button) in _speedButtons)
-            {
-                var selected = Mathf.Approximately((float)value, (float)scale);
-                button.style.backgroundColor = selected ? Colors.Selected : new StyleColor(StyleKeyword.Null);
-                button.style.unityFontStyleAndWeight = selected ? FontStyle.Bold : FontStyle.Normal;
-            }
+            _testMode.text = on ? "測試模式：開（點此關閉）" : "測試模式：關（點此開啟）";
+            _testMode.style.backgroundColor = on ? Colors.Selected : new StyleColor(StyleKeyword.Null);
+            _testMode.style.unityFontStyleAndWeight = on ? FontStyle.Bold : FontStyle.Normal;
         }
 
         private IEnumerator LoadSettings()
         {
-            // 後端可能重啟過（倍率回到 1），所以每次重新載入都一起更新。
-            yield return LoadSpeed();
-
             using (var request = UnityWebRequest.Get($"{Api}/api/settings"))
             {
                 yield return request.SendWebRequest();
@@ -270,9 +265,10 @@ namespace OpenFleet.Unity
         private void ShowSettings(ProductionSettingsDto settings)
         {
             _settings = settings;
+            ShowTestMode(settings.TestMode);
             _lotQuantity.highValue = settings.MaxLotQuantity;
             _lotQuantity.value = settings.LotQuantity;
-            _quantityHint.text = $"1～{settings.MaxLotQuantity}（待加工料容量；目前不拆批）";
+            _quantityHint.text = $"1～{settings.MaxLotQuantity} 支；一框 Φ30 裝 30 支、Φ24 裝 45 支，超過就分成多框";
 
             SetValue(_pieceHandlingSeconds, settings.PieceHandlingSeconds);
             SetValue(_agvHandoverSeconds, settings.AgvHandoverSeconds);
@@ -280,18 +276,67 @@ namespace OpenFleet.Unity
             SetValue(_toolThreshold, settings.ToolRequestThresholdPieces);
 
             _stepRows.Clear();
-            _stepFields.Clear();
-            foreach (var step in settings.Steps)
+            _stepAppliers.Clear();
+            foreach (var item in settings.Steps)
             {
+                var step = item;
                 _stepRows.Add(Hint($"{step.Sequence}. {step.StationName}"));
+
+                // 這一站的專用倍率，測試模式開啟時才有作用。
+                var testSpeed = NumberField("測試倍率（×）", 1, 300);
+                SetValue(testSpeed, step.TestSpeed);
+                _stepRows.Add(testSpeed);
+                _stepAppliers.Add(() => step.TestSpeed = testSpeed.value);
+
+                if (step.Kind == ProcessStepKind.Batch)
+                {
+                    AddBatchFields(step);
+                    continue;
+                }
+
                 var seconds = NumberField("加工（秒／件）", 1, 120);
                 SetValue(seconds, step.SecondsPerPiece);
                 _stepRows.Add(seconds);
+                _stepAppliers.Add(() => step.SecondsPerPiece = seconds.value);
 
-                var toolLife = NumberField("刀具壽命（件）", 10, 1000);
-                SetValue(toolLife, step.ToolLifePieces);
-                _stepRows.Add(toolLife);
-                _stepFields.Add((step, seconds, toolLife));
+                // 沒有刀具的工序（拋光）沒有這一欄。
+                if (step.UsesTool)
+                {
+                    var toolLife = NumberField("刀具壽命（件）", 10, 1000);
+                    SetValue(toolLife, step.ToolLifePieces);
+                    _stepRows.Add(toolLife);
+                    _stepAppliers.Add(() => step.ToolLifePieces = toolLife.value);
+                }
+            }
+        }
+
+        /// <summary>整爐工序：開爐下限、一爐上限、各段的時間（分鐘）。</summary>
+        private void AddBatchFields(ProcessStepDto step)
+        {
+            var min = NumberField("開爐下限（支）", 1, 300);
+            SetValue(min, step.BatchMinPieces);
+            _stepRows.Add(min);
+            var max = NumberField("一爐上限（支）", 1, 300);
+            SetValue(max, step.BatchMaxPieces);
+            _stepRows.Add(max);
+
+            var first = NumberField($"{step.StageName ?? "處理"}（分）", 1, 720);
+            SetValue(first, step.BatchSeconds / 60d);
+            _stepRows.Add(first);
+            _stepAppliers.Add(() =>
+            {
+                step.BatchMinPieces = min.value;
+                step.BatchMaxPieces = max.value;
+                step.BatchSeconds = first.value * 60d;
+            });
+
+            // 只有一段的工序（電鍍）沒有第二段。
+            if (step.SecondStageName != null)
+            {
+                var second = NumberField($"{step.SecondStageName}（分）", 1, 720);
+                SetValue(second, step.BatchSecondStageSeconds / 60d);
+                _stepRows.Add(second);
+                _stepAppliers.Add(() => step.BatchSecondStageSeconds = second.value * 60d);
             }
         }
 
@@ -320,10 +365,9 @@ namespace OpenFleet.Unity
             _settings.AgvHandoverSeconds = _agvHandoverSeconds.value;
             _settings.ToolChangeSeconds = _toolChangeSeconds.value;
             _settings.ToolRequestThresholdPieces = _toolThreshold.value;
-            foreach (var (step, seconds, toolLife) in _stepFields)
+            foreach (var apply in _stepAppliers)
             {
-                step.SecondsPerPiece = seconds.value;
-                step.ToolLifePieces = toolLife.value;
+                apply();
             }
 
             using (var request = JsonRequest(UnityWebRequest.kHttpVerbPUT, "/api/settings", FleetJson.Serialize(_settings)))
@@ -332,7 +376,7 @@ namespace OpenFleet.Unity
                 if (Succeeded(request, "套用設定"))
                 {
                     ShowSettings(FleetJson.Deserialize<ProductionSettingsDto>(request.downloadHandler.text));
-                    SetStatus("設定已套用。已開始的加工與搬運不受影響，之後開始的才採用新值。", Colors.Ok);
+                    SetStatus("設定已套用。已開始的加工與搬運不受影響，之後開始的才採用新值；測試倍率立刻生效。", Colors.Ok);
                 }
             }
         }
@@ -356,8 +400,86 @@ namespace OpenFleet.Unity
             {
                 yield return RefreshLots();
                 yield return RefreshShortage();
+                yield return RefreshAttention();
                 yield return new WaitForSecondsRealtime(RefreshSeconds);
             }
+        }
+
+        /// <summary>
+        /// 失敗、等人工處理的搬運。每一筆兩個按鈕：物料已放回取料站（系統重新派一趟），或已由人工送到卸料站（視同送達）。
+        /// </summary>
+        private IEnumerator RefreshAttention()
+        {
+            using (var request = UnityWebRequest.Get($"{Api}/api/transport-tasks"))
+            {
+                yield return request.SendWebRequest();
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    yield break;
+                }
+
+                var waiting = new List<TransportTaskDto>();
+                foreach (var task in FleetJson.Deserialize<TransportTaskDto[]>(request.downloadHandler.text))
+                {
+                    if (task.NeedsAttention)
+                    {
+                        waiting.Add(task);
+                    }
+                }
+
+                // 內容沒變就不重建，否則每秒重建一次，按鈕會在按下去的瞬間被換掉。
+                var key = string.Join(",", waiting.ConvertAll(t => t.Id.ToString()));
+                if (key == _attentionShown)
+                {
+                    yield break;
+                }
+
+                _attentionShown = key;
+                _attention.Clear();
+                if (waiting.Count == 0)
+                {
+                    yield break;
+                }
+
+                var heading = Heading($"需要人工處理（{waiting.Count}）");
+                heading.style.color = Colors.Incident;
+                _attention.Add(heading);
+                foreach (var task in waiting)
+                {
+                    var id = task.Id;
+                    var what = task.Kind == TransportTaskKind.ToolDelivery ? "刀具" : $"{task.LotNumber} {task.Quantity} 件";
+                    var row = new Label($"{what}：{StationName(task.FromStationCode)} → {StationName(task.ToStationCode)}（{task.VehicleId}）\n{task.FailureReason}");
+                    row.style.whiteSpace = WhiteSpace.Normal;
+                    row.style.fontSize = 12;
+                    _attention.Add(row);
+
+                    var buttons = Row();
+                    buttons.Add(ActionButton("已放回取料站", () => StartCoroutine(Resolve(id, TaskResolution.ReturnToSource))));
+                    buttons.Add(ActionButton("已送到卸料站", () => StartCoroutine(Resolve(id, TaskResolution.DeliverToDestination))));
+                    buttons.style.marginBottom = 6;
+                    _attention.Add(buttons);
+                }
+            }
+        }
+
+        private IEnumerator Resolve(Guid taskId, TaskResolution resolution)
+        {
+            var json = FleetJson.Serialize(new ResolveTaskRequest { Resolution = resolution });
+            using (var request = JsonRequest(UnityWebRequest.kHttpVerbPOST, $"/api/transport-tasks/{taskId}/resolve", json))
+            {
+                yield return request.SendWebRequest();
+                if (Succeeded(request, "人工處理"))
+                {
+                    SetStatus(resolution == TaskResolution.ReturnToSource ? "已記錄：物料放回取料站，系統會重新派一趟。" : "已記錄：物料已由人工送達。", Colors.Ok);
+                    yield return RefreshAttention();
+                    yield return RefreshLots();
+                }
+            }
+        }
+
+        private string StationName(string code)
+        {
+            return _stationNames.TryGetValue(code ?? string.Empty, out var name) ? name : code;
         }
 
         private IEnumerator RefreshShortage()
@@ -432,7 +554,7 @@ namespace OpenFleet.Unity
             _incident.style.display = DisplayStyle.Flex;
         }
 
-        /// <summary>模擬時間的秒數顯示成「分:秒」。</summary>
+        /// <summary>秒數顯示成「分:秒」。</summary>
         private static string Duration(double seconds)
         {
             var total = Mathf.Max(0, Mathf.RoundToInt((float)seconds));
@@ -456,12 +578,52 @@ namespace OpenFleet.Unity
                     _lotRows.Add(Hint("還沒有批次。"));
                 }
 
+                // 一個批次分成好幾框，各自搬運與加工：每個批次一段，底下列出「幾框在哪裡做什麼」。
+                var order = new List<string>();
+                var batches = new Dictionary<string, List<LotDto>>();
                 foreach (var lot in lots)
                 {
-                    var row = new Label($"{lot.LotNumber}　{lot.Quantity} 件\n{Describe(lot)}");
+                    if (!batches.TryGetValue(lot.BatchNumber, out var bins))
+                    {
+                        bins = new List<LotDto>();
+                        batches.Add(lot.BatchNumber, bins);
+                        order.Add(lot.BatchNumber);
+                    }
+
+                    bins.Add(lot);
+                }
+
+                foreach (var batchNumber in order)
+                {
+                    var bins = batches[batchNumber];
+                    var pieces = 0;
+                    var finished = true;
+                    var places = new List<string>();
+                    var counts = new Dictionary<string, int>();
+                    foreach (var bin in bins)
+                    {
+                        pieces += bin.Quantity;
+                        finished &= bin.Status == LotStatus.Staged;
+                        var place = Describe(bin);
+                        if (!counts.ContainsKey(place))
+                        {
+                            counts[place] = 0;
+                            places.Add(place);
+                        }
+
+                        counts[place]++;
+                    }
+
+                    var text = new StringBuilder($"{batchNumber}　{pieces} 支／{bins.Count} 框（Φ{bins[0].RodDiameterMm}）");
+                    foreach (var place in places)
+                    {
+                        text.Append(bins.Count == 1 ? $"\n{place}" : $"\n{counts[place]} 框 {place}");
+                    }
+
+                    var row = new Label(text.ToString());
                     row.style.whiteSpace = WhiteSpace.Normal;
                     row.style.marginBottom = 6;
-                    row.style.color = lot.Status == LotStatus.Staged ? Colors.Muted : Color.white;
+                    row.style.color = finished ? Colors.Muted : Color.white;
                     _lotRows.Add(row);
                 }
             }

@@ -29,7 +29,7 @@ public static class ProductionEndpoints
             production.UpdateSettingsAsync(request, ct));
 
         api.MapGet("/lots", async (OpenFleetDbContext db, CancellationToken ct) =>
-            (await db.Lots.AsNoTracking().OrderByDescending(l => l.CreatedAt).Take(100).ToListAsync(ct)).Select(ToDto));
+            (await db.Lots.AsNoTracking().OrderByDescending(l => l.CreatedAt).ThenBy(l => l.BinIndex).Take(200).ToListAsync(ct)).Select(ToDto));
 
         // 追蹤一個批次：目前位置、每次位置異動、每道工序的加工紀錄、每一趟搬運。
         api.MapGet("/lots/{id:guid}", async (Guid id, OpenFleetDbContext db, CancellationToken ct) =>
@@ -99,10 +99,11 @@ public static class ProductionEndpoints
                 SimulatedSeconds = d.SimulatedSeconds,
             }).ToListAsync(ct));
 
+        // 建立一個批次；回應是它分成的每一框。
         api.MapPost("/lots", async (CreateLotRequest? request, ProductionService production, CancellationToken ct) =>
         {
-            var lot = await production.CreateLotAsync(request?.Quantity, ct);
-            return Results.Created($"/api/lots/{lot.Id}", ToDto(lot));
+            var bins = await production.CreateBatchAsync(request?.Quantity, request?.RodDiameterMm, ct);
+            return Results.Created("/api/lots", bins.Select(ToDto).ToList());
         });
 
         // 示範用：清掉所有批次與搬運資料（含刀具配送）並把刀具計數歸零（設定、站點、車輛保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
@@ -111,7 +112,7 @@ public static class ProductionEndpoints
             await db.Database.ExecuteSqlRawAsync("""TRUNCATE "Lots", "TransportTasks", "OutboxMessages", "InboxMessages" CASCADE""", ct);
             // 刀具計數與換刀紀錄也歸零，機台回到剛換好刀的狀態。
             await db.Database.ExecuteSqlRawAsync(
-                """TRUNCATE "ToolChanges"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
+                """TRUNCATE "ToolChanges", "BatchRuns"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
             loggers.CreateLogger(nameof(ProductionEndpoints)).LogWarning("Demo data reset: lots, tasks, movements, outbox and inbox cleared.");
             return Results.NoContent();
         });
@@ -123,6 +124,10 @@ public static class ProductionEndpoints
     {
         Id = lot.Id,
         LotNumber = lot.LotNumber,
+        BatchNumber = lot.BatchNumber,
+        BinIndex = lot.BinIndex,
+        BinCount = lot.BinCount,
+        RodDiameterMm = lot.RodDiameterMm,
         PartCode = lot.PartCode,
         Quantity = lot.Quantity,
         Status = lot.Status,

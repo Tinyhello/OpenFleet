@@ -129,31 +129,43 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         settings.LotQuantity = 20;
         settings.PieceHandlingSeconds = 0;
         settings.AgvHandoverSeconds = 0.01;
-        settings.Steps.ForEach(step => step.SecondsPerPiece = 0.05);
+        // 後段的整爐工序：有料就開、一下就做完，這個測試只驗證整條線接得起來。
+        settings.Steps.ForEach(step =>
+        {
+            step.SecondsPerPiece = 0.05;
+            step.BatchMinPieces = 1;
+            step.BatchSeconds = 0.05;
+            step.BatchSecondStageSeconds = step.BatchSecondStageSeconds > 0 ? 0.05 : 0;
+        });
         (await _http.PutAsJsonAsync("/api/settings", settings, JsonDefaults.Options)).EnsureSuccessStatusCode();
 
         var created = await _http.PostAsJsonAsync("/api/lots", new CreateLotRequest(), JsonDefaults.Options);
         Assert.Equal(HttpStatusCode.Created, created.StatusCode);
-        var lot = (await created.Content.ReadFromJsonAsync<LotDto>(JsonDefaults.Options))!;
-        Assert.Equal(20, lot.Quantity);
+        var lot = Assert.Single((await created.Content.ReadFromJsonAsync<List<LotDto>>(JsonDefaults.Options))!);
+        Assert.Equal((20, 1, 1, 30), (lot.Quantity, lot.BinIndex, lot.BinCount, lot.RodDiameterMm));
 
         await EventuallyAsync(async () => (await GetTraceAsync(lot.Id)).Lot.Status == LotStatus.Staged);
 
         var trace = await GetTraceAsync(lot.Id);
-        Assert.Equal("heat", trace.Lot.StationCode);
+        Assert.Equal("qc", trace.Lot.StationCode);
         Assert.Equal(
-            new[] { "station:raw-store", "vehicle:agv-t1", "station:rough", "vehicle:agv-t1", "station:fine", "vehicle:agv-t1", "station:heat" },
+            new[]
+            {
+                "station:raw-store", "vehicle:agv-t1", "station:rough", "vehicle:agv-t1", "station:fine", "vehicle:agv-t1", "station:heat",
+                "vehicle:agv-t1", "station:plating", "vehicle:agv-t1", "station:polish", "vehicle:agv-t1", "station:qc",
+            },
             trace.Movements.Select(m => m.To));
-        Assert.Equal(new[] { "rough", "fine" }, trace.Operations.Select(o => o.StationCode));
+        Assert.Equal(new[] { "rough", "fine", "heat", "plating", "polish" }, trace.Operations.Select(o => o.StationCode));
         Assert.All(trace.Operations, o => Assert.Equal((Contracts.OperationStatus.Completed, 20, 20), (o.Status, o.PiecesCompleted, o.Quantity)));
-        Assert.Equal(3, trace.Tasks.Count);
+        Assert.Equal(6, trace.Tasks.Count);
         Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
 
         // 站點狀態：兩站的刀具各累計 20 件，暫存點有 20 件；車輛卸完料後是空車。
         var stations = (await _http.GetFromJsonAsync<List<StationStatusDto>>("/api/stations/status", JsonDefaults.Options))!;
         Assert.Equal(20, stations.Single(s => s.Code == "rough").Tool!.PiecesUsed);
         Assert.Equal(20, stations.Single(s => s.Code == "fine").Tool!.PiecesUsed);
-        Assert.Equal(20, stations.Single(s => s.Code == "heat").InboundQuantity);
+        Assert.Null(stations.Single(s => s.Code == "polish").Tool);
+        Assert.Equal(20, stations.Single(s => s.Code == "qc").InboundQuantity);
         await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });
 
         // 任務歷史：待派工 → 已派工 → 執行中 → 完成。
@@ -175,35 +187,6 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         // 沒有設定車位的車留在原地。
         var other = await GetVehicleAsync("agv-t1");
         Assert.Equal((-10.3, 0.2), (other.Position.X, other.Position.Z));
-    }
-
-    [Fact]
-    public async Task Time_scale_can_be_changed_and_is_published_retained_for_the_simulator()
-    {
-        Assert.Equal(1, (await _http.GetFromJsonAsync<SimulationSettingsDto>("/api/simulation", JsonDefaults.Options))!.TimeScale);
-
-        var tooFast = await _http.PutAsJsonAsync("/api/simulation", new SimulationSettingsDto { TimeScale = 1000 }, JsonDefaults.Options);
-        Assert.Equal(HttpStatusCode.BadRequest, tooFast.StatusCode);
-
-        var changed = await _http.PutAsJsonAsync("/api/simulation", new SimulationSettingsDto { TimeScale = 30 }, JsonDefaults.Options);
-        Assert.Equal(30, (await changed.Content.ReadFromJsonAsync<SimulationSettingsDto>(JsonDefaults.Options))!.TimeScale);
-
-        // 之後才訂閱的用戶端（例如晚啟動的模擬器）也拿得到目前的倍率。
-        var received = new ConcurrentQueue<string>();
-        using var client = await ConnectTestClientAsync();
-        client.ApplicationMessageReceivedAsync += e =>
-        {
-            received.Enqueue(e.ApplicationMessage.ConvertPayloadToString());
-            return Task.CompletedTask;
-        };
-        await EventuallyAsync(async () =>
-        {
-            await client.SubscribeAsync(Topics.SimulationState("demo"), MqttQualityOfServiceLevel.AtLeastOnce);
-            return received.Any(json => json.Contains("\"timeScale\":30"));
-        });
-
-        // 模擬器收到後套用同一個倍率。
-        await EventuallyAsync(() => Task.FromResult(_simulator.Services.GetRequiredService<SimulatedFleet>().TimeScale == 30));
     }
 
     [Fact]

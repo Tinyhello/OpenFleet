@@ -10,7 +10,7 @@ namespace OpenFleet.Unity
 {
     /// <summary>
     /// 畫在場景物件上方的進度條（UI Toolkit，螢幕座標，每個 frame 跟著攝影機重新定位）：
-    /// 機台的備料區、成品區、加工進度與可收合的刀具進度；車輛與站點交接的進度。
+    /// 機台的備料區、成品區、加工進度與可收合的刀具進度；整爐工序（淬火／回火、電鍍）的集料與這一爐的進度；車輛與站點交接的進度。
     /// 站點狀態以 HTTP 輪詢取得，車輛狀態來自 FleetView 已經收到的 MQTT 更新；這裡不保存也不推算任何業務狀態。
     /// 由 PresentationController 在執行時建立；場景物件（站點、車輛）與顏色都向它取得。
     /// </summary>
@@ -427,6 +427,7 @@ namespace OpenFleet.Unity
             private readonly Label _summary = new Label { pickingMode = PickingMode.Ignore };
             private bool _toolExpanded;
             private bool _isMachine;
+            private bool _hasTool;
             private string _spare = string.Empty;
 
             public StationWidget(StationAnchor anchor)
@@ -470,6 +471,7 @@ namespace OpenFleet.Unity
 
                 if (!_isMachine)
                 {
+                    _hasTool = false;
                     // 倉庫：等待搬運的件數；暫存點：已暫存的件數。
                     var total = status.InboundQuantity + status.OutboundQuantity;
                     _summary.text = status.OutboundQuantity > 0 ? $"待搬運 {status.OutboundQuantity} 件" : $"暫存 {status.InboundQuantity} 件";
@@ -479,6 +481,14 @@ namespace OpenFleet.Unity
                 }
 
                 HasContent = true;
+                _hasTool = status.Tool != null;
+                if (status.Batch != null)
+                {
+                    ShowBatch(status);
+                    ShowToolRow();
+                    return;
+                }
+
                 _inbound.Set("備料", Ratio(status.InboundQuantity, status.InboundCapacity), Count(status.InboundQuantity, status.InboundCapacity));
                 _outbound.Set("成品", Ratio(status.OutboundQuantity, status.OutboundCapacity), Count(status.OutboundQuantity, status.OutboundCapacity));
 
@@ -531,6 +541,32 @@ namespace OpenFleet.Unity
                 ShowToolRow();
             }
 
+            /// <summary>
+            /// 整爐工序的站：第一列是站內累積的支數對開爐下限（滿了才開），第二列是做完等搬走的支數，
+            /// 第三列是這一爐目前的階段（淬火、回火、電鍍）與整爐剩下的時間。
+            /// </summary>
+            private void ShowBatch(StationStatusDto status)
+            {
+                var batch = status.Batch;
+                _inbound.Set("集料", Ratio(status.InboundQuantity, batch.MinPieces), $"{status.InboundQuantity}/{batch.MinPieces}");
+                _outbound.Set("完成", status.OutboundQuantity > 0 ? 1f : 0f, status.OutboundQuantity.ToString());
+                if (batch.Running)
+                {
+                    _machining.Set(batch.StageName ?? "處理", (float)batch.StageProgress, Remaining(batch.RemainingSeconds), Colors.Machining);
+                }
+                else
+                {
+                    _machining.Set("爐內", 0f, "待機", Colors.Machining);
+                }
+            }
+
+            /// <summary>剩餘時間（原本的工序時間，測試模式下走得比較快）：一小時以上顯示「時h分m」，不到一小時顯示「分m秒s」。</summary>
+            private static string Remaining(double seconds)
+            {
+                var total = Mathf.Max(0, Mathf.CeilToInt((float)seconds));
+                return total >= 3600 ? $"{total / 3600}h{total % 3600 / 60:00}m" : $"{total / 60}m{total % 60:00}s";
+            }
+
             private void ToggleTool()
             {
                 _toolExpanded = !_toolExpanded;
@@ -539,9 +575,11 @@ namespace OpenFleet.Unity
 
             private void ShowToolRow()
             {
-                _toolToggle.style.display = _isMachine ? DisplayStyle.Flex : DisplayStyle.None;
+                // 沒有刀具的站（拋光、淬火／回火、電鍍）不顯示刀具列。
+                var show = _isMachine && _hasTool;
+                _toolToggle.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
                 _toolToggle.text = (_toolExpanded ? "刀具 ▲" : "刀具 ▼") + _spare;
-                _tool.SetVisible(_isMachine && _toolExpanded);
+                _tool.SetVisible(show && _toolExpanded);
             }
 
             private static float Ratio(int quantity, int? capacity)

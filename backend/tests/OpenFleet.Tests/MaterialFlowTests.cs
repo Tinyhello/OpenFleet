@@ -364,25 +364,30 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Time_scale_speeds_up_machining_and_tool_changes()
+    public async Task Test_mode_speeds_up_machining_and_tool_changes_at_the_station_by_its_own_factor()
     {
         await ConfigureAsync(s => s.Steps[0].ToolLifePieces = 10);
         await CreateLotAsync();
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
 
-        // 1 倍速 5 秒：每件 2 秒，做完 2 件，第 3 件做到一半。
+        // 測試模式關閉 5 秒：每件 2 秒，做完 2 件，第 3 件做到一半。
         _database.Time.Advance(TimeSpan.FromSeconds(5));
         await AdvanceOperationsAsync();
         Assert.Equal(2, (await StationAsync("rough")).Machining!.PiecesCompleted);
 
-        // 切到 10 倍：進行中的那一件從切換的時間重新計時（不會把之前的 5 秒也用 10 倍計算），之後每件 0.2 秒。
-        _database.Speed.Set(10);
+        // 專用倍率設好但測試模式沒開：沒有作用。
+        await ConfigureAsync(s => s.Steps[0].TestSpeed = 10);
+        await AdvanceOperationsAsync();
+        Assert.Equal(2, (await StationAsync("rough")).Machining!.PiecesCompleted);
+
+        // 開啟測試模式（粗加工 10 倍）：進行中的那一件從切換的時間重新計時（不會把之前的 5 秒也用 10 倍計算），之後每件 0.2 秒。
+        await ConfigureAsync(s => s.TestMode = true);
         _database.Time.Advance(TimeSpan.FromSeconds(1));
         await AdvanceOperationsAsync();
         Assert.Equal(7, (await StationAsync("rough")).Machining!.PiecesCompleted);
 
-        // 再 0.6 秒做到第 10 件，開始換刀；換刀 20 秒在 10 倍速下是 2 秒。
+        // 再 0.6 秒做到第 10 件，開始換刀；換刀 20 秒在這一站的 10 倍下是 2 秒。
         _database.Time.Advance(TimeSpan.FromSeconds(1.6));
         await AdvanceOperationsAsync();
         var rough = await StationAsync("rough");
@@ -515,14 +520,24 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await using (var seeded = (await TestDatabase.CreateAsync(postgres)).NewScope())
         {
             var defaults = await seeded.Production.GetSettingsAsync(default);
-            Assert.Equal(new[] { (30d, 500), (60d, 250) }, defaults.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
+            Assert.Equal(new[] { "rough", "fine", "heat", "plating", "polish" }, defaults.Steps.Select(step => step.StationCode));
+            Assert.Equal(new[] { (30d, 500), (60d, 250), (20d, 0) },
+                defaults.Steps.Where(step => step.Kind == ProcessStepKind.Piece).Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
+            // 淬火 4 小時＋回火 8 小時、150～300 支；電鍍 1 小時、100～150 支。
+            Assert.Equal(new[] { (150, 300, 14400d, 28800d), (100, 150, 3600d, 0d) },
+                defaults.Steps.Where(step => step.Kind == ProcessStepKind.Batch)
+                    .Select(step => (step.BatchMinPieces, step.BatchMaxPieces, step.BatchSeconds, step.BatchSecondStageSeconds)));
+            Assert.Equal("qc", defaults.BufferStationCode);
+            // 測試模式預設關閉；各站的專用倍率：粗加工 10、精加工 20、淬火／回火 200、電鍍 60、拋光 10。
+            Assert.False(defaults.TestMode);
+            Assert.Equal(new[] { 10d, 20d, 200d, 60d, 10d }, defaults.Steps.Select(step => step.TestSpeed));
             Assert.Equal((5d, 30d, 90d, 50, true),
                 (defaults.PieceHandlingSeconds, defaults.AgvHandoverSeconds, defaults.ToolChangeSeconds, defaults.ToolRequestThresholdPieces, defaults.ToolDeliveryEnabled));
         }
 
         await using var scope = _database.NewScope();
         var settings = await scope.Production.GetSettingsAsync(default);
-        Assert.Equal((30, 30, 0d, 20d), (settings.LotQuantity, settings.MaxLotQuantity, settings.PieceHandlingSeconds, settings.ToolChangeSeconds));
+        Assert.Equal((30, 300, 0d, 20d), (settings.LotQuantity, settings.MaxLotQuantity, settings.PieceHandlingSeconds, settings.ToolChangeSeconds));
 
         settings.LotQuantity = 12;
         settings.PieceHandlingSeconds = 1.5;
@@ -533,17 +548,19 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         var updated = await scope.Production.UpdateSettingsAsync(settings, default);
         Assert.Equal((12, 1.5, 12d, 45d), (updated.LotQuantity, updated.PieceHandlingSeconds, updated.AgvHandoverSeconds, updated.ToolChangeSeconds));
         Assert.Equal(new[] { (4d, 100), (2d, 250) }, updated.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
-        Assert.Equal(12, (await scope.Production.CreateLotAsync(null, default)).Quantity);
+        Assert.Equal(12, ((await scope.Production.CreateBatchAsync(null, null, default)).Single()).Quantity);
 
-        // 待加工料容量是 30：不拆批時批量不能超過它。
-        await Invalid(s => s.LotQuantity = 31);
+        // 一個批次最多 300 支。
+        await Invalid(s => s.LotQuantity = 301);
         await Invalid(s => s.Steps[1].SecondsPerPiece = 0);
+        await Invalid(s => s.Steps[1].TestSpeed = 0.5);
+        await Invalid(s => s.Steps[1].TestSpeed = 1001);
         await Invalid(s => s.Steps[1].ToolLifePieces = 0);
         await Invalid(s => s.PieceHandlingSeconds = -1);
         await Invalid(s => s.AgvHandoverSeconds = -1);
         await Invalid(s => s.ToolRequestThresholdPieces = -1);
         await Invalid(s => s.ToolChangeSeconds = double.NaN);
-        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateLotAsync(0, default));
+        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(0, null, default));
 
         async Task Invalid(Action<ProductionSettingsDto> change)
         {
@@ -568,7 +585,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     private async Task<MaterialLot> CreateLotAsync()
     {
         await using var scope = _database.NewScope();
-        var lot = await scope.Production.CreateLotAsync(null, default);
+        var lot = (await scope.Production.CreateBatchAsync(null, null, default)).Single();
         // 讓建立時間有先後，派工順序才是確定的。
         _database.Time.Advance(TimeSpan.FromMilliseconds(10));
         return lot;

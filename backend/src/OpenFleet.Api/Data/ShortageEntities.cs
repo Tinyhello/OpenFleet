@@ -3,8 +3,8 @@ using OpenFleet.Contracts;
 namespace OpenFleet.Api.Data;
 
 /// <summary>
-/// 缺車紀錄共用的時間欄位。起訖是實際時鐘；<see cref="SimulatedSeconds"/> 是換算成模擬時間的長度
-/// （每次檢查時加上「經過的實際秒數 × 當時的時間倍率」），統計用這個值，倍率中途改變也不會失真。
+/// 缺車紀錄共用的時間欄位。<see cref="SimulatedSeconds"/> 是累計的長度，每次檢查時加上經過的秒數，統計用這個值。
+/// 欄位名稱來自以前的整體時間倍率；倍率取消後車輛一律以實際速度運行，所以它就是實際秒數。
 /// </summary>
 public abstract class ShortageInterval
 {
@@ -24,11 +24,11 @@ public abstract class ShortageInterval
 
     public bool IsOpen => EndedAt is null;
 
-    public void Accrue(DateTimeOffset now, double timeScale)
+    public void Accrue(DateTimeOffset now)
     {
         if (now > AccruedAt)
         {
-            SimulatedSeconds += (now - AccruedAt).TotalSeconds * timeScale;
+            SimulatedSeconds += (now - AccruedAt).TotalSeconds;
             AccruedAt = now;
         }
     }

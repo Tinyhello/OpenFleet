@@ -27,8 +27,11 @@ public sealed class DispatchWorker(
                 {
                     await using var scope = scopes.CreateAsyncScope();
                     var transport = scope.ServiceProvider.GetRequiredService<TransportService>();
+                    var vehicles = fleet.Snapshot();
                     await transport.MarkExpiredAssignmentsAsync(stoppingToken);
-                    await transport.DispatchPendingAsync(fleet.Snapshot(), stoppingToken);
+                    // 先對帳再派工：設備弄丟的搬運在這一輪就能重新排進去。
+                    await transport.ReconcileAsync(vehicles, stoppingToken);
+                    await transport.DispatchPendingAsync(vehicles, stoppingToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

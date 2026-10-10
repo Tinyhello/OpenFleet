@@ -148,6 +148,12 @@ namespace OpenFleet.Contracts
 
         /// <summary>這一段路已經到達的點數；後端據此釋放車輛已經離開的路段。</summary>
         public int RouteReachedCount { get; set; }
+
+        /// <summary>
+        /// 設備正在執行的搬運指令；沒有時為 null。後端用來對帳：
+        /// 後端認為還在進行的派工，設備卻說沒有這道指令（例如設備重啟），那趟搬運就要進恢復流程。
+        /// </summary>
+        public Guid? ActiveCommandId { get; set; }
     }
 
     /// <summary>車型。由後端的車輛設定決定；設定裡沒有的車輛為 Unknown。</summary>
@@ -189,6 +195,9 @@ namespace OpenFleet.Contracts
         public Guid? RoutePlanId { get; set; }
         public long RouteRevision { get; set; }
         public int RouteReachedCount { get; set; }
+
+        /// <summary>設備回報正在執行的搬運指令（見 <see cref="VehicleTelemetry.ActiveCommandId"/>）。</summary>
+        public Guid? ActiveCommandId { get; set; }
         public DateTimeOffset LastSeenAt { get; set; }
         public Guid TelemetrySessionId { get; set; }
         public long TelemetrySequence { get; set; }

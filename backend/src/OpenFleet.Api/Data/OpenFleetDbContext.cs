@@ -12,6 +12,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<Station> Stations => Set<Station>();
     public DbSet<ProcessStep> ProcessSteps => Set<ProcessStep>();
     public DbSet<ProductionSettings> ProductionSettings => Set<ProductionSettings>();
+    public DbSet<BatchRun> BatchRuns => Set<BatchRun>();
     public DbSet<StationTool> StationTools => Set<StationTool>();
     public DbSet<ToolChangeRecord> ToolChanges => Set<ToolChangeRecord>();
     public DbSet<MaterialLot> Lots => Set<MaterialLot>();
@@ -39,6 +40,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         configuration.Properties<VehicleType>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<MachineDelayCause>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<ShortageReason>().HaveConversion<string>().HaveMaxLength(32);
+        configuration.Properties<TaskResolution>().HaveConversion<string>().HaveMaxLength(32);
+        configuration.Properties<ProcessStepKind>().HaveConversion<string>().HaveMaxLength(32);
     }
 
     protected override void OnModelCreating(ModelBuilder model)
@@ -56,11 +59,29 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(s => s.Sequence).ValueGeneratedNever();
             e.Property(s => s.StationCode).HasMaxLength(32);
             e.HasOne<Station>().WithMany().HasForeignKey(s => s.StationCode).OnDelete(DeleteBehavior.Restrict);
+            e.Property(s => s.StageName).HasMaxLength(32);
+            e.Property(s => s.SecondStageName).HasMaxLength(32);
+            // 每種工序只檢查自己用到的欄位。
             e.ToTable(t =>
             {
-                t.HasCheckConstraint("CK_ProcessSteps_SecondsPerPiece", "\"SecondsPerPiece\" > 0");
-                t.HasCheckConstraint("CK_ProcessSteps_ToolLife", "\"ToolLifePieces\" > 0");
+                t.HasCheckConstraint("CK_ProcessSteps_SecondsPerPiece", "\"Kind\" <> 'Piece' OR \"SecondsPerPiece\" > 0");
+                t.HasCheckConstraint("CK_ProcessSteps_ToolLife", "NOT \"UsesTool\" OR \"ToolLifePieces\" > 0");
+                t.HasCheckConstraint("CK_ProcessSteps_TestSpeed", "\"TestSpeed\" >= 1");
+                t.HasCheckConstraint("CK_ProcessSteps_Batch",
+                    "\"Kind\" <> 'Batch' OR (\"BatchMinPieces\" > 0 AND \"BatchMaxPieces\" >= \"BatchMinPieces\" AND \"BatchSeconds\" > 0)");
             });
+        });
+
+        model.Entity<BatchRun>(e =>
+        {
+            e.Property(r => r.Id).ValueGeneratedNever();
+            e.Property(r => r.StationCode).HasMaxLength(32);
+            e.Ignore(r => r.IsRunning);
+            e.Ignore(r => r.InSecondStage);
+            e.Ignore(r => r.StageProgress);
+            e.HasOne<Station>().WithMany().HasForeignKey(r => r.StationCode).OnDelete(DeleteBehavior.Restrict);
+            // 一站同一時間只有一爐在進行。
+            e.HasIndex(r => r.StationCode).IsUnique().HasFilter("\"CompletedAt\" IS NULL").HasDatabaseName("UX_BatchRuns_RunningStation");
         });
 
         model.Entity<StationTool>(e =>
@@ -101,6 +122,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             });
             e.Property(l => l.Id).ValueGeneratedNever();
             e.Property(l => l.LotNumber).HasMaxLength(32);
+            e.Property(l => l.BatchNumber).HasMaxLength(32);
+            e.HasIndex(l => l.BatchNumber);
             e.Property(l => l.PartCode).HasMaxLength(32);
             e.Property(l => l.StationCode).HasMaxLength(32);
             e.Property(l => l.VehicleId).HasMaxLength(32);
@@ -158,6 +181,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(t => t.ToStationCode).HasMaxLength(32);
             e.Property(t => t.FailureReason).HasMaxLength(256);
             e.Property(t => t.Version).IsRowVersion();
+            e.Ignore(t => t.NeedsAttention);
             e.HasIndex(t => new { t.Status, t.CreatedAt });
             e.HasOne(t => t.Lot).WithMany().HasForeignKey(t => t.LotId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<Station>().WithMany().HasForeignKey(t => t.FromStationCode).OnDelete(DeleteBehavior.Restrict);
@@ -173,6 +197,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(a => a.Reason).HasMaxLength(256);
             e.Property(a => a.Version).IsRowVersion();
             e.Ignore(a => a.IsActive);
+            e.Ignore(a => a.IsLoaded);
             e.Ignore(a => a.IsAwaitingReply);
             e.HasOne<Vehicle>().WithMany().HasForeignKey(a => a.VehicleId).OnDelete(DeleteBehavior.Restrict);
 

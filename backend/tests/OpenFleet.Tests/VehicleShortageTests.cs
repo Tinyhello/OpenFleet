@@ -42,16 +42,15 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal((0d, null), (summary.Steps[1].DelaySeconds, summary.Steps[1].CurrentCause));
         Assert.Equal((0, 0d), (summary.OfflineWaitCount, summary.Steps[0].OfflineSeconds));
 
-        // 10 倍速再等 2 秒＝模擬時間 20 秒；派出車的那一刻等待與耽誤都結束，之後的行駛時間不算。
-        _database.Speed.Set(10);
+        // 再等 2 秒；派出車的那一刻等待與耽誤都結束，之後的行駛時間不算。
         _database.Time.Advance(TimeSpan.FromSeconds(2));
         Assert.Equal(1, await DispatchAsync(Busy, Online("agv-a")));
         _database.Time.Advance(TimeSpan.FromSeconds(30));
         Assert.Equal(0, await DispatchAsync(Busy, Online("agv-a")));
 
         summary = await SummaryAsync(Busy);
-        Assert.Equal((0, 1, 30d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
-        Assert.Equal((30d, 30d, 0d, null), (summary.Steps[0].DelaySeconds, summary.Steps[0].WaitingForMaterialSeconds,
+        Assert.Equal((0, 1, 12d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
+        Assert.Equal((12d, 12d, 0d, null), (summary.Steps[0].DelaySeconds, summary.Steps[0].WaitingForMaterialSeconds,
             summary.Steps[0].OutputNotRemovedSeconds, summary.Steps[0].CurrentCause));
 
         await using var scope = _database.NewScope();
@@ -187,7 +186,7 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
     private async Task<MaterialLot> CreateLotAsync()
     {
         await using var scope = _database.NewScope();
-        var lot = await scope.Production.CreateLotAsync(null, default);
+        var lot = (await scope.Production.CreateBatchAsync(null, null, default)).Single();
         _database.Time.Advance(TimeSpan.FromMilliseconds(10));
         return lot;
     }

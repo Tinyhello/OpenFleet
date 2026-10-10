@@ -14,7 +14,6 @@ namespace OpenFleet.Contracts
     /// MQTT Topic 命名集中在這裡，後端、模擬器與 Unity 共用，避免各自拼字串。
     /// 格式：openfleet/v1/{factoryId}/vehicles/{vehicleId}/{commands|events|telemetry|clearance}
     ///       openfleet/v1/{factoryId}/state/vehicles/{vehicleId}
-    ///       openfleet/v1/{factoryId}/state/simulation
     /// </summary>
     public static class Topics
     {
@@ -39,12 +38,6 @@ namespace OpenFleet.Contracts
         public static string AllVehicleStates(string factoryId)
         {
             return VehicleState(factoryId, "+");
-        }
-
-        /// <summary>後端 → 模擬器：模擬設定（時間倍率），retained。</summary>
-        public static string SimulationState(string factoryId)
-        {
-            return $"{Root}/{factoryId}/state/simulation";
         }
 
         /// <summary>從車輛 Topic 取出 vehicleId；格式不符時回傳 false。</summary>
