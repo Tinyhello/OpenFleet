@@ -95,7 +95,7 @@ namespace OpenFleet.Contracts
         /// <summary>逐件：一次一框，一件一件做（車床、拋光）。</summary>
         Piece,
 
-        /// <summary>整爐：站內累積到下限才開，不同批次可以混在一起，時間到整爐一起完成（淬火／回火、電鍍）。</summary>
+        /// <summary>整爐：站內累積到下限才開，不同批次可以混在一起，時間到整爐一起完成（淬火、回火、電鍍）。</summary>
         Batch,
     }
 
@@ -120,18 +120,20 @@ namespace OpenFleet.Contracts
         /// <summary>整爐工序：站內累積到這麼多支才開爐。</summary>
         public int BatchMinPieces { get; set; }
 
-        /// <summary>整爐工序：一爐最多幾支。</summary>
+        /// <summary>整爐工序：一爐最多幾支。<see cref="BatchMaxPiecesRod24"/> 有值時，這是桿徑 30 mm 的上限。</summary>
         public int BatchMaxPieces { get; set; }
 
-        /// <summary>整爐工序：第一段（或唯一一段）的時間（秒）。</summary>
+        /// <summary>
+        /// 整爐工序：桿徑 24 mm 的一爐上限；0 表示這道工序不分桿徑，只算支數。
+        /// 有值時兩種桿徑可以混裝，各自占「支數 ÷ 自己的上限」，加起來不超過一爐（電鍍：30 mm 40 支、24 mm 56 支）。
+        /// </summary>
+        public int BatchMaxPiecesRod24 { get; set; }
+
+        /// <summary>整爐工序：一爐的時間（秒）。</summary>
         public double BatchSeconds { get; set; }
 
-        /// <summary>整爐工序：第二段的時間（秒）；只有一段時為 0。兩段在同一站連續進行，中間不搬運。</summary>
-        public double BatchSecondStageSeconds { get; set; }
-
-        /// <summary>唯讀：兩段的名稱（例如淬火、回火）。</summary>
+        /// <summary>唯讀：整爐工序的名稱，顯示用（淬火、回火、電鍍）。</summary>
         public string? StageName { get; set; }
-        public string? SecondStageName { get; set; }
 
         /// <summary>
         /// 測試模式下這一站的專用倍率：這一站的加工、機台取放、換刀（或整爐的時間）加快這麼多倍。
@@ -178,6 +180,18 @@ namespace OpenFleet.Contracts
         /// 車輛（行駛與交接）不加快，永遠是實際速度。
         /// </summary>
         public bool TestMode { get; set; }
+
+        /// <summary>
+        /// 機床換線時間（秒）：有刀具的逐件工序（粗加工、精加工）接著做的那一框桿徑和上一框不同時，要先換工控程式。
+        /// 測試模式下依該站的倍率加快。
+        /// </summary>
+        public double ChangeoverSeconds { get; set; }
+
+        /// <summary>測試模式下 AGV 交接（取料、卸料）加快的倍率。</summary>
+        public double TestHandoverSpeed { get; set; } = 1;
+
+        /// <summary>測試模式下空車車速的倍率；載貨時的車速不變。</summary>
+        public double TestEmptyVehicleSpeed { get; set; } = 1;
 
         /// <summary>PUT 時採用 Sequence 與該種工序自己的數值（時間、刀具壽命、開爐條件、TestSpeed）。</summary>
         public List<ProcessStepDto> Steps { get; set; } = new List<ProcessStepDto>();
@@ -315,13 +329,13 @@ namespace OpenFleet.Contracts
         /// <summary>這一爐的支數。</summary>
         public int Quantity { get; set; }
 
-        /// <summary>目前這一段的名稱（例如淬火、回火）；沒有在進行時為 null。</summary>
+        /// <summary>這道工序的名稱（淬火、回火、電鍍）；沒有在進行時為 null。</summary>
         public string? StageName { get; set; }
 
-        /// <summary>目前這一段的進度，0～1。</summary>
+        /// <summary>這一爐的進度，0～1。</summary>
         public double StageProgress { get; set; }
 
-        /// <summary>整爐還剩多久（秒，原本的工序時間，含還沒開始的第二段）。測試模式下會走得比實際時鐘快。</summary>
+        /// <summary>整爐還剩多久（秒，原本的工序時間）。測試模式下會走得比實際時鐘快。</summary>
         public double RemainingSeconds { get; set; }
     }
 
@@ -331,6 +345,12 @@ namespace OpenFleet.Contracts
         public string LotNumber { get; set; } = string.Empty;
         public int PiecesCompleted { get; set; }
         public int Quantity { get; set; }
+
+        /// <summary>機床正在換線（這一框的桿徑和上一框不同），還沒開始做第一件。</summary>
+        public bool ChangingOver { get; set; }
+
+        /// <summary>換線進度，0～1；沒有在換線時為 0。</summary>
+        public double ChangeoverProgress { get; set; }
     }
 
     public sealed class ToolStatusDto

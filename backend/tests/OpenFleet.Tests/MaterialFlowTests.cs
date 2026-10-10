@@ -487,6 +487,18 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Test_mode_shortens_the_handover_time_in_new_transport_commands()
+    {
+        // 測試模式下交接依設定的倍率加快（示範值 40 倍）：30 秒變 0.75 秒。派出的那一刻決定。
+        await ConfigureAsync(s => s.TestMode = true);
+        await CreateLotAsync();
+        await DispatchAsync(Online("agv-a"));
+
+        await using var scope = _database.NewScope();
+        Assert.Contains("\"handoverSeconds\":0.75", (await scope.Db.OutboxMessages.SingleAsync()).Payload);
+    }
+
+    [Fact]
     public async Task Last_step_sends_the_lot_to_the_buffer_where_it_is_staged()
     {
         var lot = await CreateLotAsync();
@@ -520,17 +532,18 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await using (var seeded = (await TestDatabase.CreateAsync(postgres)).NewScope())
         {
             var defaults = await seeded.Production.GetSettingsAsync(default);
-            Assert.Equal(new[] { "rough", "fine", "heat", "plating", "polish" }, defaults.Steps.Select(step => step.StationCode));
+            Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish" }, defaults.Steps.Select(step => step.StationCode));
             Assert.Equal(new[] { (30d, 500), (60d, 250), (20d, 0) },
                 defaults.Steps.Where(step => step.Kind == ProcessStepKind.Piece).Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
-            // 淬火 4 小時＋回火 8 小時、150～300 支；電鍍 1 小時、100～150 支。
-            Assert.Equal(new[] { (150, 300, 14400d, 28800d), (100, 150, 3600d, 0d) },
+            // 淬火 4 小時、回火 8 小時，各 150～300 支；電鍍 1 小時，有料就開，一爐 30 mm 40 支／24 mm 56 支。
+            Assert.Equal(new[] { (150, 300, 0, 14400d), (150, 300, 0, 28800d), (1, 40, 56, 3600d) },
                 defaults.Steps.Where(step => step.Kind == ProcessStepKind.Batch)
-                    .Select(step => (step.BatchMinPieces, step.BatchMaxPieces, step.BatchSeconds, step.BatchSecondStageSeconds)));
+                    .Select(step => (step.BatchMinPieces, step.BatchMaxPieces, step.BatchMaxPiecesRod24, step.BatchSeconds)));
             Assert.Equal("qc", defaults.BufferStationCode);
-            // 測試模式預設關閉；各站的專用倍率：粗加工 10、精加工 20、淬火／回火 200、電鍍 60、拋光 10。
+            // 測試模式預設關閉；各站的專用倍率：粗加工與精加工 20、淬火與回火 250、電鍍 60、拋光 10；AGV 交接 40、空車 2。
             Assert.False(defaults.TestMode);
-            Assert.Equal(new[] { 10d, 20d, 200d, 60d, 10d }, defaults.Steps.Select(step => step.TestSpeed));
+            Assert.Equal(new[] { 20d, 20d, 250d, 250d, 60d, 10d }, defaults.Steps.Select(step => step.TestSpeed));
+            Assert.Equal((600d, 40d, 2d), (defaults.ChangeoverSeconds, defaults.TestHandoverSpeed, defaults.TestEmptyVehicleSpeed));
             Assert.Equal((5d, 30d, 90d, 50, true),
                 (defaults.PieceHandlingSeconds, defaults.AgvHandoverSeconds, defaults.ToolChangeSeconds, defaults.ToolRequestThresholdPieces, defaults.ToolDeliveryEnabled));
         }
@@ -555,6 +568,9 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await Invalid(s => s.Steps[1].SecondsPerPiece = 0);
         await Invalid(s => s.Steps[1].TestSpeed = 0.5);
         await Invalid(s => s.Steps[1].TestSpeed = 1001);
+        await Invalid(s => s.ChangeoverSeconds = -1);
+        await Invalid(s => s.TestHandoverSpeed = 0);
+        await Invalid(s => s.TestEmptyVehicleSpeed = 6);
         await Invalid(s => s.Steps[1].ToolLifePieces = 0);
         await Invalid(s => s.PieceHandlingSeconds = -1);
         await Invalid(s => s.AgvHandoverSeconds = -1);

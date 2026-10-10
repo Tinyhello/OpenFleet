@@ -46,6 +46,8 @@ namespace OpenFleet.Unity.Editor
     ///
     /// 走道的車道位置必須與後端的路網相同（見 OuterLane／InnerLane）。
     /// 下排站點由左到右、上排由右到左，依製程順序沿走道排列。
+    /// 回火爐是後來加的（淬火與回火是兩座爐），外圈的十個位置都用完了，所以放在走道內側的島區中央，
+    /// 交接點接在內圈車道下邊；位置必須和後端 DemoRoadNetwork 的 TemperHandoffZ 一致。
     /// </summary>
     internal static class FactoryLayout
     {
@@ -70,7 +72,8 @@ namespace OpenFleet.Unity.Editor
             new StationSpec("raw-store", StationKind.RawMaterialStore, "原料倉", "Raw Material", new Vector2(-16f, -11f), false),
             new StationSpec("rough", StationKind.RoughMachining, "粗加工", "Rough Machining", new Vector2(-8f, -11f), false),
             new StationSpec("fine", StationKind.FineMachining, "精加工", "Fine Machining", new Vector2(0f, -11f), false),
-            new StationSpec("heat", StationKind.HeatTreatment, "淬火／回火", "Quench / Temper", new Vector2(8f, -11f), false),
+            new StationSpec("heat", StationKind.HeatTreatment, "淬火", "Quench", new Vector2(8f, -11f), false),
+            new StationSpec("temper", StationKind.HeatTreatment, "回火", "Temper", new Vector2(0f, 0.8f), true),
             new StationSpec("plating", StationKind.Plating, "電鍍", "Plating", new Vector2(16f, -11f), false),
             new StationSpec("polish", StationKind.Polishing, "拋光", "Polishing", new Vector2(16f, 11f), true),
             new StationSpec("qc", StationKind.QualityInspection, "品管", "Inspection", new Vector2(8f, 11f), true),

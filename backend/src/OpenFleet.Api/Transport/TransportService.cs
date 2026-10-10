@@ -61,9 +61,8 @@ public sealed class TransportService(
         var available = online.Where(v => !busy.Contains(v.VehicleId)).ToList();
 
         var stations = await db.Stations.AsNoTracking().ToDictionaryAsync(s => s.Code, cancellationToken);
-        var handoverSeconds = await db.ProductionSettings.AsNoTracking()
-            .Select(s => s.AgvHandoverSeconds)
-            .SingleAsync(cancellationToken);
+        // 測試模式下交接時間依設定的倍率縮短；派出的那一刻決定，之後改設定不影響已派出的搬運。
+        var handoverSeconds = (await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken)).EffectiveHandoverSeconds;
         var options = fleetOptions.Value;
         var dispatched = 0;
         var waitingForVehicle = new List<WaitingTask>();

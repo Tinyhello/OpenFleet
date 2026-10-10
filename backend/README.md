@@ -61,7 +61,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `POST /api/vehicles/{id}/ping` | P1 通訊驗證指令 |
 | `GET /api/stations` | 站點與交接點座標 |
 | `GET /api/stations/status` | 每站的備料區、成品區件數與容量、加工進度、刀具狀態；整爐工序的站另有開爐門檻、這一爐的階段與剩餘時間（顯示端輪詢用） |
-| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具；逐件工序的每件加工秒數與刀具壽命；整爐工序的開爐下限、一爐上限與各段時間。PUT 是整份取代，不合規則回 400 |
+| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具、機床換線時間；測試模式的開關與倍率（各站、AGV 交接、空車車速）；逐件工序的每件加工秒數與刀具壽命；整爐工序的開爐下限、一爐上限（電鍍依桿徑）與時間。PUT 是整份取代，不合規則回 400 |
 | `POST /api/lots` | 模擬收料：在原料倉建立一個批次。可帶 `{"quantity": n, "rodDiameterMm": 24 或 30}`；批次依桿徑的料框容量分成多框，每一框各建立一趟搬運。回應是每一框 |
 | `GET /api/lots`、`GET /api/lots/{id}` | 料框清單（同一批次的框有相同的 `batchNumber`）；單一框的完整追蹤 |
 | `GET /api/transport-tasks`、`GET /api/transport-tasks/{id}`、`.../{id}/events` | 搬運任務、派工狀態與狀態歷史。`needsAttention` 為 true 表示搬運失敗、等人工處理 |

@@ -16,6 +16,9 @@ public sealed class SimulatedFleet
     private const int RepliesToRemember = 1_000;
     private const double ArrivalTolerance = 1e-9;
 
+    /// <summary>設備端自己的上限：後端要求的空車倍率再大也不超過這個值。</summary>
+    private const double MaxEmptySpeedFactor = 5;
+
     /// <summary>離交接點多近算是到了（公尺）。</summary>
     private const double HandoffTolerance = 0.05;
 
@@ -110,6 +113,8 @@ public sealed class SimulatedFleet
             }
 
             vehicle.Revision = clearance.Revision;
+            // 寫成「在範圍內才採用」，NaN 與小於 1 的值都當成 1。
+            vehicle.EmptySpeedFactor = clearance.EmptySpeedFactor >= 1 ? Math.Min(clearance.EmptySpeedFactor, MaxEmptySpeedFactor) : 1;
             vehicle.Path = clearance.Path.Select(Copy).ToList();
             vehicle.Released = Math.Clamp(clearance.ReleasedCount, vehicle.Reached, vehicle.Path.Count);
         }
@@ -205,9 +210,15 @@ public sealed class SimulatedFleet
 
     /// <summary>
     /// 目前的車速：空車最快，載貨越多越慢，滿載時是 FullLoadSpeed。
+    /// 空車時再乘上後端在放行裡指定的倍率（測試模式）。
     /// </summary>
     private double SpeedFor(SimulatedVehicle vehicle)
     {
+        if (vehicle.LoadQuantity == 0)
+        {
+            return _settings.Speed * vehicle.EmptySpeedFactor;
+        }
+
         var loadRatio = Math.Clamp((double)vehicle.LoadQuantity / _settings.LoadCapacity, 0, 1);
         return _settings.Speed + (_settings.FullLoadSpeed - _settings.Speed) * loadRatio;
     }
@@ -376,6 +387,7 @@ public sealed class SimulatedFleet
         // 後端放行的路徑與進度。
         public Guid? PlanId { get; set; }
         public long Revision { get; set; }
+        public double EmptySpeedFactor { get; set; } = 1;
         public List<Position3> Path { get; set; } = [];
 
         /// <summary>可以開到 Path[Released - 1]。</summary>

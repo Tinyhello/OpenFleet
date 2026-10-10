@@ -34,6 +34,9 @@ namespace OpenFleet.Unity
         private SliderInt _agvHandoverSeconds;
         private SliderInt _toolChangeSeconds;
         private SliderInt _toolThreshold;
+        private SliderInt _changeoverMinutes;
+        private SliderInt _testHandoverSpeed;
+        private SliderInt _testEmptyVehicleSpeed;
         private Label _quantityHint;
         private Label _status;
         private Label _shortage;
@@ -144,6 +147,15 @@ namespace OpenFleet.Unity
             settings.Add(_toolChangeSeconds);
             _toolThreshold = NumberField("叫刀門檻（剩餘件）", 1, 200);
             settings.Add(_toolThreshold);
+            // 機床換線：粗加工、精加工接著做的那一框桿徑不同時，先換工控程式。
+            _changeoverMinutes = NumberField("機床換線（分）", 1, 60);
+            settings.Add(_changeoverMinutes);
+
+            // 測試模式下車輛的兩個倍率；各站自己的倍率在下面每一站各一欄。
+            _testHandoverSpeed = NumberField("測試：AGV 交接（×）", 1, 100);
+            settings.Add(_testHandoverSpeed);
+            _testEmptyVehicleSpeed = NumberField("測試：空車車速（×）", 1, 5);
+            settings.Add(_testEmptyVehicleSpeed);
 
             _stepRows = new VisualElement();
             settings.Add(_stepRows);
@@ -159,7 +171,7 @@ namespace OpenFleet.Unity
             _testMode = ActionButton("測試模式", () => StartCoroutine(ToggleTestMode()));
             testRow.Add(_testMode);
             _panel.Add(testRow);
-            _panel.Add(Hint("開啟後各站依自己的倍率加快，車輛不加快。"));
+            _panel.Add(Hint("開啟後各站依自己的倍率加快；AGV 交接與空車車速也依設定加快。"));
 
             // 重大事故：某個車型全部離線。平常隱藏，發生時用紅字顯示在最上面。
             _incident = new Label();
@@ -222,7 +234,7 @@ namespace OpenFleet.Unity
                 }
 
                 ShowSettings(FleetJson.Deserialize<ProductionSettingsDto>(request.downloadHandler.text));
-                SetStatus(_settings.TestMode ? "測試模式已開啟：各站依自己的倍率加快，車輛維持實際速度。" : "測試模式已關閉：各站恢復原本的時間。", Colors.Ok);
+                SetStatus(_settings.TestMode ? "測試模式已開啟：各站、AGV 交接與空車車速依各自的倍率加快。" : "測試模式已關閉：恢復原本的時間。", Colors.Ok);
             }
         }
 
@@ -274,6 +286,9 @@ namespace OpenFleet.Unity
             SetValue(_agvHandoverSeconds, settings.AgvHandoverSeconds);
             SetValue(_toolChangeSeconds, settings.ToolChangeSeconds);
             SetValue(_toolThreshold, settings.ToolRequestThresholdPieces);
+            SetValue(_changeoverMinutes, settings.ChangeoverSeconds / 60d);
+            SetValue(_testHandoverSpeed, settings.TestHandoverSpeed);
+            SetValue(_testEmptyVehicleSpeed, settings.TestEmptyVehicleSpeed);
 
             _stepRows.Clear();
             _stepAppliers.Clear();
@@ -310,34 +325,36 @@ namespace OpenFleet.Unity
             }
         }
 
-        /// <summary>整爐工序：開爐下限、一爐上限、各段的時間（分鐘）。</summary>
+        /// <summary>整爐工序：開爐下限、一爐上限（電鍍依桿徑各一個）、一爐的時間（分鐘）。</summary>
         private void AddBatchFields(ProcessStepDto step)
         {
+            // 上限依桿徑不同的工序（電鍍）：兩種桿徑可以混裝，各占「支數 ÷ 自己的上限」。
+            var perDiameter = step.BatchMaxPiecesRod24 > 0;
             var min = NumberField("開爐下限（支）", 1, 300);
             SetValue(min, step.BatchMinPieces);
             _stepRows.Add(min);
-            var max = NumberField("一爐上限（支）", 1, 300);
+            var max = NumberField(perDiameter ? "一爐上限 Φ30（支）" : "一爐上限（支）", 1, 300);
             SetValue(max, step.BatchMaxPieces);
             _stepRows.Add(max);
 
-            var first = NumberField($"{step.StageName ?? "處理"}（分）", 1, 720);
-            SetValue(first, step.BatchSeconds / 60d);
-            _stepRows.Add(first);
+            var minutes = NumberField($"{step.StageName ?? "處理"}（分）", 1, 720);
+            SetValue(minutes, step.BatchSeconds / 60d);
             _stepAppliers.Add(() =>
             {
                 step.BatchMinPieces = min.value;
                 step.BatchMaxPieces = max.value;
-                step.BatchSeconds = first.value * 60d;
+                step.BatchSeconds = minutes.value * 60d;
             });
 
-            // 只有一段的工序（電鍍）沒有第二段。
-            if (step.SecondStageName != null)
+            if (perDiameter)
             {
-                var second = NumberField($"{step.SecondStageName}（分）", 1, 720);
-                SetValue(second, step.BatchSecondStageSeconds / 60d);
-                _stepRows.Add(second);
-                _stepAppliers.Add(() => step.BatchSecondStageSeconds = second.value * 60d);
+                var thin = NumberField("一爐上限 Φ24（支）", 1, 300);
+                SetValue(thin, step.BatchMaxPiecesRod24);
+                _stepRows.Add(thin);
+                _stepAppliers.Add(() => step.BatchMaxPiecesRod24 = thin.value);
             }
+
+            _stepRows.Add(minutes);
         }
 
         /// <summary>
@@ -365,6 +382,9 @@ namespace OpenFleet.Unity
             _settings.AgvHandoverSeconds = _agvHandoverSeconds.value;
             _settings.ToolChangeSeconds = _toolChangeSeconds.value;
             _settings.ToolRequestThresholdPieces = _toolThreshold.value;
+            _settings.ChangeoverSeconds = _changeoverMinutes.value * 60d;
+            _settings.TestHandoverSpeed = _testHandoverSpeed.value;
+            _settings.TestEmptyVehicleSpeed = _testEmptyVehicleSpeed.value;
             foreach (var apply in _stepAppliers)
             {
                 apply();

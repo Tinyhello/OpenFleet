@@ -42,13 +42,22 @@ public sealed class ProcessStep
     public int BatchMinPieces { get; set; }
     public int BatchMaxPieces { get; set; }
 
-    /// <summary>整爐工序：第一段與第二段的時間（秒）。兩段在同一站連續進行；只有一段時第二段為 0。</summary>
-    public double BatchSeconds { get; set; }
-    public double BatchSecondStageSeconds { get; set; }
+    /// <summary>
+    /// 整爐工序：桿徑 24 mm 的一爐上限；0 表示不分桿徑、只算支數（淬火、回火）。
+    /// 有值時 <see cref="BatchMaxPieces"/> 是 30 mm 的上限，兩種桿徑可以混裝
+    /// （使用者 2026-10-10：電鍍一爐 30 mm 最多夾 40 支、24 mm 最多夾 56 支，可以混夾）。
+    /// </summary>
+    public int BatchMaxPiecesRod24 { get; set; }
 
-    /// <summary>兩段的名稱，顯示用（淬火／回火）。</summary>
+    /// <summary>整爐工序：一爐的時間（秒）。</summary>
+    public double BatchSeconds { get; set; }
+
+    /// <summary>整爐工序的名稱，顯示用（淬火、回火、電鍍）。</summary>
     public string? StageName { get; set; }
-    public string? SecondStageName { get; set; }
+
+    /// <summary>某個桿徑在這道整爐工序的一爐上限。混裝時每一框占「支數 ÷ 這個值」。</summary>
+    public int BatchCapacityFor(int rodDiameterMm) =>
+        rodDiameterMm == 24 && BatchMaxPiecesRod24 > 0 ? BatchMaxPiecesRod24 : BatchMaxPieces;
 
     /// <summary>
     /// 測試模式下這一站的專用倍率（使用者 2026-10-10：取消整體的時間加速，改成測試模式下每一站各自的倍率）。
@@ -69,7 +78,6 @@ public sealed class BatchRun
     public int StepSequence { get; private set; }
     public int Quantity { get; private set; }
     public double TotalSeconds { get; private set; }
-    public double SecondStageSeconds { get; private set; }
     public double RemainingSeconds { get; private set; }
     public DateTimeOffset StartedAt { get; private set; }
     public DateTimeOffset AccruedAt { get; private set; }
@@ -77,31 +85,17 @@ public sealed class BatchRun
 
     public bool IsRunning => CompletedAt is null;
 
-    /// <summary>已經進到第二段。</summary>
-    public bool InSecondStage => SecondStageSeconds > 0 && RemainingSeconds <= SecondStageSeconds;
+    /// <summary>這一爐的進度，0～1。</summary>
+    public double Progress => TotalSeconds <= 0 ? 1 : Math.Clamp((TotalSeconds - RemainingSeconds) / TotalSeconds, 0, 1);
 
-    /// <summary>目前這一段的進度，0～1。</summary>
-    public double StageProgress
-    {
-        get
-        {
-            var firstStage = TotalSeconds - SecondStageSeconds;
-            var (length, done) = InSecondStage
-                ? (SecondStageSeconds, SecondStageSeconds - RemainingSeconds)
-                : (firstStage, TotalSeconds - RemainingSeconds);
-            return length <= 0 ? 1 : Math.Clamp(done / length, 0, 1);
-        }
-    }
-
-    public static BatchRun Start(string stationCode, int stepSequence, int quantity, double seconds, double secondStageSeconds, DateTimeOffset now) => new()
+    public static BatchRun Start(string stationCode, int stepSequence, int quantity, double seconds, DateTimeOffset now) => new()
     {
         Id = Guid.NewGuid(),
         StationCode = stationCode,
         StepSequence = stepSequence,
         Quantity = quantity,
-        TotalSeconds = seconds + secondStageSeconds,
-        SecondStageSeconds = secondStageSeconds,
-        RemainingSeconds = seconds + secondStageSeconds,
+        TotalSeconds = seconds,
+        RemainingSeconds = seconds,
         StartedAt = now,
         AccruedAt = now,
     };
@@ -241,8 +235,23 @@ public sealed class ProductionSettings
     /// </summary>
     public DateTimeOffset? SpeedChangedAt { get; set; }
 
+    /// <summary>
+    /// 機床換線時間（秒）。使用者 2026-10-10：24 mm 與 30 mm 用的工控程式不同，只要切換就要等，大約 10 分鐘；
+    /// 也納入測試模式的加速（用該站的倍率）。
+    /// </summary>
+    public double ChangeoverSeconds { get; set; }
+
+    /// <summary>測試模式下 AGV 交接加快的倍率。使用者 2026-10-10：40 倍。</summary>
+    public double TestHandoverSpeed { get; set; } = 1;
+
+    /// <summary>測試模式下空車車速的倍率。使用者 2026-10-10：空車可以再快 2 倍。</summary>
+    public double TestEmptyVehicleSpeed { get; set; } = 1;
+
     /// <summary>某一站目前實際採用的倍率。</summary>
     public double SpeedOf(ProcessStep step) => TestMode ? step.TestSpeed : 1;
+
+    /// <summary>現在派出的搬運，交接一框要多久。</summary>
+    public double EffectiveHandoverSeconds => TestMode ? AgvHandoverSeconds / TestHandoverSpeed : AgvHandoverSeconds;
 }
 
 /// <summary>
@@ -431,6 +440,13 @@ public sealed class OperationExecution
     public Guid? BatchRunId { get; private set; }
 
     /// <summary>
+    /// 機床換線的起訖：這一框的桿徑和上一框不同時，先換線再做第一件。不需要換線時兩者都是 null。
+    /// 換線時間在開始時就決定（和換刀一樣），之後改設定或倍率不影響。
+    /// </summary>
+    public DateTimeOffset? ChangeoverStartedAt { get; private set; }
+    public DateTimeOffset? ChangeoverDueAt { get; private set; }
+
+    /// <summary>
     /// 目前這一件預計完成的時間。<paramref name="speed"/> 是這一站目前的倍率（測試模式）；
     /// 倍率在這一件開始之後才改變時，從 <paramref name="speedChangedAt"/> 重新計時。
     /// </summary>
@@ -440,7 +456,8 @@ public sealed class OperationExecution
         return from.AddSeconds((SecondsPerPiece!.Value + 2 * HandlingSeconds) / speed);
     }
 
-    public void Start(double secondsPerPiece, double handlingSeconds, DateTimeOffset now)
+    /// <summary><paramref name="changeoverSeconds"/> 大於 0 時先換線，第一件從換線完成的時間開始。</summary>
+    public void Start(double secondsPerPiece, double handlingSeconds, double changeoverSeconds, DateTimeOffset now)
     {
         Require(OperationStatus.Queued, nameof(Start));
         Status = OperationStatus.Running;
@@ -448,6 +465,12 @@ public sealed class OperationExecution
         HandlingSeconds = handlingSeconds;
         StartedAt = now;
         PieceStartedAt = now;
+        if (changeoverSeconds > 0)
+        {
+            ChangeoverStartedAt = now;
+            ChangeoverDueAt = now.AddSeconds(changeoverSeconds);
+            PieceStartedAt = ChangeoverDueAt;
+        }
     }
 
     /// <summary>整爐工序：這一框進了某一爐。進度由那一爐（<see cref="BatchRun"/>）決定。</summary>

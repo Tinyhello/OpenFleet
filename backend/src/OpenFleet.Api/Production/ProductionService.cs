@@ -14,8 +14,9 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 批次、製程設定與加工進度（Scoped：跟著一個 DbContext）。
 /// 一個批次依料框容量分成好幾框，每一框各自搬運、各自加工；系統裡的 <see cref="MaterialLot"/> 就是一框。
 /// 加工是後端內的簡化模擬，工序有兩種：
-/// 逐件（車床、拋光）：每站一台、一次一框、逐件計數、整框做完才放行；有刀具的站快到壽命時預先叫刀，到壽命時換刀或停機等刀。
-/// 整爐（淬火／回火、電鍍）：站內累積到下限才開爐，不同批次可以混在一起，時間到整爐一起放行。
+/// 逐件（車床、拋光）：每站一台、一次一框、逐件計數、整框做完才放行；有刀具的站快到壽命時預先叫刀，到壽命時換刀或停機等刀；
+/// 車床接著做的那一框桿徑不同時要先換線。
+/// 整爐（淬火、回火、電鍍）：站內累積到下限才開爐，不同批次可以混在一起，時間到整爐一起放行。
 /// 測試模式開啟時，每一站依自己的專用倍率加快（<see cref="ProductionSettings.SpeedOf"/>）；車輛不加快。
 /// </summary>
 public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, ILogger<ProductionService> logger)
@@ -31,6 +32,10 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
     public const int MaxBatchRunPieces = 1_000;
     public const double MaxBatchRunSeconds = 48 * 3600;
     public const double MaxTestSpeed = 1000;
+    public const double MaxChangeoverSeconds = 4 * 3600;
+
+    /// <summary>空車倍率的上限：再快交通控制的放行會跟不上。</summary>
+    public const double MaxTestEmptyVehicleSpeed = 5;
 
     /// <summary>目前支援的桿徑（mm）。</summary>
     public static readonly int[] RodDiameters = [24, 30];
@@ -61,6 +66,9 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
             ToolRequestThresholdPieces = settings.ToolRequestThresholdPieces,
             ToolDeliveryEnabled = settings.ToolDeliveryEnabled,
             TestMode = settings.TestMode,
+            ChangeoverSeconds = settings.ChangeoverSeconds,
+            TestHandoverSpeed = settings.TestHandoverSpeed,
+            TestEmptyVehicleSpeed = settings.TestEmptyVehicleSpeed,
             Steps = steps.Select(s => new ProcessStepDto
             {
                 Sequence = s.Sequence,
@@ -72,10 +80,9 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                 ToolLifePieces = s.ToolLifePieces,
                 BatchMinPieces = s.BatchMinPieces,
                 BatchMaxPieces = s.BatchMaxPieces,
+                BatchMaxPiecesRod24 = s.BatchMaxPiecesRod24,
                 BatchSeconds = s.BatchSeconds,
-                BatchSecondStageSeconds = s.BatchSecondStageSeconds,
                 StageName = s.StageName,
-                SecondStageName = s.SecondStageName,
                 TestSpeed = s.TestSpeed,
             }).ToList(),
         };
@@ -96,6 +103,9 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         ValidateRange(request.AgvHandoverSeconds, 0, MaxAgvHandoverSeconds, "agvHandoverSeconds");
         ValidateRange(request.ToolChangeSeconds, 0, MaxToolChangeSeconds, "toolChangeSeconds");
         ValidateRange(request.ToolRequestThresholdPieces, 0, MaxToolLifePieces, "toolRequestThresholdPieces");
+        ValidateRange(request.ChangeoverSeconds, 0, MaxChangeoverSeconds, "changeoverSeconds");
+        ValidateRange(request.TestHandoverSpeed, 1, MaxTestSpeed, "testHandoverSpeed");
+        ValidateRange(request.TestEmptyVehicleSpeed, 1, MaxTestEmptyVehicleSpeed, "testEmptyVehicleSpeed");
 
         settings.LotQuantity = request.LotQuantity;
         settings.PieceHandlingSeconds = request.PieceHandlingSeconds;
@@ -103,6 +113,9 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         settings.ToolChangeSeconds = request.ToolChangeSeconds;
         settings.ToolRequestThresholdPieces = request.ToolRequestThresholdPieces;
         settings.ToolDeliveryEnabled = request.ToolDeliveryEnabled;
+        settings.ChangeoverSeconds = request.ChangeoverSeconds;
+        settings.TestHandoverSpeed = request.TestHandoverSpeed;
+        settings.TestEmptyVehicleSpeed = request.TestEmptyVehicleSpeed;
 
         var speedsBefore = steps.Select(settings.SpeedOf).ToList();
         settings.TestMode = request.TestMode;
@@ -129,16 +142,25 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                         $"Step {requested.Sequence}: batchMinPieces must be at least 1 and batchMaxPieces between batchMinPieces and {MaxBatchRunPieces}.");
                 }
 
-                if (!(requested.BatchSeconds > 0 && requested.BatchSeconds <= MaxBatchRunSeconds)
-                    || !(requested.BatchSecondStageSeconds >= 0 && requested.BatchSecondStageSeconds <= MaxBatchRunSeconds))
+                // 分不分桿徑是製程定義（0＝不分），不能從這裡切換；有分的工序才採用這個值。
+                if (step.BatchMaxPiecesRod24 > 0 && requested.BatchMaxPiecesRod24 is < 1 or > MaxBatchRunPieces)
                 {
-                    throw new RequestValidationException("steps", $"Step {requested.Sequence}: stage times must be between 0 and {MaxBatchRunSeconds} seconds.");
+                    throw new RequestValidationException("steps", $"Step {requested.Sequence}: batchMaxPiecesRod24 must be between 1 and {MaxBatchRunPieces}.");
+                }
+
+                if (!(requested.BatchSeconds > 0 && requested.BatchSeconds <= MaxBatchRunSeconds))
+                {
+                    throw new RequestValidationException("steps", $"Step {requested.Sequence}: batchSeconds must be greater than 0 and at most {MaxBatchRunSeconds}.");
                 }
 
                 step.BatchMinPieces = requested.BatchMinPieces;
                 step.BatchMaxPieces = requested.BatchMaxPieces;
                 step.BatchSeconds = requested.BatchSeconds;
-                step.BatchSecondStageSeconds = requested.BatchSecondStageSeconds;
+                if (step.BatchMaxPiecesRod24 > 0)
+                {
+                    step.BatchMaxPiecesRod24 = requested.BatchMaxPiecesRod24;
+                }
+
                 continue;
             }
 
@@ -387,6 +409,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
     /// <summary>
     /// 整爐工序開爐：這一站沒有在跑，而且排隊中的支數達到下限。照到站順序裝進去，裝到上限為止；
     /// 一框不拆開，放不下的那一框留到下一爐。不同批次可以混在同一爐（使用者 2026-10-10），出爐後仍是各自的框。
+    /// 上限依桿徑不同的工序（電鍍）：每一框占「支數 ÷ 該桿徑的上限」，加起來不超過一爐。
     /// 湊不到下限就一直等，不設逾時（使用者 2026-10-10）。
     /// </summary>
     private async Task<bool> StartBatchRunsAsync(IReadOnlyList<ProcessStep> steps, DateTimeOffset now, CancellationToken cancellationToken)
@@ -414,13 +437,14 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
             }
 
             var load = new List<OperationExecution>();
-            var pieces = 0;
+            var used = 0d;
             foreach (var operation in waiting)
             {
-                if (pieces + operation.Quantity <= step.BatchMaxPieces)
+                var share = (double)operation.Quantity / step.BatchCapacityFor(operation.Lot.RodDiameterMm);
+                if (used + share <= 1 + 1e-9)
                 {
                     load.Add(operation);
-                    pieces += operation.Quantity;
+                    used += share;
                 }
             }
 
@@ -429,7 +453,8 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                 continue;
             }
 
-            var run = BatchRun.Start(step.StationCode, step.Sequence, pieces, step.BatchSeconds, step.BatchSecondStageSeconds, now);
+            var pieces = load.Sum(o => o.Quantity);
+            var run = BatchRun.Start(step.StationCode, step.Sequence, pieces, step.BatchSeconds, now);
             db.BatchRuns.Add(run);
             foreach (var operation in load)
             {
@@ -518,21 +543,28 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         foreach (var station in stationCodes.Where(code => !unavailable.Contains(code)))
         {
             // 這一站最近加工的是哪個批次：同批次的框優先接著做，做完的才會放在一起
-            // （使用者 2026-10-10 對拋光的要求，其他逐件工序也適用）。沒有同批次的就照到站順序。
-            var lastBatch = await db.Operations.AsNoTracking()
+            // （使用者 2026-10-10 對拋光的要求，其他逐件工序也適用）。沒有同批次的，先找同桿徑的（不用換線），再照到站順序。
+            var last = await db.Operations.AsNoTracking()
                 .Where(o => o.StationCode == station && o.StartedAt != null)
                 .OrderByDescending(o => o.StartedAt)
-                .Select(o => o.Lot.BatchNumber)
+                .Select(o => new { o.Lot.BatchNumber, o.Lot.RodDiameterMm })
                 .FirstOrDefaultAsync(cancellationToken);
             var waiting = queued.Where(o => o.StationCode == station).ToList();
-            var operation = waiting.FirstOrDefault(o => o.Lot.BatchNumber == lastBatch) ?? waiting[0];
+            var operation = waiting.FirstOrDefault(o => o.Lot.BatchNumber == last?.BatchNumber)
+                ?? waiting.FirstOrDefault(o => o.Lot.RodDiameterMm == last?.RodDiameterMm)
+                ?? waiting[0];
 
+            // 機床換線（使用者 2026-10-10）：24 mm 與 30 mm 的工控程式不同，桿徑和上一框不同就要先換。
+            // 「機床」以有刀具的工序判斷（粗加工、精加工）；拋光不換線。這一站的第一框不用換。
             var step = steps.Single(s => s.Sequence == operation.StepSequence);
-            operation.Start(step.SecondsPerPiece, settings.PieceHandlingSeconds, now);
+            var changeover = step.UsesTool && last is not null && last.RodDiameterMm != operation.Lot.RodDiameterMm
+                ? settings.ChangeoverSeconds / settings.SpeedOf(step)
+                : 0;
+            operation.Start(step.SecondsPerPiece, settings.PieceHandlingSeconds, changeover, now);
             operation.Lot.StartProcessing(now);
             started = true;
-            logger.LogInformation("Lot {LotNumber} started step {Step} at {Station}: {Quantity} piece(s), {Seconds}s each.",
-                operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, operation.Quantity, step.SecondsPerPiece);
+            logger.LogInformation("Lot {LotNumber} started step {Step} at {Station}: {Quantity} piece(s), {Seconds}s each, changeover {Changeover:0.#}s.",
+                operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, operation.Quantity, step.SecondsPerPiece, changeover);
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -550,7 +582,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         var tools = await db.StationTools.AsNoTracking().ToDictionaryAsync(t => t.StationCode, cancellationToken);
         var running = await db.Operations.AsNoTracking()
             .Where(o => o.Status == OperationStatus.Running && o.BatchRunId == null)
-            .Select(o => new { o.StationCode, o.Lot.LotNumber, o.PiecesCompleted, o.Quantity })
+            .Select(o => new { o.StationCode, o.Lot.LotNumber, o.PiecesCompleted, o.Quantity, o.ChangeoverStartedAt, o.ChangeoverDueAt })
             .ToDictionaryAsync(o => o.StationCode, cancellationToken);
         var runs = await db.BatchRuns.AsNoTracking()
             .Where(r => r.CompletedAt == null)
@@ -588,6 +620,8 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                     LotNumber = machining.LotNumber,
                     PiecesCompleted = machining.PiecesCompleted,
                     Quantity = machining.Quantity,
+                    ChangingOver = machining.ChangeoverDueAt > now,
+                    ChangeoverProgress = machining.ChangeoverDueAt > now ? Progress(machining.ChangeoverStartedAt, machining.ChangeoverDueAt, now) : 0,
                 },
                 ShortageCause = shortages.GetValueOrDefault(station.Code)?.Cause,
                 ShortageReason = shortages.GetValueOrDefault(station.Code)?.Reason,
@@ -596,15 +630,14 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
             if (step is { Kind: ProcessStepKind.Batch })
             {
                 var run = runs.GetValueOrDefault(station.Code);
-                var secondStage = run is { InSecondStage: true };
                 status.Batch = new BatchStatusDto
                 {
                     MinPieces = step.BatchMinPieces,
                     MaxPieces = step.BatchMaxPieces,
                     Running = run is not null,
                     Quantity = run?.Quantity ?? 0,
-                    StageName = run is null ? null : secondStage ? step.SecondStageName : step.StageName,
-                    StageProgress = run?.StageProgress ?? 0,
+                    StageName = run is null ? null : step.StageName,
+                    StageProgress = run?.Progress ?? 0,
                     RemainingSeconds = run?.RemainingSeconds ?? 0,
                 };
             }
@@ -616,7 +649,7 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
                     PiecesUsed = tool.PiecesSinceChange,
                     LifePieces = step.ToolLifePieces,
                     Changing = tool.IsChanging,
-                    ChangeProgress = ChangeProgress(tool, now),
+                    ChangeProgress = Progress(tool.ChangeStartedAt, tool.ChangeDueAt, now),
                     Spare = tool.SpareDeliveredAt is not null ? ToolSpareStatus.Delivered
                         : tool.SpareRequestedAt is not null ? ToolSpareStatus.Requested
                         : ToolSpareStatus.None,
@@ -635,9 +668,10 @@ public sealed class ProductionService(OpenFleetDbContext db, TimeProvider time, 
         logger.LogInformation("Station {Station}: tool changed after {Pieces} piece(s).", record.StationCode, record.PiecesUsed);
     }
 
-    private static double ChangeProgress(StationTool tool, DateTimeOffset now)
+    /// <summary>一段有起訖時間的作業（換刀、換線）做到哪裡，0～1；沒有在進行時為 0。</summary>
+    private static double Progress(DateTimeOffset? startedAt, DateTimeOffset? dueAt, DateTimeOffset now)
     {
-        if (tool.ChangeStartedAt is not { } started || tool.ChangeDueAt is not { } due)
+        if (startedAt is not { } started || dueAt is not { } due)
         {
             return 0;
         }

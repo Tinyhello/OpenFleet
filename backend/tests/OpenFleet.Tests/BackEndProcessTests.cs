@@ -7,8 +7,9 @@ using static OpenFleet.Tests.TestDatabase;
 namespace OpenFleet.Tests;
 
 /// <summary>
-/// P4：批次分框，以及後段的整爐工序（淬火／回火、電鍍）與拋光。
-/// 測試用的時間：淬火 100 秒＋回火 200 秒、電鍍 60 秒、逐件工序每件 2 秒；開爐門檻用示範值（150～300、100～150）。
+/// P4：批次分框、機床換線，以及後段的整爐工序（淬火、回火、電鍍）與拋光。
+/// 測試用的時間：淬火 100 秒、回火 200 秒、電鍍 60 秒、逐件工序每件 2 秒；
+/// 開爐門檻用示範值（淬火與回火 150～300 支；電鍍一爐 30 mm 40 支、24 mm 56 支，有料就開）。
 /// </summary>
 [Collection(PostgresCollection.Name)]
 public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifetime
@@ -20,9 +21,8 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         _database = await TestDatabase.CreateAsync(postgres);
         await using var db = _database.NewContext();
         await db.ProcessSteps.Where(s => s.Kind == ProcessStepKind.Piece).ExecuteUpdateAsync(s => s.SetProperty(x => x.SecondsPerPiece, 2d));
-        await db.ProcessSteps.Where(s => s.StationCode == "heat").ExecuteUpdateAsync(s => s
-            .SetProperty(x => x.BatchSeconds, 100d)
-            .SetProperty(x => x.BatchSecondStageSeconds, 200d));
+        await db.ProcessSteps.Where(s => s.StationCode == "heat").ExecuteUpdateAsync(s => s.SetProperty(x => x.BatchSeconds, 100d));
+        await db.ProcessSteps.Where(s => s.StationCode == "temper").ExecuteUpdateAsync(s => s.SetProperty(x => x.BatchSeconds, 200d));
         await db.ProcessSteps.Where(s => s.StationCode == "plating").ExecuteUpdateAsync(s => s.SetProperty(x => x.BatchSeconds, 60d));
         await db.ProductionSettings.ExecuteUpdateAsync(s => s
             .SetProperty(x => x.PieceHandlingSeconds, 0d)
@@ -77,7 +77,7 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
-    public async Task Furnace_waits_for_the_minimum_load_then_runs_two_stages_and_releases_every_bin()
+    public async Task Quench_waits_for_the_minimum_load_then_sends_every_bin_to_the_temper_furnace()
     {
         // 四框共 120 支到了淬火站：不到 150 支，不開爐，一直等。
         await ArriveAsync("heat", 3, "B-A", 30, 30, 30, 30);
@@ -97,34 +97,48 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         // 淬火 100 秒做到一半。
         await AdvanceAsync(50);
         heat = await StationAsync("heat");
-        Assert.Equal(("淬火", 0.5, 250d), (heat.Batch!.StageName, heat.Batch.StageProgress, heat.Batch.RemainingSeconds));
+        Assert.Equal(("淬火", 0.5, 50d), (heat.Batch!.StageName, heat.Batch.StageProgress, heat.Batch.RemainingSeconds));
 
-        // 測試模式、淬火站 10 倍：5 秒走掉 50 秒的工序時間，淬火做完，進到回火。之前已經過的時間不受倍率影響；
+        // 測試模式、淬火站 10 倍：2 秒走掉 20 秒的工序時間。之前已經過的時間不受倍率影響；
         // 別站的倍率（粗加工 1000 倍）和這一站無關。
-        await using (var configure = _database.NewScope())
+        await ConfigureAsync(settings =>
         {
-            var settings = await configure.Production.GetSettingsAsync(default);
             settings.TestMode = true;
             settings.Steps.Single(s => s.StationCode == "heat").TestSpeed = 10;
             settings.Steps.Single(s => s.StationCode == "rough").TestSpeed = 1000;
-            await configure.Production.UpdateSettingsAsync(settings, default);
-        }
-
-        await AdvanceAsync(5);
+        });
+        await AdvanceAsync(2);
         heat = await StationAsync("heat");
-        Assert.Equal(("回火", 0d), (heat.Batch!.StageName, heat.Batch.StageProgress));
-        await AdvanceAsync(10);
-        Assert.Equal(("回火", 0.5), ((await StationAsync("heat")).Batch!.StageName, (await StationAsync("heat")).Batch!.StageProgress));
+        Assert.Equal((0.7, 30d), (heat.Batch!.StageProgress, heat.Batch.RemainingSeconds));
 
-        // 回火做完：整爐一起放行，每一框各自等待搬運到電鍍。
-        await AdvanceAsync(10);
+        // 淬火做完：整爐一起放行。回火是另一座爐，每一框各自等待搬運過去。
+        await AdvanceAsync(3);
         heat = await StationAsync("heat");
         Assert.Equal((false, 150), (heat.Batch!.Running, heat.OutboundQuantity));
         await using var scope = _database.NewScope();
         var lots = await scope.Db.Lots.ToListAsync();
         Assert.All(lots, l => Assert.Equal((LotStatus.AwaitingTransport, "heat", 4), (l.Status, l.StationCode, l.CurrentStepSequence)));
-        Assert.Equal(5, await scope.Db.TransportTasks.CountAsync(t => t.FromStationCode == "heat" && t.ToStationCode == "plating"));
+        Assert.Equal(5, await scope.Db.TransportTasks.CountAsync(t => t.FromStationCode == "heat" && t.ToStationCode == "temper"));
         Assert.All(await scope.Db.Operations.ToListAsync(), o => Assert.Equal((OperationStatus.Completed, o.Quantity), (o.Status, o.PiecesCompleted)));
+    }
+
+    [Fact]
+    public async Task Temper_is_a_separate_furnace_with_its_own_load_and_run()
+    {
+        // 淬火出爐的框一框一框搬過來：不到 150 支不開爐。
+        await ArriveAsync("temper", 4, "B-A", 30, 30, 30, 30);
+        await AdvanceAsync(0);
+        Assert.False((await StationAsync("temper")).Batch!.Running);
+
+        await ArriveAsync("temper", 4, "B-A", 30);
+        await AdvanceAsync(0);
+        var temper = await StationAsync("temper");
+        Assert.Equal((true, 150, "回火"), (temper.Batch!.Running, temper.Batch.Quantity, temper.Batch.StageName));
+
+        // 回火 200 秒做完，每一框各自等待搬運到電鍍。
+        await AdvanceAsync(200);
+        await using var scope = _database.NewScope();
+        Assert.Equal(5, await scope.Db.TransportTasks.CountAsync(t => t.FromStationCode == "temper" && t.ToStationCode == "plating"));
     }
 
     [Fact]
@@ -144,25 +158,95 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
-    public async Task Plating_runs_a_single_stage()
+    public async Task Plating_load_is_limited_per_rod_diameter_and_the_two_diameters_can_be_mixed()
     {
-        await ArriveAsync("plating", 4, "B-A", 30, 30, 30, 10);
+        // 一爐 30 mm 最多 40 支、24 mm 最多 56 支。30 mm 的 30 支占 3/4 爐；
+        // 24 mm 的 45 支（占 45/56）放不下，留到下一爐；後到的 24 mm 14 支剛好占剩下的 1/4 爐，混在同一爐。
+        await ArriveRodAsync("plating", 5, "B-A", 30, 30);
+        await ArriveRodAsync("plating", 5, "B-B", 24, 45);
+        await ArriveRodAsync("plating", 5, "B-C", 24, 14);
         await AdvanceAsync(0);
         var plating = await StationAsync("plating");
-        Assert.Equal((true, 100, "電鍍"), (plating.Batch!.Running, plating.Batch.Quantity, plating.Batch.StageName));
+        Assert.Equal((true, 44, 45, "電鍍"), (plating.Batch!.Running, plating.Batch.Quantity, plating.InboundQuantity, plating.Batch.StageName));
 
+        // 電鍍 60 秒做完，兩框各自等待搬運到拋光；有料就開，所以留下的那一框接著開下一爐。
         await AdvanceAsync(60);
+        plating = await StationAsync("plating");
+        Assert.Equal((true, 45, 0, 44), (plating.Batch!.Running, plating.Batch.Quantity, plating.InboundQuantity, plating.OutboundQuantity));
         await using var scope = _database.NewScope();
-        Assert.Equal(4, await scope.Db.TransportTasks.CountAsync(t => t.FromStationCode == "plating" && t.ToStationCode == "polish"));
+        Assert.Equal(2, await scope.Db.TransportTasks.CountAsync(t => t.FromStationCode == "plating" && t.ToStationCode == "polish"));
+    }
+
+    [Fact]
+    public async Task Plating_takes_only_one_full_bin_of_the_same_diameter_because_bins_are_not_split()
+    {
+        // 30 mm 一框 30 支，一爐最多 40 支：第二框放不下（框不拆開），一爐只有一框。
+        await ArriveRodAsync("plating", 5, "B-A", 30, 30, 30);
+        await AdvanceAsync(0);
+        var plating = await StationAsync("plating");
+        Assert.Equal((true, 30, 30), (plating.Batch!.Running, plating.Batch.Quantity, plating.InboundQuantity));
+    }
+
+    [Fact]
+    public async Task Lathe_changes_over_when_the_rod_diameter_changes_and_first_takes_bins_that_need_no_changeover()
+    {
+        // 換線 60 秒。到站順序：30 mm、24 mm、30 mm，各 5 支（每件 2 秒）。
+        await ConfigureAsync(settings => settings.ChangeoverSeconds = 60);
+        await ArriveRodAsync("rough", 1, "B-A", 30, 5);
+        await ArriveRodAsync("rough", 1, "B-B", 24, 5);
+        await ArriveRodAsync("rough", 1, "B-C", 30, 5);
+        await AdvanceAsync(0);
+
+        // 這一站的第一框不用換線。
+        Assert.Equal("B-A", await RunningBatchAsync("rough"));
+        Assert.False((await StationAsync("rough")).Machining!.ChangingOver);
+
+        // 做完搬走後，先做同桿徑的 B-C（不用換線），不是先到的 B-B。
+        await AdvanceAsync(10);
+        Assert.Equal(1, await DispatchAsync());
+        await _database.CompleteDeliveryAsync("agv-a");
+        await AdvanceAsync(0);
+        Assert.Equal("B-C", await RunningBatchAsync("rough"));
+        Assert.False((await StationAsync("rough")).Machining!.ChangingOver);
+
+        // 輪到 24 mm 的 B-B：先換線。測試模式下換線也依這一站的倍率加快（10 倍：60 秒變 6 秒，每件 0.2 秒）。
+        await AdvanceAsync(10);
+        Assert.Equal(1, await DispatchAsync());
+        await _database.CompleteDeliveryAsync("agv-a");
+        await ConfigureAsync(settings =>
+        {
+            settings.TestMode = true;
+            settings.Steps[0].TestSpeed = 10;
+        });
+        await AdvanceAsync(0);
+        Assert.Equal("B-B", await RunningBatchAsync("rough"));
+        var rough = await StationAsync("rough");
+        Assert.Equal((true, 0d, 0), (rough.Machining!.ChangingOver, rough.Machining.ChangeoverProgress, rough.Machining.PiecesCompleted));
+
+        await AdvanceAsync(3);
+        rough = await StationAsync("rough");
+        Assert.Equal((true, 0.5, 0), (rough.Machining!.ChangingOver, rough.Machining.ChangeoverProgress, rough.Machining.PiecesCompleted));
+
+        // 換線完成後才開始做第一件：再 3.5 秒，換線用掉 3 秒，剩下 0.5 秒做完 2 件。
+        await AdvanceAsync(3.5);
+        rough = await StationAsync("rough");
+        Assert.Equal((false, 2), (rough.Machining!.ChangingOver, rough.Machining.PiecesCompleted));
+
+        // 拋光不是機床：桿徑不同也不換線。
+        await ArriveRodAsync("polish", 6, "B-D", 30, 5);
+        await AdvanceAsync(10);
+        await ArriveRodAsync("polish", 6, "B-E", 24, 5);
+        await AdvanceAsync(0);
+        Assert.False((await StationAsync("polish")).Machining?.ChangingOver ?? false);
     }
 
     [Fact]
     public async Task Polishing_keeps_bins_of_the_same_batch_together_and_has_no_tool()
     {
         // 到站順序：A 的第一框、B 的一框、A 的第二框。
-        await ArriveAsync("polish", 5, "B-A", 10);
-        await ArriveAsync("polish", 5, "B-B", 10);
-        await ArriveAsync("polish", 5, "B-A", 10);
+        await ArriveAsync("polish", 6, "B-A", 10);
+        await ArriveAsync("polish", 6, "B-B", 10);
+        await ArriveAsync("polish", 6, "B-A", 10);
         await AdvanceAsync(0);
         Assert.Equal("B-A", await RunningBatchAsync());
 
@@ -190,15 +274,18 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         Assert.Equal("B-B", await RunningBatchAsync());
     }
 
-    /// <summary>把幾框物料直接放到某站排隊（省略前面的工序）。</summary>
-    private async Task ArriveAsync(string station, int step, string batchNumber, params int[] bins)
+    /// <summary>把幾框桿徑 30 mm 的物料直接放到某站排隊（省略前面的工序）。</summary>
+    private Task ArriveAsync(string station, int step, string batchNumber, params int[] bins) =>
+        ArriveRodAsync(station, step, batchNumber, 30, bins);
+
+    private async Task ArriveRodAsync(string station, int step, string batchNumber, int rodDiameterMm, params int[] bins)
     {
         await using var scope = _database.NewScope();
         var now = _database.Time.GetUtcNow();
         var existing = await scope.Db.Lots.CountAsync(l => l.BatchNumber == batchNumber);
         for (var i = 0; i < bins.Length; i++)
         {
-            var lot = MaterialLot.Receive("upper-punch", bins[i], station, step, batchNumber, existing + i + 1, existing + bins.Length, 30, now);
+            var lot = MaterialLot.Receive("upper-punch", bins[i], station, step, batchNumber, existing + i + 1, existing + bins.Length, rodDiameterMm, now);
             lot.PlaceAt(station, now);
             scope.Db.Lots.Add(lot);
             scope.Production.OnLotArrived(lot, now.AddMilliseconds(i));
@@ -216,16 +303,28 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         await scope.Production.AdvanceOperationsAsync(default);
     }
 
+    private async Task ConfigureAsync(Action<ProductionSettingsDto> change)
+    {
+        await using var scope = _database.NewScope();
+        var settings = await scope.Production.GetSettingsAsync(default);
+        change(settings);
+        await scope.Production.UpdateSettingsAsync(settings, default);
+    }
+
     private async Task<int> DispatchAsync()
     {
         await using var scope = _database.NewScope();
         return await scope.Transport.DispatchPendingAsync([Online("agv-a")], default);
     }
 
-    private async Task<string> RunningBatchAsync()
+    /// <summary>正在加工的批次；指定站點時只看那一站（搬走的框會在下一站開始加工）。</summary>
+    private async Task<string> RunningBatchAsync(string? station = null)
     {
         await using var scope = _database.NewScope();
-        return await scope.Db.Operations.Where(o => o.Status == OperationStatus.Running).Select(o => o.Lot.BatchNumber).SingleAsync();
+        return await scope.Db.Operations
+            .Where(o => o.Status == OperationStatus.Running && (station == null || o.StationCode == station))
+            .Select(o => o.Lot.BatchNumber)
+            .SingleAsync();
     }
 
     private async Task<StationStatusDto> StationAsync(string code)

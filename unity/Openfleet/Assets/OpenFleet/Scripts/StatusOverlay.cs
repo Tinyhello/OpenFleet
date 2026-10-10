@@ -10,7 +10,7 @@ namespace OpenFleet.Unity
 {
     /// <summary>
     /// 畫在場景物件上方的進度條（UI Toolkit，螢幕座標，每個 frame 跟著攝影機重新定位）：
-    /// 機台的備料區、成品區、加工進度與可收合的刀具進度；整爐工序（淬火／回火、電鍍）的集料與這一爐的進度；車輛與站點交接的進度。
+    /// 機台的備料區、成品區、加工進度與可收合的刀具進度；整爐工序（淬火、回火、電鍍）的集料與這一爐的進度；車輛與站點交接的進度。
     /// 站點狀態以 HTTP 輪詢取得，車輛狀態來自 FleetView 已經收到的 MQTT 更新；這裡不保存也不推算任何業務狀態。
     /// 由 PresentationController 在執行時建立；場景物件（站點、車輛）與顏色都向它取得。
     /// </summary>
@@ -502,7 +502,15 @@ namespace OpenFleet.Unity
                 else if (status.Machining != null)
                 {
                     var m = status.Machining;
-                    _machining.Set("加工", Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
+                    if (m.ChangingOver)
+                    {
+                        // 機床換線：這一框的桿徑和上一框不同，先換工控程式，還沒開始做。
+                        _machining.Set("換線", (float)m.ChangeoverProgress, $"{Mathf.RoundToInt((float)m.ChangeoverProgress * 100f)}%", Colors.ToolChange);
+                    }
+                    else
+                    {
+                        _machining.Set("加工", Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
+                    }
                 }
                 else if (status.ShortageCause.HasValue)
                 {
@@ -543,7 +551,7 @@ namespace OpenFleet.Unity
 
             /// <summary>
             /// 整爐工序的站：第一列是站內累積的支數對開爐下限（滿了才開），第二列是做完等搬走的支數，
-            /// 第三列是這一爐目前的階段（淬火、回火、電鍍）與整爐剩下的時間。
+            /// 第三列是這一爐的工序名稱（淬火、回火、電鍍）、進度與剩下的時間。
             /// </summary>
             private void ShowBatch(StationStatusDto status)
             {

@@ -72,6 +72,9 @@ namespace OpenFleet.Contracts
 
         /// <summary>已放行的點數：可以開到 Path[ReleasedCount - 1]。</summary>
         public int ReleasedCount { get; set; }
+
+        /// <summary>空車時的車速倍率（測試模式用，平常是 1）。載貨時不適用。</summary>
+        public double EmptySpeedFactor { get; set; } = 1;
     }
 
     public enum VehicleEventType

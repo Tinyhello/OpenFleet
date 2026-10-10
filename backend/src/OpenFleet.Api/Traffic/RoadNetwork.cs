@@ -149,6 +149,9 @@ public static class DemoRoadNetwork
 {
     private const double OuterZ = 6, OuterX = 18, InnerZ = 4.2, InnerX = 16.2, HandoffZ = 7.6, ParkingZ = 0.2;
 
+    /// <summary>回火爐在走道內側的島區中央，交接點接在內圈車道下邊（距離和其他站一樣是 1.6 m）。</summary>
+    private const double TemperX = 0, TemperHandoffZ = -2.6;
+
     private static readonly double[] StationColumns = [-16, -8, 0, 8, 16];
     private static readonly double[] ParkingColumns = [-10.3, -8, -5.7];
 
@@ -219,6 +222,9 @@ public static class DemoRoadNetwork
                 Link(Add(x, side * HandoffZ), Code(x, side * OuterZ));
             }
         }
+
+        // 回火爐（外圈的十個位置都用完了，所以放在島區）：接在內圈車道下邊的支線。
+        Link(Add(TemperX, TemperHandoffZ), Code(TemperX, -InnerZ));
 
         // 充電車位：接在內圈車道上邊的支線。
         foreach (var x in ParkingColumns)

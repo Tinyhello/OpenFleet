@@ -60,7 +60,6 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(s => s.StationCode).HasMaxLength(32);
             e.HasOne<Station>().WithMany().HasForeignKey(s => s.StationCode).OnDelete(DeleteBehavior.Restrict);
             e.Property(s => s.StageName).HasMaxLength(32);
-            e.Property(s => s.SecondStageName).HasMaxLength(32);
             // 每種工序只檢查自己用到的欄位。
             e.ToTable(t =>
             {
@@ -77,8 +76,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(r => r.Id).ValueGeneratedNever();
             e.Property(r => r.StationCode).HasMaxLength(32);
             e.Ignore(r => r.IsRunning);
-            e.Ignore(r => r.InSecondStage);
-            e.Ignore(r => r.StageProgress);
+            e.Ignore(r => r.Progress);
             e.HasOne<Station>().WithMany().HasForeignKey(r => r.StationCode).OnDelete(DeleteBehavior.Restrict);
             // 一站同一時間只有一爐在進行。
             e.HasIndex(r => r.StationCode).IsUnique().HasFilter("\"CompletedAt\" IS NULL").HasDatabaseName("UX_BatchRuns_RunningStation");
@@ -109,6 +107,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(s => s.SourceStationCode).HasMaxLength(32);
             e.Property(s => s.BufferStationCode).HasMaxLength(32);
             e.Property(s => s.ToolStoreStationCode).HasMaxLength(32);
+            e.Ignore(s => s.EffectiveHandoverSeconds);
             e.ToTable(t => t.HasCheckConstraint("CK_ProductionSettings_Singleton", "\"Id\" = 1"));
         });
 

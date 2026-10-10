@@ -185,6 +185,27 @@ public class SimulatedFleetTests
     }
 
     [Fact]
+    public void Empty_vehicle_drives_faster_by_the_factor_in_the_clearance_but_a_loaded_one_does_not()
+    {
+        // 測試模式：後端在放行裡指定空車 2 倍。空車 1 m/s 變 2 m/s；超出設備上限或不合理的值不採用。
+        _fleet.HandleCommand("agv", Transport(loadQuantity: 15, handoverSeconds: 1));
+        var toPickup = Clearance(Guid.NewGuid(), 1, 3, ToPickup);
+        toPickup.EmptySpeedFactor = 2;
+        _fleet.ApplyClearance("agv", toPickup);
+        var empty = Advance(0.5);
+        Assert.Equal((2d, 1d), (empty.Speed, empty.Position.X));
+
+        // 取料後載著 15 件（半載）：車速照舊是 0.75 m/s，不乘倍率。
+        Advance(1);
+        Advance(1.5);
+        var toDropoff = Clearance(Guid.NewGuid(), 1, 5, ToDropoff);
+        toDropoff.EmptySpeedFactor = 2;
+        _fleet.ApplyClearance("agv", toDropoff);
+        var loaded = Advance(1);
+        Assert.Equal((15, 0.75), (loaded.LoadQuantity, loaded.Speed));
+    }
+
+    [Fact]
     public void Loaded_vehicle_is_slower_and_reports_its_load_and_handover_progress()
     {
         // 15 件（半載）：車速 0.75 m/s；交接時間由指令指定為 4 秒。

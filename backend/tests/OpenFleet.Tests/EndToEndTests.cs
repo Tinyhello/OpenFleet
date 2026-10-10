@@ -135,7 +135,6 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             step.SecondsPerPiece = 0.05;
             step.BatchMinPieces = 1;
             step.BatchSeconds = 0.05;
-            step.BatchSecondStageSeconds = step.BatchSecondStageSeconds > 0 ? 0.05 : 0;
         });
         (await _http.PutAsJsonAsync("/api/settings", settings, JsonDefaults.Options)).EnsureSuccessStatusCode();
 
@@ -152,12 +151,12 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             new[]
             {
                 "station:raw-store", "vehicle:agv-t1", "station:rough", "vehicle:agv-t1", "station:fine", "vehicle:agv-t1", "station:heat",
-                "vehicle:agv-t1", "station:plating", "vehicle:agv-t1", "station:polish", "vehicle:agv-t1", "station:qc",
+                "vehicle:agv-t1", "station:temper", "vehicle:agv-t1", "station:plating", "vehicle:agv-t1", "station:polish", "vehicle:agv-t1", "station:qc",
             },
             trace.Movements.Select(m => m.To));
-        Assert.Equal(new[] { "rough", "fine", "heat", "plating", "polish" }, trace.Operations.Select(o => o.StationCode));
+        Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish" }, trace.Operations.Select(o => o.StationCode));
         Assert.All(trace.Operations, o => Assert.Equal((Contracts.OperationStatus.Completed, 20, 20), (o.Status, o.PiecesCompleted, o.Quantity)));
-        Assert.Equal(6, trace.Tasks.Count);
+        Assert.Equal(7, trace.Tasks.Count);
         Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
 
         // 站點狀態：兩站的刀具各累計 20 件，暫存點有 20 件；車輛卸完料後是空車。

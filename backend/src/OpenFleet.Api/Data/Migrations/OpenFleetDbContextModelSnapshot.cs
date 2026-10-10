@@ -109,9 +109,6 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<double>("RemainingSeconds")
                         .HasColumnType("double precision");
 
-                    b.Property<double>("SecondStageSeconds")
-                        .HasColumnType("double precision");
-
                     b.Property<DateTimeOffset>("StartedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -333,6 +330,12 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<Guid?>("BatchRunId")
                         .HasColumnType("uuid");
 
+                    b.Property<DateTimeOffset?>("ChangeoverDueAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ChangeoverStartedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -425,21 +428,17 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<int>("BatchMaxPieces")
                         .HasColumnType("integer");
 
-                    b.Property<int>("BatchMinPieces")
+                    b.Property<int>("BatchMaxPiecesRod24")
                         .HasColumnType("integer");
 
-                    b.Property<double>("BatchSecondStageSeconds")
-                        .HasColumnType("double precision");
+                    b.Property<int>("BatchMinPieces")
+                        .HasColumnType("integer");
 
                     b.Property<double>("BatchSeconds")
                         .HasColumnType("double precision");
 
                     b.Property<string>("Kind")
                         .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<string>("SecondStageName")
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
@@ -493,6 +492,9 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<double>("ChangeoverSeconds")
+                        .HasColumnType("double precision");
+
                     b.Property<int>("LotQuantity")
                         .HasColumnType("integer");
 
@@ -511,6 +513,12 @@ namespace OpenFleet.Api.Data.Migrations
 
                     b.Property<DateTimeOffset?>("SpeedChangedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<double>("TestEmptyVehicleSpeed")
+                        .HasColumnType("double precision");
+
+                    b.Property<double>("TestHandoverSpeed")
+                        .HasColumnType("double precision");
 
                     b.Property<bool>("TestMode")
                         .HasColumnType("boolean");

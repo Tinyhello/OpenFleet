@@ -13,6 +13,7 @@ public static class DatabaseInitializer
 {
     /// <summary>
     /// 暫定佈局的交接點（與 Unity 的 FactoryLayout 相同：站點中心往走道方向 3.4 m）。
+    /// 回火爐是後來加的，外圈十個位置都用完了，所以放在走道內側的島區中央，交接點接在內圈車道上。
     /// 待加工料容量 30 件是已確認的數值；倉庫與暫存點（淬火站入口）的容量規則還沒定，所以留空。
     /// </summary>
     private static readonly Station[] DemoStations =
@@ -20,7 +21,8 @@ public static class DatabaseInitializer
         new() { Code = "raw-store", Name = "原料倉", HandoffX = -16, HandoffZ = -7.6 },
         new() { Code = "rough", Name = "粗加工", HandoffX = -8, HandoffZ = -7.6, InboundCapacity = 30, OutboundCapacity = 30 },
         new() { Code = "fine", Name = "精加工", HandoffX = 0, HandoffZ = -7.6, InboundCapacity = 30, OutboundCapacity = 30 },
-        new() { Code = "heat", Name = "淬火／回火", HandoffX = 8, HandoffZ = -7.6 },
+        new() { Code = "heat", Name = "淬火", HandoffX = 8, HandoffZ = -7.6 },
+        new() { Code = "temper", Name = "回火", HandoffX = 0, HandoffZ = -2.6 },
         new() { Code = "plating", Name = "電鍍", HandoffX = 16, HandoffZ = -7.6 },
         new() { Code = "polish", Name = "拋光", HandoffX = 16, HandoffZ = 7.6 },
         new() { Code = "qc", Name = "品管", HandoffX = 8, HandoffZ = 7.6 },
@@ -31,26 +33,32 @@ public static class DatabaseInitializer
 
     /// <summary>
     /// 示範製程。逐件工序的每件加工時間（粗加工 30 秒、精加工 60 秒）與刀具壽命（500／250 件）、
-    /// 淬火 4 小時＋回火 8 小時、滿 150 支開爐最多 300 支、電鍍滿 100 支開槽最多 150 支，都是使用者提供的數值；
-    /// 電鍍一槽 1 小時、拋光每支 20 秒是 Claude 提議、使用者同意先用的示範值。
-    /// 測試模式的專用倍率（TestSpeed）是 Claude 挑的示範值，目標是每一站做一框或一爐約 1～4 分鐘：
-    /// 粗加工 10、精加工 20、淬火／回火 200（12 小時 → 3.6 分鐘）、電鍍 60（1 小時 → 1 分鐘）、拋光 10。面板可以改。
+    /// 淬火 4 小時、回火 8 小時（兩座爐，中間要搬運）、滿 150 支開爐最多 300 支、
+    /// 電鍍一爐 30 mm 最多 40 支／24 mm 最多 56 支可以混夾，都是使用者提供的數值；
+    /// 電鍍一爐 1 小時、拋光每支 20 秒是 Claude 提議、使用者同意先用的示範值。
+    /// 回火的開爐條件沿用淬火的 150～300 支、電鍍有料就開（下限 1 支），是 Claude 的推定，待使用者確認。
+    /// 測試模式的專用倍率（TestSpeed）：粗加工與精加工 20、淬火與回火 250 是使用者指定的；電鍍 60、拋光 10 是 Claude 挑的。面板可以改。
     /// </summary>
     private static readonly ProcessStep[] DemoSteps =
     [
-        new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = 10 },
+        new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = 20 },
         new() { Sequence = 2, StationCode = "fine", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, UsesTool = true, ToolLifePieces = 250, TestSpeed = 20 },
         new()
         {
             Sequence = 3, StationCode = "heat", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300,
-            BatchSeconds = 4 * 3600, BatchSecondStageSeconds = 8 * 3600, StageName = "淬火", SecondStageName = "回火", TestSpeed = 200,
+            BatchSeconds = 4 * 3600, StageName = "淬火", TestSpeed = 250,
         },
         new()
         {
-            Sequence = 4, StationCode = "plating", Kind = ProcessStepKind.Batch, BatchMinPieces = 100, BatchMaxPieces = 150,
+            Sequence = 4, StationCode = "temper", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300,
+            BatchSeconds = 8 * 3600, StageName = "回火", TestSpeed = 250,
+        },
+        new()
+        {
+            Sequence = 5, StationCode = "plating", Kind = ProcessStepKind.Batch, BatchMinPieces = 1, BatchMaxPieces = 40, BatchMaxPiecesRod24 = 56,
             BatchSeconds = 3600, StageName = "電鍍", TestSpeed = 60,
         },
-        new() { Sequence = 5, StationCode = "polish", Kind = ProcessStepKind.Piece, SecondsPerPiece = 20, TestSpeed = 10 },
+        new() { Sequence = 6, StationCode = "polish", Kind = ProcessStepKind.Piece, SecondsPerPiece = 20, TestSpeed = 10 },
     ];
 
     /// <summary>最後一道工序（拋光）完成後送到品管站入口暫存；品管之後的流程還沒做。</summary>
@@ -95,14 +103,16 @@ public static class DatabaseInitializer
             }
         }
 
-        if (!await db.RouteNodes.AnyAsync())
-        {
-            var (nodes, edges) = DemoRoadNetwork.Build();
-            db.RouteNodes.AddRange(nodes.Select(n => new RouteNode { Code = n.Code, X = n.X, Z = n.Z }));
-            db.RouteEdges.AddRange(edges.Select(e => new RouteEdge { FromCode = e.From, ToCode = e.To }));
-        }
+        // 路網只補上缺少的節點與路段（舊資料庫沒有回火爐的支線）。
+        var (nodes, edges) = DemoRoadNetwork.Build();
+        var knownNodes = (await db.RouteNodes.Select(n => n.Code).ToListAsync()).ToHashSet(StringComparer.Ordinal);
+        var knownEdges = (await db.RouteEdges.Select(e => new { e.FromCode, e.ToCode }).ToListAsync())
+            .Select(e => RoadNetwork.EdgeKey(e.FromCode, e.ToCode)).ToHashSet();
+        db.RouteNodes.AddRange(nodes.Where(n => !knownNodes.Contains(n.Code)).Select(n => new RouteNode { Code = n.Code, X = n.X, Z = n.Z }));
+        db.RouteEdges.AddRange(edges.Where(e => !knownEdges.Contains(RoadNetwork.EdgeKey(e.From, e.To)))
+            .Select(e => new RouteEdge { FromCode = e.From, ToCode = e.To }));
 
-        // 補上缺少的工序（舊資料庫只有粗加工、精加工）；已經有的不動，面板改過的數值會保留。
+        // 補上缺少的工序（舊資料庫沒有後段工序或回火）；已經有的不動，面板改過的數值會保留。
         var steps = await db.ProcessSteps.Select(s => s.Sequence).ToListAsync();
         db.ProcessSteps.AddRange(DemoSteps.Where(demo => !steps.Contains(demo.Sequence)).Select(demo => new ProcessStep
         {
@@ -114,10 +124,9 @@ public static class DatabaseInitializer
             ToolLifePieces = demo.ToolLifePieces,
             BatchMinPieces = demo.BatchMinPieces,
             BatchMaxPieces = demo.BatchMaxPieces,
+            BatchMaxPiecesRod24 = demo.BatchMaxPiecesRod24,
             BatchSeconds = demo.BatchSeconds,
-            BatchSecondStageSeconds = demo.BatchSecondStageSeconds,
             StageName = demo.StageName,
-            SecondStageName = demo.SecondStageName,
             TestSpeed = demo.TestSpeed,
         }));
 
@@ -141,6 +150,10 @@ public static class DatabaseInitializer
                 ToolChangeSeconds = 90,
                 ToolRequestThresholdPieces = 50,
                 ToolDeliveryEnabled = true,
+                // 使用者 2026-10-10：機床換線約 10 分鐘；測試模式下 AGV 交接 40 倍、空車車速 2 倍。
+                ChangeoverSeconds = 600,
+                TestHandoverSpeed = 40,
+                TestEmptyVehicleSpeed = 2,
             });
         }
 
