@@ -65,19 +65,53 @@ public static class ProductionEndpoints
             return Results.Ok(trace);
         });
 
+        // 缺車統計：各工序機台因缺車停下來的時間、任務等車的累計；車輛全部離線的重大事故另外列出。
+        api.MapGet("/shortage", (Transport.VehicleShortageService shortage, Fleet.FleetStateStore fleet, CancellationToken ct) =>
+            shortage.GetSummaryAsync(fleet.Snapshot(), ct));
+
+        api.MapGet("/shortage/waits", async (OpenFleetDbContext db, CancellationToken ct) =>
+            await (from wait in db.VehicleWaits.AsNoTracking()
+                   join task in db.TransportTasks.AsNoTracking() on wait.TaskId equals task.Id
+                   orderby wait.Id descending
+                   select new VehicleWaitDto
+                   {
+                       TaskId = task.Id,
+                       Reason = wait.Reason,
+                       LotNumber = task.Lot!.LotNumber,
+                       Kind = task.Kind,
+                       FromStationCode = task.FromStationCode,
+                       ToStationCode = task.ToStationCode,
+                       StartedAt = wait.StartedAt,
+                       EndedAt = wait.EndedAt,
+                       SimulatedSeconds = wait.SimulatedSeconds,
+                   }).Take(100).ToListAsync(ct));
+
+        api.MapGet("/shortage/delays", async (OpenFleetDbContext db, CancellationToken ct) =>
+            await db.MachineDelays.AsNoTracking().OrderByDescending(d => d.Id).Take(100).Select(d => new MachineDelayDto
+            {
+                StationCode = d.StationCode,
+                StepSequence = d.StepSequence,
+                Cause = d.Cause,
+                Reason = d.Reason,
+                TaskId = d.TaskId,
+                StartedAt = d.StartedAt,
+                EndedAt = d.EndedAt,
+                SimulatedSeconds = d.SimulatedSeconds,
+            }).ToListAsync(ct));
+
         api.MapPost("/lots", async (CreateLotRequest? request, ProductionService production, CancellationToken ct) =>
         {
             var lot = await production.CreateLotAsync(request?.Quantity, ct);
             return Results.Created($"/api/lots/{lot.Id}", ToDto(lot));
         });
 
-        // 示範用：清掉所有批次與搬運資料並把刀具計數歸零（設定、站點、車輛保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
+        // 示範用：清掉所有批次與搬運資料（含刀具配送）並把刀具計數歸零（設定、站點、車輛保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
         api.MapPost("/demo/reset", async (OpenFleetDbContext db, ILoggerFactory loggers, CancellationToken ct) =>
         {
-            await db.Database.ExecuteSqlRawAsync("""TRUNCATE "Lots", "OutboxMessages", "InboxMessages" CASCADE""", ct);
+            await db.Database.ExecuteSqlRawAsync("""TRUNCATE "Lots", "TransportTasks", "OutboxMessages", "InboxMessages" CASCADE""", ct);
             // 刀具計數與換刀紀錄也歸零，機台回到剛換好刀的狀態。
             await db.Database.ExecuteSqlRawAsync(
-                """TRUNCATE "ToolChanges"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL""", ct);
+                """TRUNCATE "ToolChanges"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
             loggers.CreateLogger(nameof(ProductionEndpoints)).LogWarning("Demo data reset: lots, tasks, movements, outbox and inbox cleared.");
             return Results.NoContent();
         });

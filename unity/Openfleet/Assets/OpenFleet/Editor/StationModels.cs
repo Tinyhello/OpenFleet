@@ -10,8 +10,6 @@ namespace OpenFleet.Unity.Editor
     internal static class StationModels
     {
         /// <summary>備料區、成品區「有料時才顯示」的物件名稱；場景產生器依名稱找到它們交給 StationAnchor。</summary>
-        public const string InboundContentsName = "Inbound Contents";
-        public const string OutboundContentsName = "Outbound Contents";
 
         public static void Build(StationKind kind, Transform root)
         {
@@ -112,7 +110,7 @@ namespace OpenFleet.Unity.Editor
             // 台上的料箱只在有料時顯示（StationAnchor 切換），沒有逐件的動畫。
             var inbound = Group(root, "Inbound Table", new Vector3(2.1f, 0f, 1.3f));
             Table(inbound, new Vector3(1.0f, 0.7f, 0.8f), Palette.Steel);
-            var inboundContents = Group(inbound, InboundContentsName, Vector3.zero);
+            var inboundContents = Group(inbound, StationAnchor.InboundContentsName, Vector3.zero);
             Box(inboundContents, "Bin", new Vector3(0f, 0.86f, 0f), new Vector3(0.6f, 0.26f, 0.42f), Palette.Bin);
             Cylinder(inboundContents, "Blank", new Vector3(-0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.MachineDark, new Vector3(90f, 0f, 0f));
             Cylinder(inboundContents, "Blank", new Vector3(0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.MachineDark, new Vector3(90f, 0f, 0f));
@@ -120,7 +118,7 @@ namespace OpenFleet.Unity.Editor
 
             var outbound = Group(root, "Outbound Table", new Vector3(-2.1f, 0f, 1.3f));
             Table(outbound, new Vector3(1.0f, 0.7f, 0.8f), Palette.Steel);
-            var outboundContents = Group(outbound, OutboundContentsName, Vector3.zero);
+            var outboundContents = Group(outbound, StationAnchor.OutboundContentsName, Vector3.zero);
             Box(outboundContents, "Bin", new Vector3(0f, 0.86f, 0f), new Vector3(0.6f, 0.26f, 0.42f), Palette.Bin);
             Cylinder(outboundContents, "Part", new Vector3(-0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.Steel, new Vector3(90f, 0f, 0f));
             Cylinder(outboundContents, "Part", new Vector3(0.12f, 1.02f, 0f), 0.1f, 0.34f, Palette.Steel, new Vector3(90f, 0f, 0f));

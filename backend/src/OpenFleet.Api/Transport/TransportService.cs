@@ -21,6 +21,7 @@ public sealed record MovementGoal(string VehicleId, AssignmentStatus Status, str
 public sealed class TransportService(
     OpenFleetDbContext db,
     ProductionService production,
+    VehicleShortageService shortage,
     RoadNetwork network,
     IOptions<FleetOptions> fleetOptions,
     IOptions<MqttSettings> mqtt,
@@ -41,50 +42,55 @@ public sealed class TransportService(
             .ToList();
         if (pending.Count == 0)
         {
+            await shortage.RecordAsync([], cancellationToken);
             return 0;
         }
 
-        // 先過濾「能不能做」：P2 的物料搬運只用大型車，而且要連線中、開放派工、目前沒有有效派工。
+        // 先過濾「能不能做」：物料搬運用大型車、刀具配送用小型車，而且要開放派工、連線中、目前沒有有效派工。
         var busy = await db.Assignments
             .Where(a => Assignment.ActiveStatuses.Contains(a.Status))
             .Select(a => a.VehicleId)
             .ToListAsync(cancellationToken);
-        var eligible = await db.Vehicles
-            .Where(v => v.DispatchEnabled && v.Type == VehicleType.Large)
-            .Select(v => v.Id)
-            .ToListAsync(cancellationToken);
-        var available = onlineVehicles
-            .Where(v => v.Connectivity == VehicleConnectivity.Online && eligible.Contains(v.VehicleId) && !busy.Contains(v.VehicleId))
+        var types = await db.Vehicles
+            .Where(v => v.DispatchEnabled)
+            .ToDictionaryAsync(v => v.Id, v => v.Type, cancellationToken);
+        var online = onlineVehicles
+            .Where(v => v.Connectivity == VehicleConnectivity.Online && types.ContainsKey(v.VehicleId))
             .ToList();
-        if (available.Count == 0)
-        {
-            return 0;
-        }
+        var available = online.Where(v => !busy.Contains(v.VehicleId)).ToList();
 
         var stations = await db.Stations.AsNoTracking().ToDictionaryAsync(s => s.Code, cancellationToken);
-        var handoverSecondsPerPiece = await db.ProductionSettings.AsNoTracking()
-            .Select(s => s.HandoverSecondsPerPiece)
+        var handoverSeconds = await db.ProductionSettings.AsNoTracking()
+            .Select(s => s.AgvHandoverSeconds)
             .SingleAsync(cancellationToken);
         var options = fleetOptions.Value;
         var dispatched = 0;
+        var waitingForVehicle = new List<WaitingTask>();
 
         foreach (var task in pending)
         {
-            if (available.Count == 0)
+            if (task.Kind != TransportTaskKind.ToolDelivery
+                && !await HasRoomAsync(stations[task.ToStationCode], task.Quantity, cancellationToken))
             {
-                break;
+                // 目的站放不下：任務繼續等待，不占用車輛，也不影響排在後面、目的地不同的任務。這不算缺車。
+                continue;
             }
 
-            if (!await HasRoomAsync(stations[task.ToStationCode], task.Quantity, cancellationToken))
+            var requiredType = VehicleTypeFor(task.Kind);
+            var candidates = available.Where(v => types[v.VehicleId] == requiredType).ToList();
+            if (candidates.Count == 0)
             {
-                // 目的站放不下：任務繼續等待，不占用車輛，也不影響排在後面、目的地不同的任務。
+                // 可以搬、但叫不到車，等待從這裡起算，到派出車為止。
+                // 有車在線但都在忙是缺車；這個車型一台都不在線是重大事故，兩者分開記錄。
+                var anyOnline = online.Any(v => types[v.VehicleId] == requiredType);
+                waitingForVehicle.Add(new WaitingTask(task, anyOnline ? ShortageReason.VehiclesBusy : ShortageReason.FleetOffline));
                 continue;
             }
 
             // 再比較「誰比較合適」：沿路網開到取料點最近的車，距離相同時用 ID 決定，結果可重現。
             var pickup = stations[task.FromStationCode];
             var pickupNode = network.Nearest(pickup.HandoffX, pickup.HandoffZ).Code;
-            var vehicle = available
+            var vehicle = candidates
                 .OrderBy(v => network.PathLength(network.Nearest(v.Position.X, v.Position.Z).Code, pickupNode))
                 .ThenBy(v => v.VehicleId, StringComparer.Ordinal)
                 .First();
@@ -93,7 +99,7 @@ public sealed class TransportService(
             var attempt = await db.Assignments.CountAsync(a => a.TaskId == task.Id, cancellationToken) + 1;
             var assignment = task.Assign(vehicle.VehicleId, attempt, now, options.CommandTimeToLive);
             db.Assignments.Add(assignment);
-            db.OutboxMessages.Add(CreateCommandMessage(assignment, task, pickup, stations[task.ToStationCode], handoverSecondsPerPiece, now));
+            db.OutboxMessages.Add(CreateCommandMessage(assignment, task, pickup, stations[task.ToStationCode], handoverSeconds, now));
 
             try
             {
@@ -110,10 +116,11 @@ public sealed class TransportService(
 
             available.Remove(vehicle);
             dispatched++;
-            logger.LogInformation("Task {TaskId} ({From} -> {To}, lot {LotNumber}) assigned to {VehicleId}, attempt {Attempt}.",
-                task.Id, task.FromStationCode, task.ToStationCode, task.Lot.LotNumber, vehicle.VehicleId, attempt);
+            logger.LogInformation("Task {TaskId} ({Kind}, {From} -> {To}, lot {LotNumber}) assigned to {VehicleId}, attempt {Attempt}.",
+                task.Id, task.Kind, task.FromStationCode, task.ToStationCode, task.Lot?.LotNumber ?? "-", vehicle.VehicleId, attempt);
         }
 
+        await shortage.RecordAsync(waitingForVehicle, cancellationToken);
         return dispatched;
     }
 
@@ -175,6 +182,7 @@ public sealed class TransportService(
         }
 
         var task = assignment.Task;
+        // 送刀具的任務沒有批次。
         var lot = task.Lot;
         var now = time.GetUtcNow();
 
@@ -204,23 +212,36 @@ public sealed class TransportService(
                     Accept();
                 }
 
-                var source = lot.Location;
                 assignment.MarkLoaded(now);
-                lot.LoadOnto(vehicleId, now);
-                db.InventoryMovements.Add(InventoryMovement.Record(lot, source, "Loaded", now));
+                if (lot is not null)
+                {
+                    var source = lot.Location;
+                    lot.LoadOnto(vehicleId, now);
+                    db.InventoryMovements.Add(InventoryMovement.Record(lot, source, "Loaded", now));
+                }
+
                 break;
 
             case VehicleEventType.Completed when assignment.Status == AssignmentStatus.Loaded:
-                var vehicleLocation = lot.Location;
                 assignment.Close(AssignmentStatus.Completed, null, now);
                 task.Complete(assignment, now);
-                lot.UnloadAt(task.ToStationCode, now);
-                db.InventoryMovements.Add(InventoryMovement.Record(lot, vehicleLocation, "Unloaded", now));
-                production.OnLotArrived(lot, now);
+                if (lot is not null)
+                {
+                    var vehicleLocation = lot.Location;
+                    lot.UnloadAt(task.ToStationCode, now);
+                    db.InventoryMovements.Add(InventoryMovement.Record(lot, vehicleLocation, "Unloaded", now));
+                    production.OnLotArrived(lot, now);
+                }
+                else
+                {
+                    // 刀具配送完成：新刀在機邊備用。換刀是機台端的另一件事，另外記錄。
+                    await production.OnToolDeliveredAsync(task.ToStationCode, now, cancellationToken);
+                }
+
                 break;
 
             case VehicleEventType.Failed when assignment.IsActive:
-                // 物料停在失敗當下的位置（原站或車上），不自動重派；恢復流程留到之後的階段。
+                // 物料（或刀具）停在失敗當下的位置（原站或車上），不自動重派；恢復流程留到之後的階段。
                 assignment.Close(AssignmentStatus.Failed, vehicleEvent.Reason, now);
                 task.Fail(assignment, vehicleEvent.Reason, now);
                 break;
@@ -232,8 +253,8 @@ public sealed class TransportService(
         }
 
         await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Assignment {AssignmentId} on {VehicleId}: {EventType} -> task {TaskStatus}, lot {LotNumber} {LotStatus} at {Location}.",
-            assignment.Id, vehicleId, vehicleEvent.EventType, task.Status, lot.LotNumber, lot.Status, lot.Location);
+        logger.LogInformation("Assignment {AssignmentId} on {VehicleId}: {EventType} -> {Kind} task {TaskStatus}, lot {LotNumber} {LotStatus} at {Location}.",
+            assignment.Id, vehicleId, vehicleEvent.EventType, task.Kind, task.Status, lot?.LotNumber ?? "-", lot?.Status, lot?.Location ?? task.ToStationCode);
 
         void Accept()
         {
@@ -261,6 +282,7 @@ public sealed class TransportService(
             .SumAsync(o => o.Quantity - o.PiecesCompleted, cancellationToken);
         var inbound = await db.TransportTasks
             .Where(t => t.ToStationCode == destination.Code
+                && t.Kind != TransportTaskKind.ToolDelivery
                 && (t.Status == TransportTaskStatus.Assigned || t.Status == TransportTaskStatus.Executing))
             .SumAsync(t => t.Quantity, cancellationToken);
 
@@ -268,7 +290,7 @@ public sealed class TransportService(
     }
 
     private OutboxMessage CreateCommandMessage(
-        Assignment assignment, TransportTask task, Station pickup, Station destination, double handoverSecondsPerPiece, DateTimeOffset now)
+        Assignment assignment, TransportTask task, Station pickup, Station destination, double handoverSeconds, DateTimeOffset now)
     {
         var command = new VehicleCommand
         {
@@ -278,10 +300,10 @@ public sealed class TransportService(
             ExpiresAt = assignment.ExpiresAt,
             Pickup = new Position3 { X = pickup.HandoffX, Z = pickup.HandoffZ },
             Destination = new Position3 { X = destination.HandoffX, Z = destination.HandoffZ },
-            // 件數與內容讓設備決定載貨時的車速；交接時間依件數計算，取料與卸料各一次。
+            // 件數與內容讓設備決定載貨時的車速。交接是一框一框整個交給站點，時間固定、和件數無關，取料與卸料各一次。
             LoadQuantity = task.Quantity,
-            LoadCode = task.Lot.PartCode,
-            HandoverSeconds = task.Quantity * handoverSecondsPerPiece,
+            LoadCode = task.Lot?.PartCode ?? LoadCodes.Tool,
+            HandoverSeconds = handoverSeconds,
         };
         var envelope = MessageEnvelope.Create(mqtt.Value.ProducerId, command, now);
 
@@ -297,7 +319,11 @@ public sealed class TransportService(
     private static int Priority(TransportTaskKind kind) => kind switch
     {
         TransportTaskKind.WipTransfer => 0,
-        TransportTaskKind.Replenishment => 2,
-        _ => 1,
+        TransportTaskKind.ToolDelivery => 1,
+        _ => 2,
     };
+
+    /// <summary>小型車只送刀具；物料搬運只用大型車。</summary>
+    private static VehicleType VehicleTypeFor(TransportTaskKind kind) =>
+        kind == TransportTaskKind.ToolDelivery ? VehicleType.Small : VehicleType.Large;
 }

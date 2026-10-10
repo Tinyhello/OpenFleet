@@ -57,6 +57,16 @@ namespace OpenFleet.Contracts
 
         /// <summary>把某站加工完成的批次送往下一站。</summary>
         WipTransfer,
+
+        /// <summary>小型車把新刀具從刀具庫送到機邊備用。沒有批次；換刀由機台端的設備執行，不是這趟搬運的一部分。</summary>
+        ToolDelivery,
+    }
+
+    /// <summary>搬運指令裡 LoadCode 的固定值。</summary>
+    public static class LoadCodes
+    {
+        /// <summary>車上載的是刀具，不是零件。</summary>
+        public const string Tool = "tool";
     }
 
     public enum OperationStatus
@@ -105,11 +115,25 @@ namespace OpenFleet.Contracts
         public string SourceStationCode { get; set; } = string.Empty;
         public string BufferStationCode { get; set; } = string.Empty;
 
-        /// <summary>AGV 上料、下料時每件需要的時間（秒）；一趟的交接時間＝件數 × 這個值。</summary>
-        public double HandoverSecondsPerPiece { get; set; }
+        /// <summary>
+        /// 機台取放一件的時間（秒）：加工前從備料區取一件、加工後取出放到成品區，各一次。
+        /// 所以每件的週期＝這個值 × 2 ＋ 該站的加工時間。
+        /// </summary>
+        public double PieceHandlingSeconds { get; set; }
+
+        /// <summary>AGV 與站點交接一框的時間（秒）：把一框料交給站點、或從站點取走一框，各一次，和件數無關。</summary>
+        public double AgvHandoverSeconds { get; set; }
 
         /// <summary>機台換刀需要的時間（秒）；換刀期間機台暫停加工。</summary>
         public double ToolChangeSeconds { get; set; }
+
+        /// <summary>刀具剩餘可加工件數低於（或等於）這個值時，預先叫小型車送一把新刀到機邊。</summary>
+        public int ToolRequestThresholdPieces { get; set; }
+
+        /// <summary>
+        /// 是否由小型車配送刀具。關閉時視為新刀永遠在機邊，到壽命就直接換（P2 的行為，測試與除錯用）。
+        /// </summary>
+        public bool ToolDeliveryEnabled { get; set; } = true;
 
         /// <summary>PUT 時只採用 Sequence、SecondsPerPiece 與 ToolLifePieces。</summary>
         public List<ProcessStepDto> Steps { get; set; } = new List<ProcessStepDto>();
@@ -167,8 +191,10 @@ namespace OpenFleet.Contracts
     public sealed class TransportTaskDto
     {
         public Guid Id { get; set; }
-        public Guid LotId { get; set; }
-        public string LotNumber { get; set; } = string.Empty;
+
+        /// <summary>搬運的批次；送刀具的任務沒有批次，為 null。</summary>
+        public Guid? LotId { get; set; }
+        public string? LotNumber { get; set; }
         public string FromStationCode { get; set; } = string.Empty;
         public string ToStationCode { get; set; } = string.Empty;
         public int Quantity { get; set; }
@@ -211,6 +237,23 @@ namespace OpenFleet.Contracts
 
         /// <summary>換刀進度，0～1；沒有在換刀時為 0。</summary>
         public double ChangeProgress { get; set; }
+
+        /// <summary>備用的新刀：還沒叫、已叫車配送中、已送到機邊。</summary>
+        public ToolSpareStatus Spare { get; set; }
+
+        /// <summary>刀具已到壽命，但新刀還沒送到：機台停機等刀。</summary>
+        public bool WaitingForTool { get; set; }
+    }
+
+    public enum ToolSpareStatus
+    {
+        None,
+
+        /// <summary>已建立配送任務，新刀還沒到。</summary>
+        Requested,
+
+        /// <summary>新刀已送到機邊；到壽命時可以直接換刀。</summary>
+        Delivered,
     }
 
     /// <summary>站點目前的物料與設備狀態（GET /api/stations/status），供顯示端畫進度條。</summary>
@@ -235,6 +278,116 @@ namespace OpenFleet.Contracts
 
         /// <summary>不是加工站時為 null。</summary>
         public ToolStatusDto? Tool { get; set; }
+
+        /// <summary>機台目前因為叫不到車而停下來的原因；沒有時為 null。</summary>
+        public MachineDelayCause? ShortageCause { get; set; }
+
+        /// <summary>叫不到車是因為車都在忙（缺車）還是全部離線（重大事故）；沒有時為 null。</summary>
+        public ShortageReason? ShortageReason { get; set; }
+    }
+
+    /// <summary>叫不到車的原因。兩者分開記錄、分開統計。</summary>
+    public enum ShortageReason
+    {
+        /// <summary>缺車：有車在線，但都在忙。代表車不夠用，不算緊急事件。</summary>
+        VehiclesBusy,
+
+        /// <summary>重大事故：能做這個任務的車型全部離線。</summary>
+        FleetOffline,
+    }
+
+    /// <summary>機台因為叫不到車而停下來的原因。</summary>
+    public enum MachineDelayCause
+    {
+        /// <summary>等不到料：要送來的料叫不到車，機台沒有東西可做。</summary>
+        WaitingForMaterial,
+
+        /// <summary>成品沒被搬走：做完的批次叫不到車，下一批無法開始。</summary>
+        OutputNotRemoved,
+
+        /// <summary>等刀：刀具已到壽命，送新刀的任務叫不到車，機台停機。</summary>
+        WaitingForTool,
+    }
+
+    /// <summary>某道工序因缺車耽誤的加工時間。秒數都是模擬時間（1 倍速時等於實際時間）。</summary>
+    public sealed class StepDelayDto
+    {
+        public int Sequence { get; set; }
+        public string StationCode { get; set; } = string.Empty;
+        public string StationName { get; set; } = string.Empty;
+
+        /// <summary>因缺車（車都在忙）耽誤的總時間＝下面三項相加。不含離線事故。</summary>
+        public double DelaySeconds { get; set; }
+        public double WaitingForMaterialSeconds { get; set; }
+        public double OutputNotRemovedSeconds { get; set; }
+        public double WaitingForToolSeconds { get; set; }
+
+        /// <summary>因車輛全部離線（重大事故）而停機的時間，不算在缺車裡。</summary>
+        public double OfflineSeconds { get; set; }
+
+        /// <summary>機台此刻因為叫不到車停著的原因；沒有時為 null。</summary>
+        public MachineDelayCause? CurrentCause { get; set; }
+        public ShortageReason? CurrentReason { get; set; }
+    }
+
+    /// <summary>
+    /// 缺車統計（GET /api/shortage）。缺車（車都在忙）與離線事故（該車型全部離線）分開：
+    /// 前三個欄位與各工序的 DelaySeconds 只算缺車。
+    /// </summary>
+    public sealed class VehicleShortageDto
+    {
+        /// <summary>此刻因為車都在忙而叫不到車的搬運任務數。</summary>
+        public int WaitingTasks { get; set; }
+
+        /// <summary>累計的缺車等待次數（一個任務可能等待不只一次）。</summary>
+        public int WaitCount { get; set; }
+
+        /// <summary>任務等車的累計時間（模擬秒）。這是任務的等待，不等於機台的耽誤。</summary>
+        public double WaitSeconds { get; set; }
+
+        /// <summary>重大事故：此刻全部離線的車型（有開放派工的車型裡，沒有任何一台在線）。空的表示沒有事故。</summary>
+        public List<VehicleType> OfflineVehicleTypes { get; set; } = new List<VehicleType>();
+
+        /// <summary>此刻因為車輛全部離線而派不出去的任務數。</summary>
+        public int OfflineWaitingTasks { get; set; }
+        public int OfflineWaitCount { get; set; }
+
+        /// <summary>任務因離線事故等待的累計時間（模擬秒）。</summary>
+        public double OfflineWaitSeconds { get; set; }
+
+        /// <summary>各工序機台真的停下來的時間。</summary>
+        public List<StepDelayDto> Steps { get; set; } = new List<StepDelayDto>();
+    }
+
+    /// <summary>一筆缺車等待區間（GET /api/shortage/waits）。</summary>
+    public sealed class VehicleWaitDto
+    {
+        public Guid TaskId { get; set; }
+        public ShortageReason Reason { get; set; }
+
+        /// <summary>送刀具的任務沒有批次，為 null。</summary>
+        public string? LotNumber { get; set; }
+        public TransportTaskKind Kind { get; set; }
+        public string FromStationCode { get; set; } = string.Empty;
+        public string ToStationCode { get; set; } = string.Empty;
+        public DateTimeOffset StartedAt { get; set; }
+
+        /// <summary>還在等待時為 null。</summary>
+        public DateTimeOffset? EndedAt { get; set; }
+        public double SimulatedSeconds { get; set; }
+    }
+
+    /// <summary>一筆機台耽誤區間（GET /api/shortage/delays）。</summary>
+    public sealed class MachineDelayDto
+    {
+        public string StationCode { get; set; } = string.Empty;
+        public int StepSequence { get; set; }
+        public MachineDelayCause Cause { get; set; }
+        public ShortageReason Reason { get; set; }
+        public Guid TaskId { get; set; }
+        public DateTimeOffset StartedAt { get; set; }
+        public DateTimeOffset? EndedAt { get; set; }
+        public double SimulatedSeconds { get; set; }
     }
 
     /// <summary>一個批次的完整追蹤：位置異動、加工紀錄與搬運任務。</summary>

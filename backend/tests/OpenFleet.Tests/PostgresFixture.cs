@@ -61,8 +61,11 @@ public sealed class TestDatabase
 
     public FleetOptions Fleet { get; } = new()
     {
-        VehicleTypes = { ["agv-a"] = VehicleType.Large, ["agv-b"] = VehicleType.Large, ["agv-s"] = VehicleType.Small },
-        DispatchVehicleIds = ["agv-a", "agv-b", "agv-s"],
+        VehicleTypes =
+        {
+            ["agv-a"] = VehicleType.Large, ["agv-b"] = VehicleType.Large, ["agv-c"] = VehicleType.Large, ["agv-s"] = VehicleType.Small,
+        },
+        DispatchVehicleIds = ["agv-a", "agv-b", "agv-c", "agv-s"],
     };
 
     public static async Task<TestDatabase> CreateAsync(PostgresFixture postgres)
@@ -76,6 +79,59 @@ public sealed class TestDatabase
 
     public OpenFleetDbContext NewContext() => new(_options);
 
+    /// <summary>
+    /// 測試用的簡化加工：每件 2 秒、機台取放不花時間、換刀 20 秒、新刀視為已在機邊（不配送刀具）。
+    /// 示範值（30／60 秒、取放 5 秒、換刀 90 秒、小型車送刀）數字太大，時間點不好算；刀具配送另有專門的測試。
+    /// </summary>
+    public async Task UseSimpleMachiningAsync()
+    {
+        await using var db = NewContext();
+        await db.ProcessSteps.ExecuteUpdateAsync(s => s.SetProperty(step => step.SecondsPerPiece, 2d));
+        await db.ProductionSettings.ExecuteUpdateAsync(s => s
+            .SetProperty(x => x.PieceHandlingSeconds, 0d)
+            .SetProperty(x => x.ToolChangeSeconds, 20d)
+            .SetProperty(x => x.ToolDeliveryEnabled, false));
+    }
+
+    /// <summary>讓一台車一直處於忙碌：給它一筆和示範流程無關的有效派工（包裝 → 出貨）。</summary>
+    public async Task OccupyAsync(string vehicleId)
+    {
+        await using var db = NewContext();
+        var now = Time.GetUtcNow();
+        var lot = MaterialLot.Receive("occupied", 1, "packing", null, now);
+        var task = TransportTask.Create(lot, "packing", "shipping", TransportTaskKind.WipTransfer, now);
+        db.Lots.Add(lot);
+        db.TransportTasks.Add(task);
+        db.Assignments.Add(task.Assign(vehicleId, 1, now, TimeSpan.FromHours(1)));
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>結束 <see cref="OccupyAsync"/> 給的那筆派工，車輛恢復可用。</summary>
+    public async Task ReleaseAsync(string vehicleId)
+    {
+        await using var db = NewContext();
+        await db.Assignments.Where(a => a.VehicleId == vehicleId && a.Task.FromStationCode == "packing").ExecuteDeleteAsync();
+    }
+
+    /// <summary>車輛目前那筆剛派出的派工，走完接受、取料、卸料；過程中時間不前進。</summary>
+    public async Task CompleteDeliveryAsync(string vehicleId)
+    {
+        Assignment assignment;
+        await using (var db = NewContext())
+        {
+            assignment = await db.Assignments.AsNoTracking().SingleAsync(a => a.VehicleId == vehicleId && a.Status == AssignmentStatus.Dispatched);
+        }
+
+        foreach (var type in new[] { VehicleEventType.Accepted, VehicleEventType.Loaded, VehicleEventType.Completed })
+        {
+            await using var scope = NewScope();
+            if (!await scope.Events.ProcessAsync(vehicleId, Event(assignment, type), default))
+            {
+                throw new InvalidOperationException($"Event {type} for {vehicleId} was not processed.");
+            }
+        }
+    }
+
     private static RoadNetwork BuildNetwork()
     {
         var (nodes, edges) = DemoRoadNetwork.Build();
@@ -86,9 +142,10 @@ public sealed class TestDatabase
     {
         var db = NewContext();
         var production = new ProductionService(db, Speed, Time, NullLogger<ProductionService>.Instance);
-        var transport = new TransportService(db, production, Network, Options.Create(Fleet),
+        var shortage = new VehicleShortageService(db, Speed, Time, NullLogger<VehicleShortageService>.Instance);
+        var transport = new TransportService(db, production, shortage, Network, Options.Create(Fleet),
             Options.Create(new MqttSettings { ProducerId = "backend", FactoryId = "demo" }), Time, NullLogger<TransportService>.Instance);
-        return new Scope(db, production, transport, new VehicleEventProcessor(db, transport, Time));
+        return new Scope(db, production, transport, shortage, new VehicleEventProcessor(db, transport, Time));
     }
 
     public static VehicleState Online(string vehicleId, double x = 0, double z = 0) => new()
@@ -107,7 +164,8 @@ public sealed class TestDatabase
             Reason = reason,
         }, DateTimeOffset.UtcNow);
 
-    public sealed record Scope(OpenFleetDbContext Db, ProductionService Production, TransportService Transport, VehicleEventProcessor Events) : IAsyncDisposable
+    public sealed record Scope(
+        OpenFleetDbContext Db, ProductionService Production, TransportService Transport, VehicleShortageService Shortage, VehicleEventProcessor Events) : IAsyncDisposable
     {
         public ValueTask DisposeAsync() => Db.DisposeAsync();
     }

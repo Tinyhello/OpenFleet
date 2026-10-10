@@ -14,7 +14,12 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
 {
     private TestDatabase _database = null!;
 
-    public async Task InitializeAsync() => _database = await TestDatabase.CreateAsync(postgres);
+    public async Task InitializeAsync()
+    {
+        _database = await TestDatabase.CreateAsync(postgres);
+        // 以下測試的時間點都以每件 2 秒、換刀 20 秒計算。
+        await _database.UseSimpleMachiningAsync();
+    }
 
     public Task DisposeAsync() => Task.CompletedTask;
 
@@ -470,10 +475,10 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await using var scope = _database.NewScope();
         var payload = (await scope.Db.OutboxMessages.SingleAsync()).Payload;
 
-        // 12 件 × 每件 5 秒 ＝ 取料、卸料各 60 秒。
+        // AGV 是一框一框交接：取料、卸料各 30 秒，和件數無關。
         Assert.Contains("\"loadQuantity\":12", payload);
         Assert.Contains("\"loadCode\":\"upper-punch\"", payload);
-        Assert.Contains("\"handoverSeconds\":60", payload);
+        Assert.Contains("\"handoverSeconds\":30", payload);
     }
 
     [Fact]
@@ -506,18 +511,27 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     [Fact]
     public async Task Settings_can_be_changed_and_are_validated()
     {
+        // 示範預設值要看沒有被測試改過的資料庫。
+        await using (var seeded = (await TestDatabase.CreateAsync(postgres)).NewScope())
+        {
+            var defaults = await seeded.Production.GetSettingsAsync(default);
+            Assert.Equal(new[] { (30d, 500), (60d, 250) }, defaults.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
+            Assert.Equal((5d, 30d, 90d, 50, true),
+                (defaults.PieceHandlingSeconds, defaults.AgvHandoverSeconds, defaults.ToolChangeSeconds, defaults.ToolRequestThresholdPieces, defaults.ToolDeliveryEnabled));
+        }
+
         await using var scope = _database.NewScope();
         var settings = await scope.Production.GetSettingsAsync(default);
-        Assert.Equal((30, 30, 5d, 20d), (settings.LotQuantity, settings.MaxLotQuantity, settings.HandoverSecondsPerPiece, settings.ToolChangeSeconds));
-        Assert.Equal(new[] { (2d, 500), (2d, 250) }, settings.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
+        Assert.Equal((30, 30, 0d, 20d), (settings.LotQuantity, settings.MaxLotQuantity, settings.PieceHandlingSeconds, settings.ToolChangeSeconds));
 
         settings.LotQuantity = 12;
-        settings.HandoverSecondsPerPiece = 1.5;
+        settings.PieceHandlingSeconds = 1.5;
+        settings.AgvHandoverSeconds = 12;
         settings.ToolChangeSeconds = 45;
         settings.Steps[0].SecondsPerPiece = 4;
         settings.Steps[0].ToolLifePieces = 100;
         var updated = await scope.Production.UpdateSettingsAsync(settings, default);
-        Assert.Equal((12, 1.5, 45d), (updated.LotQuantity, updated.HandoverSecondsPerPiece, updated.ToolChangeSeconds));
+        Assert.Equal((12, 1.5, 12d, 45d), (updated.LotQuantity, updated.PieceHandlingSeconds, updated.AgvHandoverSeconds, updated.ToolChangeSeconds));
         Assert.Equal(new[] { (4d, 100), (2d, 250) }, updated.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
         Assert.Equal(12, (await scope.Production.CreateLotAsync(null, default)).Quantity);
 
@@ -525,7 +539,9 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await Invalid(s => s.LotQuantity = 31);
         await Invalid(s => s.Steps[1].SecondsPerPiece = 0);
         await Invalid(s => s.Steps[1].ToolLifePieces = 0);
-        await Invalid(s => s.HandoverSecondsPerPiece = -1);
+        await Invalid(s => s.PieceHandlingSeconds = -1);
+        await Invalid(s => s.AgvHandoverSeconds = -1);
+        await Invalid(s => s.ToolRequestThresholdPieces = -1);
         await Invalid(s => s.ToolChangeSeconds = double.NaN);
         await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateLotAsync(0, default));
 

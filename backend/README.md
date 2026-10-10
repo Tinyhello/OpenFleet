@@ -61,11 +61,13 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `POST /api/vehicles/{id}/ping` | P1 通訊驗證指令 |
 | `GET /api/stations` | 站點與交接點座標 |
 | `GET /api/stations/status` | 每站的備料區、成品區件數與容量、加工進度、刀具狀態（顯示端輪詢用） |
-| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、上下料每件秒數、換刀時間、各站每件加工秒數與刀具壽命。PUT 是整份取代，不合規則回 400 |
+| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具、各站每件加工秒數與刀具壽命。PUT 是整份取代，不合規則回 400 |
 | `POST /api/lots` | 模擬收料：在原料倉建立批次並建立第一趟搬運。可帶 `{"quantity": n}` |
 | `GET /api/lots`、`GET /api/lots/{id}` | 批次清單；單一批次的完整追蹤 |
 | `GET /api/transport-tasks`、`GET /api/transport-tasks/{id}`、`.../{id}/events` | 搬運任務、派工狀態與狀態歷史 |
-| `GET /api/simulation`、`PUT /api/simulation` | 測試用的模擬時間倍率（`{"timeScale": 10}`，1～20）。行駛、上下料、加工、換刀一起加快；只存在記憶體，後端重啟回到 1 |
+| `GET /api/simulation`、`PUT /api/simulation` | 測試用的模擬時間倍率（`{"timeScale": 10}`，1～30；面板的級距是 1／10／20／30）。行駛、交接、加工、換刀一起加快；只存在記憶體，後端重啟回到 1 |
+| `GET /api/shortage` | 缺車統計（車都在忙）：此刻叫不到車的任務數、任務等車的累計，以及各工序機台因缺車停下來的時間（等不到料、成品沒被搬走、等刀）。車型全部離線是重大事故，另外列在 `offline…` 欄位，不算進缺車。秒數是模擬時間 |
+| `GET /api/shortage/waits`、`GET /api/shortage/delays` | 最近 100 筆缺車等待區間（每個任務）與機台耽誤區間（每台機台） |
 | `POST /api/demo/reset` | 清除所有批次與搬運資料、刀具計數歸零（設定、站點、車輛保留）。只供本機示範 |
 
 ## 示範設定
@@ -83,9 +85,11 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | 交通控制 | 後端 `Traffic:*` | 每 0.2 秒一輪、前方預約 2 個節點、被擋 4 秒後改道 |
 | 車速 | 模擬器 `Simulator:Speed`、`FullLoadSpeed`、`LoadCapacity` | 空車 2 m/s；載貨依件數線性遞減，滿載 30 件時 1 m/s |
 | 批量 | 資料庫，由 Unity 面板或 `PUT /api/settings` 修改 | 30 件 |
-| 上下料時間 | 同上 | 每件 5 秒；一趟的取料、卸料各花「件數 × 5 秒」，由後端寫進搬運指令 |
+| 機台取放 | 同上 | 每件 5 秒：加工前取一件、加工後取出，各一次。每件的週期＝5 ＋ 加工時間 ＋ 5 |
+| AGV 交接 | 同上 | 一框 30 秒，和件數無關；取料、卸料各一次，由後端寫進搬運指令 |
 | 加工 | 同上 | 每件 2 秒，逐件計數，整批做完才放行 |
-| 刀具 | 同上 | 粗加工每 500 件、精加工每 250 件換刀；換刀 20 秒，期間機台暫停 |
+| 刀具 | 同上 | 粗加工每 500 件、精加工每 250 件換刀；換刀 90 秒，期間機台暫停 |
+| 刀具配送 | 同上 | 刀具剩 50 件時叫小型車（`agv-03`）從刀具庫送一把新刀到機邊；到壽命時新刀已到就換刀，還沒到就停機等刀。`toolDeliveryEnabled` 設成 false 時視為新刀永遠在機邊 |
 | 站點與交接點 | 資料庫（`DatabaseInitializer` 建立） | 與 Unity `FactoryLayout` 的暫定佈局相同 |
 
 ## 資料流
@@ -119,7 +123,7 @@ Api <─ telemetry (QoS0，序號) ───────────────
 
 車輛怎麼開過去不在指令裡：後端另外用 `clearance` 告訴每台車路徑與「可以開到第幾個點」，車開到已放行的最後一點就停下等下一次放行。回充電車位也是用放行引導，沒有對應的指令。
 
-遙測除了位置與車速，還帶 `activity`（`idle`／`moving`／`loading`／`unloading`）、`activityProgress`（上下料進度 0～1）、`loadQuantity`、`loadCode` 與 `route`（接下來要依序經過的點，最後一點是目的地）；後端原樣放進車輛狀態發給顯示端。
+遙測除了位置與車速，還帶 `activity`（`idle`／`moving`／`loading`／`unloading`）、`activityProgress`（交接進度 0～1）、`loadQuantity`、`loadCode` 與 `route`（接下來要依序經過的點，最後一點是目的地）；後端原樣放進車輛狀態發給顯示端。
 
 所有訊息都包在 `MessageEnvelope<T>`：`schemaVersion`、`messageId`、`producerId`、`correlationId`、`occurredAt`、`payload`。JSON 欄位 camelCase，enum 為小寫字串。
 
@@ -142,7 +146,7 @@ Api <─ telemetry (QoS0，序號) ───────────────
 - 滿站等待：目的站待加工料容量不足時任務不派出（加工中還沒做的件數也算在內）；完工件沒被搬走時機台不開始下一批。
 - 逐件加工與換刀：一件一件計數，到達刀具壽命時機台暫停換刀，換完計數歸零並留下紀錄。
 - 重啟：加工進度與換刀的時間點都存在資料庫，後端重啟後一次補算，結果和持續執行相同。
-- 車速與上下料：載貨越多車速越慢；上下料時間依件數計算，進度隨遙測回報。
+- 車速與交接：載貨越多車速越慢；AGV 與站點交接一框的時間固定，進度隨遙測回報。
 
 ## 刻意留到之後的部分
 

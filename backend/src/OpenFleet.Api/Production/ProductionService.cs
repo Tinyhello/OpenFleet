@@ -13,12 +13,14 @@ public sealed class RequestValidationException(string field, string message) : E
 
 /// <summary>
 /// 批次、製程設定與加工進度（Scoped：跟著一個 DbContext）。
-/// 加工是後端內的簡化模擬：每站一台、先到先做、逐件計數、整批做完才放行；刀具到達壽命時機台暫停換刀。
+/// 加工是後端內的簡化模擬：每站一台、先到先做、逐件計數、整批做完才放行。
+/// 刀具快到壽命時預先叫小型車送新刀；到達壽命時新刀已到就暫停換刀，還沒到就停機等刀。
 /// </summary>
 public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed speed, TimeProvider time, ILogger<ProductionService> logger)
 {
     public const double MaxSecondsPerPiece = 600;
-    public const double MaxHandoverSecondsPerPiece = 60;
+    public const double MaxPieceHandlingSeconds = 60;
+    public const double MaxAgvHandoverSeconds = 600;
     public const double MaxToolChangeSeconds = 3600;
     public const int MaxToolLifePieces = 100_000;
 
@@ -35,8 +37,11 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
             PartCode = settings.PartCode,
             SourceStationCode = settings.SourceStationCode,
             BufferStationCode = settings.BufferStationCode,
-            HandoverSecondsPerPiece = settings.HandoverSecondsPerPiece,
+            PieceHandlingSeconds = settings.PieceHandlingSeconds,
+            AgvHandoverSeconds = settings.AgvHandoverSeconds,
             ToolChangeSeconds = settings.ToolChangeSeconds,
+            ToolRequestThresholdPieces = settings.ToolRequestThresholdPieces,
+            ToolDeliveryEnabled = settings.ToolDeliveryEnabled,
             Steps = steps.Select(s => new ProcessStepDto
             {
                 Sequence = s.Sequence,
@@ -59,12 +64,17 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
 
         ValidateQuantity(request.LotQuantity, MaxLotQuantity(steps, stations), "lotQuantity");
         // 0 代表瞬間完成（測試用）；負數或太大的值視為輸入錯誤。
-        ValidateRange(request.HandoverSecondsPerPiece, 0, MaxHandoverSecondsPerPiece, "handoverSecondsPerPiece");
+        ValidateRange(request.PieceHandlingSeconds, 0, MaxPieceHandlingSeconds, "pieceHandlingSeconds");
+        ValidateRange(request.AgvHandoverSeconds, 0, MaxAgvHandoverSeconds, "agvHandoverSeconds");
         ValidateRange(request.ToolChangeSeconds, 0, MaxToolChangeSeconds, "toolChangeSeconds");
+        ValidateRange(request.ToolRequestThresholdPieces, 0, MaxToolLifePieces, "toolRequestThresholdPieces");
 
         settings.LotQuantity = request.LotQuantity;
-        settings.HandoverSecondsPerPiece = request.HandoverSecondsPerPiece;
+        settings.PieceHandlingSeconds = request.PieceHandlingSeconds;
+        settings.AgvHandoverSeconds = request.AgvHandoverSeconds;
         settings.ToolChangeSeconds = request.ToolChangeSeconds;
+        settings.ToolRequestThresholdPieces = request.ToolRequestThresholdPieces;
+        settings.ToolDeliveryEnabled = request.ToolDeliveryEnabled;
 
         foreach (var requested in request.Steps ?? [])
         {
@@ -85,8 +95,8 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
         }
 
         await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Production settings updated: lot {Quantity}, handover {Handover}s/piece, tool change {ToolChange}s, steps {Steps}.",
-            settings.LotQuantity, settings.HandoverSecondsPerPiece, settings.ToolChangeSeconds,
+        logger.LogInformation("Production settings updated: lot {Quantity}, piece handling {Handling}s, AGV handover {Handover}s, tool change {ToolChange}s, steps {Steps}.",
+            settings.LotQuantity, settings.PieceHandlingSeconds, settings.AgvHandoverSeconds, settings.ToolChangeSeconds,
             string.Join(", ", steps.Select(s => $"{s.StationCode}={s.SecondsPerPiece}s/piece, tool {s.ToolLifePieces}")));
         return await GetSettingsAsync(cancellationToken);
     }
@@ -135,8 +145,16 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
         }
     }
 
+    /// <summary>新刀送到機邊（刀具配送任務完成）。由搬運完成事件在同一筆交易內呼叫；換刀要等刀具到壽命才開始。</summary>
+    public async Task OnToolDeliveredAsync(string stationCode, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var tool = await db.StationTools.SingleAsync(t => t.StationCode == stationCode, cancellationToken);
+        tool.DeliverSpare(now);
+        logger.LogInformation("Station {Station}: spare tool delivered.", stationCode);
+    }
+
     /// <summary>
-    /// 把加工推進到現在：逐件完成、到達刀具壽命時換刀、整批做完時建立下一趟搬運，最後讓空閒的機台開始下一批。
+    /// 把加工推進到現在：逐件完成、到達刀具壽命時換刀（或停機等刀）、整批做完時建立下一趟搬運，最後讓空閒的機台開始下一批。
     /// 每一件與每次換刀的時間點都由資料庫裡的時間推算，所以不管多久呼叫一次（包含後端停機之後）結果都一樣。
     /// 回傳這一輪是否有任何變更。
     /// </summary>
@@ -158,6 +176,12 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
 
             while (operation.Status == OperationStatus.Running)
             {
+                // 停機等刀：新刀送到的那一刻才開始換刀。
+                if (tool.IsWaitingForSpare && !TryStartChangeAfterWaiting(tool, settings, timeScale))
+                {
+                    break;
+                }
+
                 if (tool.ChangeDueAt is { } changeDue)
                 {
                     if (changeDue > now)
@@ -180,9 +204,18 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
                 tool.CountPiece();
                 if (tool.PiecesSinceChange >= step.ToolLifePieces)
                 {
-                    tool.StartChange(pieceDue, settings.ToolChangeSeconds / timeScale);
-                    logger.LogInformation("Station {Station}: tool reached {Pieces} piece(s); changing for {Seconds}s.",
-                        tool.StationCode, tool.PiecesSinceChange, settings.ToolChangeSeconds);
+                    if (!settings.ToolDeliveryEnabled || tool.SpareDeliveredAt is not null)
+                    {
+                        tool.StartChange(pieceDue, settings.ToolChangeSeconds / timeScale);
+                        logger.LogInformation("Station {Station}: tool reached {Pieces} piece(s); changing for {Seconds}s.",
+                            tool.StationCode, tool.PiecesSinceChange, settings.ToolChangeSeconds);
+                    }
+                    else
+                    {
+                        tool.WaitForSpare(pieceDue);
+                        logger.LogWarning("Station {Station}: tool reached {Pieces} piece(s) but the spare has not arrived; machine stopped.",
+                            tool.StationCode, tool.PiecesSinceChange);
+                    }
                 }
             }
 
@@ -198,19 +231,69 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
             }
         }
 
-        // 沒有在加工的機台，換刀到期也要結束（上一批最後一件剛好用完刀具的情況）。
-        foreach (var tool in tools.Values.Where(t => t.ChangeDueAt <= now))
+        // 沒有在加工的機台，等刀與換刀也要往前走（上一批最後一件剛好用完刀具的情況）。
+        foreach (var tool in tools.Values)
         {
-            FinishToolChange(tool);
+            if (tool.IsWaitingForSpare)
+            {
+                TryStartChangeAfterWaiting(tool, settings, timeScale);
+            }
+
+            if (tool.ChangeDueAt <= now)
+            {
+                FinishToolChange(tool);
+            }
+        }
+
+        if (settings.ToolDeliveryEnabled)
+        {
+            RequestSpareTools(steps, tools, settings, now);
         }
 
         var changed = db.ChangeTracker.HasChanges();
         await db.SaveChangesAsync(cancellationToken);
-        return await StartQueuedOperationsAsync(steps, tools, now, cancellationToken) || changed;
+        return await StartQueuedOperationsAsync(steps, tools, settings, now, cancellationToken) || changed;
+    }
+
+    /// <summary>新刀已送到就從送到的時間開始換刀（不會早於開始等待的時間）；還沒到回傳 false。</summary>
+    private bool TryStartChangeAfterWaiting(StationTool tool, ProductionSettings settings, double timeScale)
+    {
+        if (tool.SpareDeliveredAt is not { } delivered || tool.WaitingSince is not { } waitingSince)
+        {
+            return false;
+        }
+
+        tool.StartChange(delivered > waitingSince ? delivered : waitingSince, settings.ToolChangeSeconds / timeScale);
+        logger.LogInformation("Station {Station}: spare tool arrived; changing for {Seconds}s.", tool.StationCode, settings.ToolChangeSeconds);
+        return true;
+    }
+
+    /// <summary>
+    /// 刀具剩餘件數低於門檻、而且還沒叫過刀的機台：建立一筆刀具配送任務（刀具庫 → 機邊），由小型車執行。
+    /// 一把刀只叫一次；換刀完成後備用刀用掉了，下一輪再依門檻判斷。
+    /// </summary>
+    private void RequestSpareTools(
+        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, StationTool> tools, ProductionSettings settings, DateTimeOffset now)
+    {
+        foreach (var step in steps)
+        {
+            var tool = tools[step.StationCode];
+            var remaining = step.ToolLifePieces - tool.PiecesSinceChange;
+            if (tool.SpareRequestedAt is not null || tool.IsChanging || remaining > settings.ToolRequestThresholdPieces)
+            {
+                continue;
+            }
+
+            tool.RequestSpare(now);
+            db.TransportTasks.Add(TransportTask.CreateToolDelivery(settings.ToolStoreStationCode, step.StationCode, now));
+            logger.LogInformation("Station {Station}: {Remaining} piece(s) of tool life left; spare tool requested from {Store}.",
+                step.StationCode, remaining, settings.ToolStoreStationCode);
+        }
     }
 
     private async Task<bool> StartQueuedOperationsAsync(
-        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, StationTool> tools, DateTimeOffset now, CancellationToken cancellationToken)
+        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, StationTool> tools, ProductionSettings settings,
+        DateTimeOffset now, CancellationToken cancellationToken)
     {
         var queued = await db.Operations.Include(o => o.Lot)
             .Where(o => o.Status == OperationStatus.Queued)
@@ -235,7 +318,7 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
 
         var unavailable = busyStations
             .Concat(blockedStations)
-            .Concat(tools.Values.Where(t => t.IsChanging).Select(t => t.StationCode))
+            .Concat(tools.Values.Where(t => t.IsStopped).Select(t => t.StationCode))
             .ToHashSet(StringComparer.Ordinal);
         var started = false;
 
@@ -248,7 +331,7 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
             }
 
             var step = steps.Single(s => s.Sequence == operation.StepSequence);
-            operation.Start(step.SecondsPerPiece, now);
+            operation.Start(step.SecondsPerPiece, settings.PieceHandlingSeconds, now);
             operation.Lot.StartProcessing(now);
             started = true;
             logger.LogInformation("Lot {LotNumber} started step {Step} at {Station}: {Quantity} piece(s), {Seconds}s each.",
@@ -278,6 +361,10 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
             .Select(g => new { g.Key.StationCode, g.Key.Status, Quantity = g.Sum(l => l.Quantity) })
             .ToListAsync(cancellationToken);
 
+        var shortages = await db.MachineDelays.AsNoTracking()
+            .Where(d => d.EndedAt == null)
+            .ToDictionaryAsync(d => d.StationCode, d => new { d.Cause, d.Reason }, cancellationToken);
+
         int Sum(string station, LotStatus status) =>
             lots.Where(l => l.StationCode == station && l.Status == status).Sum(l => l.Quantity);
 
@@ -301,6 +388,8 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
                     PiecesCompleted = machining.PiecesCompleted,
                     Quantity = machining.Quantity,
                 },
+                ShortageCause = shortages.GetValueOrDefault(station.Code)?.Cause,
+                ShortageReason = shortages.GetValueOrDefault(station.Code)?.Reason,
             };
 
             if (steps.TryGetValue(station.Code, out var step) && tools.TryGetValue(station.Code, out var tool))
@@ -311,6 +400,10 @@ public sealed class ProductionService(OpenFleetDbContext db, SimulationSpeed spe
                     LifePieces = step.ToolLifePieces,
                     Changing = tool.IsChanging,
                     ChangeProgress = ChangeProgress(tool, now),
+                    Spare = tool.SpareDeliveredAt is not null ? ToolSpareStatus.Delivered
+                        : tool.SpareRequestedAt is not null ? ToolSpareStatus.Requested
+                        : ToolSpareStatus.None,
+                    WaitingForTool = tool.IsWaitingForSpare,
                 };
             }
 

@@ -8,7 +8,7 @@ public sealed class Vehicle
     public required string Id { get; set; }
     public VehicleType Type { get; set; }
 
-    /// <summary>是否參與自動派工。P2 先以單車驗證，只有一台車開啟。</summary>
+    /// <summary>是否參與自動派工。大型車接物料搬運，小型車接刀具配送。</summary>
     public bool DispatchEnabled { get; set; }
 }
 
@@ -31,15 +31,16 @@ public sealed class RouteEdge
 }
 
 /// <summary>
-/// 一趟單車搬運。合法的狀態轉移：Pending → Assigned → Executing → Completed；
+/// 一趟單車搬運：物料批次，或一把刀具（<see cref="TransportTaskKind.ToolDelivery"/>，沒有批次）。合法的狀態轉移：Pending → Assigned → Executing → Completed；
 /// Assigned／Executing 可以 Failed；設備拒絕時 Assigned 回到 Pending 等待重新派工。
 /// 每次轉移都留下一筆 <see cref="TaskEvent"/>。
 /// </summary>
 public sealed class TransportTask
 {
     public Guid Id { get; private set; }
-    public Guid LotId { get; private set; }
-    public MaterialLot Lot { get; private set; } = null!;
+    /// <summary>搬運的批次；送刀具的任務為 null。</summary>
+    public Guid? LotId { get; private set; }
+    public MaterialLot? Lot { get; private set; }
     public string FromStationCode { get; private set; } = string.Empty;
     public string ToStationCode { get; private set; } = string.Empty;
     public int Quantity { get; private set; }
@@ -64,6 +65,23 @@ public sealed class TransportTask
             ToStationCode = to,
             Quantity = lot.Quantity,
             Kind = kind,
+            Status = TransportTaskStatus.Pending,
+            CreatedAt = now,
+        };
+        task.Events.Add(new TaskEvent { ToStatus = TransportTaskStatus.Pending, OccurredAt = now });
+        return task;
+    }
+
+    /// <summary>把一把新刀從刀具庫送到機邊。</summary>
+    public static TransportTask CreateToolDelivery(string from, string to, DateTimeOffset now)
+    {
+        var task = new TransportTask
+        {
+            Id = Guid.NewGuid(),
+            FromStationCode = from,
+            ToStationCode = to,
+            Quantity = 1,
+            Kind = TransportTaskKind.ToolDelivery,
             Status = TransportTaskStatus.Pending,
             CreatedAt = now,
         };

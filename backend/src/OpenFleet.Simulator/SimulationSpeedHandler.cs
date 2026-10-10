@@ -14,7 +14,7 @@ public sealed class SimulationSpeedHandler(
     SimulatedFleet fleet,
     ILogger<SimulationSpeedHandler> logger) : IMqttMessageHandler
 {
-    private const double MaxTimeScale = 20;
+    private const double MaxTimeScale = 30;
 
     public string TopicFilter { get; } = Topics.SimulationState(mqtt.Value.FactoryId);
 

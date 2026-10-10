@@ -9,14 +9,16 @@ namespace OpenFleet.Unity.Editor
 {
     /// <summary>
     /// 產生材質、AGV Prefab 與工廠場景。模型全部由程式組裝，修改後重新執行選單即可重建。
-    /// 注意：會覆寫 Factory.unity 與 Prefabs，手動修改會被蓋掉。
+    /// 注意：會覆寫 Factory.unity 與 Resources 底下的 Prefab，手動修改會被蓋掉。
+    /// 場景裡的腳本都不設定欄位：執行時需要的 Prefab 與 UI 設定放在 Resources，由 PresentationController 載入。
     /// </summary>
     internal static class FactorySceneBuilder
     {
         private const string Root = "Assets/OpenFleet";
-        private const string PrefabFolder = Root + "/Prefabs";
+        private const string ResourcesFolder = Root + "/Resources";
+        private const string PrefabFolder = ResourcesFolder + "/" + PresentationController.PrefabFolder;
         internal const string ScenePath = Root + "/Scenes/Factory.unity";
-        private const string UiFolder = Root + "/UI";
+        private const string PanelSettingsAsset = ResourcesFolder + "/" + PresentationController.PanelSettingsPath + ".asset";
 
         [MenuItem("OpenFleet/Build Factory Scene")]
         public static void Build()
@@ -24,21 +26,19 @@ namespace OpenFleet.Unity.Editor
             EnsureFolder(Palette.Folder);
             EnsureFolder(PrefabFolder);
 
-            var largePath = SavePrefab(VehicleModels.BuildLarge());
-            var smallPath = SavePrefab(VehicleModels.BuildSmall());
-            var unknownPath = SavePrefab(VehicleModels.BuildUnknown());
+            // 檔名要和 PresentationController 載入時用的名稱一致。
+            SavePrefab(VehicleModels.BuildLarge(), PresentationController.LargeVehiclePrefab);
+            SavePrefab(VehicleModels.BuildSmall(), PresentationController.SmallVehiclePrefab);
+            SavePrefab(VehicleModels.BuildUnknown(), PresentationController.UnknownVehiclePrefab);
 
-            var panelPath = SavePanelSettings();
+            SavePanelSettings();
 
-            // NewScene 會卸載未使用的資源，之前拿到的 Prefab 參考會失效，所以開新場景後再依路徑載入。
             var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
-            var large = AssetDatabase.LoadAssetAtPath<VehicleView>(largePath);
-            var small = AssetDatabase.LoadAssetAtPath<VehicleView>(smallPath);
-            var unknown = AssetDatabase.LoadAssetAtPath<VehicleView>(unknownPath);
             SetupLighting();
 
             var factory = new GameObject("Factory").transform;
             BuildEnvironment(Group(factory, "Environment", Vector3.zero));
+            // 物件路徑 Factory/Stations 是 PresentationController 找站點的地方。
             var stations = Group(factory, "Stations", Vector3.zero);
             foreach (var spec in FactoryLayout.Stations)
             {
@@ -57,40 +57,9 @@ namespace OpenFleet.Unity.Editor
                 billboard.transform.rotation = controller.transform.rotation;
             }
 
-            var fleet = new GameObject("OpenFleet");
-            var view = fleet.AddComponent<FleetView>();
-            var so = new SerializedObject(view);
-            so.FindProperty("largeVehiclePrefab").objectReferenceValue = large;
-            so.FindProperty("smallVehiclePrefab").objectReferenceValue = small;
-            so.FindProperty("unknownVehiclePrefab").objectReferenceValue = unknown;
-            so.FindProperty("cameraController").objectReferenceValue = controller;
-            so.ApplyModifiedPropertiesWithoutUndo();
-            if (large == null || small == null || unknown == null)
-            {
-                Debug.LogError("[OpenFleet] AGV prefabs could not be loaded; FleetView references are missing.");
-            }
-
-            // P2 操作面板（UI Toolkit）。介面由 ProductionPanel 用程式建立，這裡只提供 PanelSettings。
-            var document = fleet.AddComponent<UnityEngine.UIElements.UIDocument>();
-            document.panelSettings = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(panelPath);
-            var panel = fleet.AddComponent<ProductionPanel>();
-            var panelObject = new SerializedObject(panel);
-            panelObject.FindProperty("fleetView").objectReferenceValue = view;
-            panelObject.ApplyModifiedPropertiesWithoutUndo();
-            // 場景物件上方的進度條另外用一個 UIDocument，排在操作面板的下層。
-            var overlayObject = new GameObject("Status Overlay");
-            var overlayDocument = overlayObject.AddComponent<UnityEngine.UIElements.UIDocument>();
-            overlayDocument.panelSettings = document.panelSettings;
-            overlayDocument.sortingOrder = -1;
-            var overlay = overlayObject.AddComponent<StatusOverlay>();
-            var overlaySerialized = new SerializedObject(overlay);
-            overlaySerialized.FindProperty("fleetView").objectReferenceValue = view;
-            overlaySerialized.ApplyModifiedPropertiesWithoutUndo();
-
-            if (document.panelSettings == null || document.panelSettings.themeStyleSheet == null)
-            {
-                Debug.LogError("[OpenFleet] UI Toolkit panel settings or theme could not be loaded; the production panel will not render.");
-            }
+            // 不設定任何欄位：FleetView 會自動帶上 FleetMqttClient 與 PresentationController，
+            // 操作面板與進度條由 PresentationController 在執行時建立。
+            new GameObject("OpenFleet").AddComponent<FleetView>();
 
             EditorSceneManager.SaveScene(scene, ScenePath);
             EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(ScenePath, true) };
@@ -169,16 +138,11 @@ namespace OpenFleet.Unity.Editor
 
         private static void BuildStation(Transform parent, StationSpec spec)
         {
-            var root = Group(parent, $"{spec.Id} ({spec.EnName})", ToWorld(spec.Position), spec.FacesSouth ? 180f : 0f);
+            // 物件名稱就是站點代碼，必須和後端的站點代碼相同：執行時 StationAnchor 依名稱對應，StatusOverlay 才對得上。
+            var root = Group(parent, spec.Id, ToWorld(spec.Position), spec.FacesSouth ? 180f : 0f);
 
             var model = Group(root, "Model", Vector3.zero);
             StationModels.Build(spec.Kind, model);
-
-            // 站點代碼必須和後端的站點代碼相同，StatusOverlay 才對得上。
-            root.gameObject.AddComponent<StationAnchor>().Configure(
-                spec.Id,
-                FindChild(model, StationModels.InboundContentsName),
-                FindChild(model, StationModels.OutboundContentsName));
             FloorFrame(root, "Zone", new Vector3(0f, 0f, -0.1f), new Vector2(6.4f, 4.6f), 0.05f, Palette.ZoneLine);
 
             // 交接點：AGV 停靠、由站點設備確認取放的位置。
@@ -231,19 +195,6 @@ namespace OpenFleet.Unity.Editor
 
         private static Vector3 ToWorld(Vector2 p) => new Vector3(p.x, 0f, p.y);
 
-        private static GameObject FindChild(Transform root, string name)
-        {
-            foreach (var child in root.GetComponentsInChildren<Transform>(true))
-            {
-                if (child.name == name)
-                {
-                    return child.gameObject;
-                }
-            }
-
-            return null;
-        }
-
         /// <summary>靜態物件可合併批次繪製；文字標籤會轉向，不能設成靜態。</summary>
         private static void MarkStatic(Transform root)
         {
@@ -259,14 +210,15 @@ namespace OpenFleet.Unity.Editor
         /// <summary>
         /// 執行期的 UI Toolkit 需要 PanelSettings 與主題樣式表；主題直接引用 Unity 內建的預設執行期主題。
         /// </summary>
-        private static string SavePanelSettings()
+        private static void SavePanelSettings()
         {
-            EnsureFolder(UiFolder);
-            var themePath = UiFolder + "/OpenFleetTheme.tss";
+            var folder = Path.GetDirectoryName(PanelSettingsAsset).Replace('\\', '/');
+            EnsureFolder(folder);
+            var themePath = folder + "/OpenFleetTheme.tss";
             File.WriteAllText(themePath, "@import url(\"unity-theme://default\");\n");
             AssetDatabase.ImportAsset(themePath, ImportAssetOptions.ForceUpdate);
 
-            var path = UiFolder + "/OpenFleetPanel.asset";
+            var path = PanelSettingsAsset;
             var settings = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(path);
             if (settings == null)
             {
@@ -278,15 +230,17 @@ namespace OpenFleet.Unity.Editor
             settings.scaleMode = UnityEngine.UIElements.PanelScaleMode.ConstantPixelSize;
             EditorUtility.SetDirty(settings);
             AssetDatabase.SaveAssets();
-            return path;
+            if (settings.themeStyleSheet == null)
+            {
+                Debug.LogError("[OpenFleet] UI Toolkit theme could not be loaded; the production panel will not render.");
+            }
         }
 
-        private static string SavePrefab(GameObject go)
+        private static void SavePrefab(GameObject go, string name)
         {
-            var path = $"{PrefabFolder}/{go.name}.prefab";
-            PrefabUtility.SaveAsPrefabAsset(go, path);
+            go.name = name;
+            PrefabUtility.SaveAsPrefabAsset(go, $"{PrefabFolder}/{name}.prefab");
             Object.DestroyImmediate(go);
-            return path;
         }
 
         private static void EnsureFolder(string path)

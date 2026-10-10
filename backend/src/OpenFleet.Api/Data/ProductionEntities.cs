@@ -33,8 +33,9 @@ public sealed class ProcessStep
 }
 
 /// <summary>
-/// 某一站機台的刀具狀態。到達壽命時開始換刀，換刀期間機台暫停；
-/// 開始與結束時間都存在資料庫，後端重啟後可以接續。
+/// 某一站機台的刀具狀態。快到壽命時預先叫小型車送一把新刀到機邊；到達壽命時新刀已到就開始換刀，
+/// 還沒到就停機等刀。換刀期間機台暫停。所有時間點都存在資料庫，後端重啟後可以接續。
+/// 「新刀送到」（搬運任務完成）與「換刀完成」（<see cref="ToolChangeRecord"/>）是兩件事，分開記錄。
 /// </summary>
 public sealed class StationTool
 {
@@ -45,17 +46,38 @@ public sealed class StationTool
     public DateTimeOffset? ChangeStartedAt { get; private set; }
     public DateTimeOffset? ChangeDueAt { get; private set; }
 
+    /// <summary>已叫車送新刀的時間；還沒叫時為 null。</summary>
+    public DateTimeOffset? SpareRequestedAt { get; private set; }
+
+    /// <summary>新刀送到機邊的時間；還沒到時為 null。</summary>
+    public DateTimeOffset? SpareDeliveredAt { get; private set; }
+
+    /// <summary>刀具已到壽命、新刀還沒到，機台從這個時間起停機等刀；沒有在等時為 null。</summary>
+    public DateTimeOffset? WaitingSince { get; private set; }
+
     public bool IsChanging => ChangeDueAt is not null;
+
+    public bool IsWaitingForSpare => WaitingSince is not null;
+
+    /// <summary>機台因為刀具而不能加工：換刀中，或停機等刀。</summary>
+    public bool IsStopped => IsChanging || IsWaitingForSpare;
 
     public void CountPiece() => PiecesSinceChange++;
 
+    public void RequestSpare(DateTimeOffset now) => SpareRequestedAt = now;
+
+    public void DeliverSpare(DateTimeOffset now) => SpareDeliveredAt = now;
+
+    public void WaitForSpare(DateTimeOffset at) => WaitingSince = at;
+
     public void StartChange(DateTimeOffset now, double seconds)
     {
+        WaitingSince = null;
         ChangeStartedAt = now;
         ChangeDueAt = now.AddSeconds(seconds);
     }
 
-    /// <summary>換刀完成：計數歸零，回傳這次換刀的紀錄。</summary>
+    /// <summary>換刀完成：計數歸零、備用的新刀用掉了，回傳這次換刀的紀錄。</summary>
     public ToolChangeRecord CompleteChange()
     {
         var record = new ToolChangeRecord
@@ -68,6 +90,8 @@ public sealed class StationTool
         PiecesSinceChange = 0;
         ChangeStartedAt = null;
         ChangeDueAt = null;
+        SpareRequestedAt = null;
+        SpareDeliveredAt = null;
         return record;
     }
 }
@@ -95,11 +119,26 @@ public sealed class ProductionSettings
     /// <summary>最後一道工序完成後送往的暫存站。</summary>
     public required string BufferStationCode { get; set; }
 
-    /// <summary>AGV 上料、下料每件需要的時間（秒）。使用者 2026-10-09 決定先用 5 秒。</summary>
-    public double HandoverSecondsPerPiece { get; set; }
+    /// <summary>新刀具的來源站（刀具庫）。</summary>
+    public required string ToolStoreStationCode { get; set; }
 
-    /// <summary>換刀時間（秒）。示範值，尚未定案。</summary>
+    /// <summary>
+    /// 機台取放一件的時間（秒）：加工前取料、加工後取出，各一次。使用者 2026-10-10 更正：
+    /// 先前說的「上下料每件 5 秒」指的是機台的這兩個動作，不是 AGV。
+    /// </summary>
+    public double PieceHandlingSeconds { get; set; }
+
+    /// <summary>AGV 與站點交接一框的時間（秒），和件數無關。使用者 2026-10-10：30 秒。</summary>
+    public double AgvHandoverSeconds { get; set; }
+
+    /// <summary>換刀時間（秒）。使用者 2026-10-10：90 秒。</summary>
     public double ToolChangeSeconds { get; set; }
+
+    /// <summary>刀具剩餘件數低於（或等於）這個值就預先叫刀。示範值 50 件。</summary>
+    public int ToolRequestThresholdPieces { get; set; }
+
+    /// <summary>關閉時視為新刀永遠在機邊（P2 的行為）。</summary>
+    public bool ToolDeliveryEnabled { get; set; }
 }
 
 /// <summary>
@@ -238,6 +277,9 @@ public sealed class OperationExecution
 
     /// <summary>開始加工時從 <see cref="ProcessStep"/> 複製過來；之後修改設定不影響已開始的加工。</summary>
     public double? SecondsPerPiece { get; private set; }
+
+    /// <summary>機台取放一件的時間（秒），開始加工時從設定複製過來。每件的週期＝取料＋加工＋取出。</summary>
+    public double HandlingSeconds { get; private set; }
     public DateTimeOffset QueuedAt { get; set; }
     public DateTimeOffset? StartedAt { get; private set; }
     public DateTimeOffset? PieceStartedAt { get; private set; }
@@ -250,14 +292,15 @@ public sealed class OperationExecution
     public DateTimeOffset PieceDueAt(double timeScale, DateTimeOffset scaleChangedAt)
     {
         var from = PieceStartedAt!.Value > scaleChangedAt ? PieceStartedAt.Value : scaleChangedAt;
-        return from.AddSeconds(SecondsPerPiece!.Value / timeScale);
+        return from.AddSeconds((SecondsPerPiece!.Value + 2 * HandlingSeconds) / timeScale);
     }
 
-    public void Start(double secondsPerPiece, DateTimeOffset now)
+    public void Start(double secondsPerPiece, double handlingSeconds, DateTimeOffset now)
     {
         Require(OperationStatus.Queued, nameof(Start));
         Status = OperationStatus.Running;
         SecondsPerPiece = secondsPerPiece;
+        HandlingSeconds = handlingSeconds;
         StartedAt = now;
         PieceStartedAt = now;
     }
@@ -275,7 +318,7 @@ public sealed class OperationExecution
         }
     }
 
-    /// <summary>機台暫停（換刀）結束後，目前這一件從 <paramref name="at"/> 重新開始計時。</summary>
+    /// <summary>機台暫停（等刀、換刀）結束後，目前這一件從 <paramref name="at"/> 重新開始計時。</summary>
     public void ResumeAt(DateTimeOffset at)
     {
         Require(OperationStatus.Running, nameof(ResumeAt));

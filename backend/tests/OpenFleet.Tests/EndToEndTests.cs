@@ -127,7 +127,8 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         // 經由面板用的 API 把批量改成 20，並把加工與上下料調快（每件 0.05 秒、0.01 秒）。
         var settings = (await _http.GetFromJsonAsync<ProductionSettingsDto>("/api/settings", JsonDefaults.Options))!;
         settings.LotQuantity = 20;
-        settings.HandoverSecondsPerPiece = 0.01;
+        settings.PieceHandlingSeconds = 0;
+        settings.AgvHandoverSeconds = 0.01;
         settings.Steps.ForEach(step => step.SecondsPerPiece = 0.05);
         (await _http.PutAsJsonAsync("/api/settings", settings, JsonDefaults.Options)).EnsureSuccessStatusCode();
 
@@ -184,8 +185,8 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         var tooFast = await _http.PutAsJsonAsync("/api/simulation", new SimulationSettingsDto { TimeScale = 1000 }, JsonDefaults.Options);
         Assert.Equal(HttpStatusCode.BadRequest, tooFast.StatusCode);
 
-        var changed = await _http.PutAsJsonAsync("/api/simulation", new SimulationSettingsDto { TimeScale = 5 }, JsonDefaults.Options);
-        Assert.Equal(5, (await changed.Content.ReadFromJsonAsync<SimulationSettingsDto>(JsonDefaults.Options))!.TimeScale);
+        var changed = await _http.PutAsJsonAsync("/api/simulation", new SimulationSettingsDto { TimeScale = 30 }, JsonDefaults.Options);
+        Assert.Equal(30, (await changed.Content.ReadFromJsonAsync<SimulationSettingsDto>(JsonDefaults.Options))!.TimeScale);
 
         // 之後才訂閱的用戶端（例如晚啟動的模擬器）也拿得到目前的倍率。
         var received = new ConcurrentQueue<string>();
@@ -198,11 +199,11 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         await EventuallyAsync(async () =>
         {
             await client.SubscribeAsync(Topics.SimulationState("demo"), MqttQualityOfServiceLevel.AtLeastOnce);
-            return received.Any(json => json.Contains("\"timeScale\":5"));
+            return received.Any(json => json.Contains("\"timeScale\":30"));
         });
 
         // 模擬器收到後套用同一個倍率。
-        await EventuallyAsync(() => Task.FromResult(_simulator.Services.GetRequiredService<SimulatedFleet>().TimeScale == 5));
+        await EventuallyAsync(() => Task.FromResult(_simulator.Services.GetRequiredService<SimulatedFleet>().TimeScale == 30));
     }
 
     [Fact]

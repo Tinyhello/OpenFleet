@@ -12,7 +12,7 @@ namespace OpenFleet.Api.Simulation;
 public sealed class SimulationSpeed(TimeProvider time)
 {
     public const double MinTimeScale = 1;
-    public const double MaxTimeScale = 20;
+    public const double MaxTimeScale = 30;
 
     private readonly Lock _gate = new();
     private double _timeScale = 1;

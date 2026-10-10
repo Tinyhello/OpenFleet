@@ -29,12 +29,13 @@ public static class DatabaseInitializer
     ];
 
     /// <summary>
-    /// 示範製程。每件加工 2 秒是暫定值；刀具壽命（粗加工 500 件、精加工 250 件）是使用者 2026-10-09 提供的數值。
+    /// 示範製程。每件加工時間（粗加工 30 秒、精加工 60 秒）是使用者 2026-10-10 提供的數值；
+    /// 刀具壽命（粗加工 500 件、精加工 250 件）是使用者 2026-10-09 提供的數值。
     /// </summary>
     private static readonly ProcessStep[] DemoSteps =
     [
-        new() { Sequence = 1, StationCode = "rough", SecondsPerPiece = 2, ToolLifePieces = 500 },
-        new() { Sequence = 2, StationCode = "fine", SecondsPerPiece = 2, ToolLifePieces = 250 },
+        new() { Sequence = 1, StationCode = "rough", SecondsPerPiece = 30, ToolLifePieces = 500 },
+        new() { Sequence = 2, StationCode = "fine", SecondsPerPiece = 60, ToolLifePieces = 250 },
     ];
 
     public static async Task InitializeDatabaseAsync(this WebApplication app)
@@ -115,9 +116,14 @@ public static class DatabaseInitializer
                 PartCode = "upper-punch",
                 SourceStationCode = "raw-store",
                 BufferStationCode = "heat",
-                // 上下料每件 5 秒是使用者 2026-10-09 的決定（人工約每件 10 秒）；換刀 20 秒是暫定值。
-                HandoverSecondsPerPiece = 5,
-                ToolChangeSeconds = 20,
+                ToolStoreStationCode = "tool-store",
+                // 使用者 2026-10-10：機台取放每件 5 秒（取料、取出各一次）、AGV 交接一框 30 秒、換刀 90 秒。
+                // 叫刀門檻 50 件是示範值。
+                PieceHandlingSeconds = 5,
+                AgvHandoverSeconds = 30,
+                ToolChangeSeconds = 90,
+                ToolRequestThresholdPieces = 50,
+                ToolDeliveryEnabled = true,
             });
         }
 

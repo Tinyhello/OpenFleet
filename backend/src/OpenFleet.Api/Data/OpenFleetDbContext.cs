@@ -23,6 +23,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<TransportTask> TransportTasks => Set<TransportTask>();
     public DbSet<Assignment> Assignments => Set<Assignment>();
     public DbSet<TaskEvent> TaskEvents => Set<TaskEvent>();
+    public DbSet<VehicleWait> VehicleWaits => Set<VehicleWait>();
+    public DbSet<MachineDelay> MachineDelays => Set<MachineDelay>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
@@ -35,6 +37,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         configuration.Properties<TransportTaskKind>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<AssignmentStatus>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<VehicleType>().HaveConversion<string>().HaveMaxLength(32);
+        configuration.Properties<MachineDelayCause>().HaveConversion<string>().HaveMaxLength(32);
+        configuration.Properties<ShortageReason>().HaveConversion<string>().HaveMaxLength(32);
     }
 
     protected override void OnModelCreating(ModelBuilder model)
@@ -64,6 +68,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.HasKey(t => t.StationCode);
             e.Property(t => t.StationCode).HasMaxLength(32);
             e.Ignore(t => t.IsChanging);
+            e.Ignore(t => t.IsWaitingForSpare);
+            e.Ignore(t => t.IsStopped);
             e.HasOne<Station>().WithOne().HasForeignKey<StationTool>(t => t.StationCode).OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -81,6 +87,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(s => s.PartCode).HasMaxLength(32);
             e.Property(s => s.SourceStationCode).HasMaxLength(32);
             e.Property(s => s.BufferStationCode).HasMaxLength(32);
+            e.Property(s => s.ToolStoreStationCode).HasMaxLength(32);
             e.ToTable(t => t.HasCheckConstraint("CK_ProductionSettings_Singleton", "\"Id\" = 1"));
         });
 
@@ -182,6 +189,24 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(ev => ev.VehicleId).HasMaxLength(32);
             e.Property(ev => ev.Reason).HasMaxLength(256);
             e.HasOne(ev => ev.Assignment).WithMany().HasForeignKey(ev => ev.AssignmentId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        model.Entity<VehicleWait>(e =>
+        {
+            e.Ignore(w => w.IsOpen);
+            e.HasOne<TransportTask>().WithMany().HasForeignKey(w => w.TaskId).OnDelete(DeleteBehavior.Cascade);
+            // 一個任務同一時間只有一筆進行中的等待；一台機台同一時間也只有一筆進行中的耽誤。
+            e.HasIndex(w => w.TaskId).IsUnique().HasFilter("\"EndedAt\" IS NULL").HasDatabaseName("UX_VehicleWaits_OpenTask");
+        });
+
+        model.Entity<MachineDelay>(e =>
+        {
+            e.Ignore(d => d.IsOpen);
+            e.Property(d => d.StationCode).HasMaxLength(32);
+            e.HasOne<TransportTask>().WithMany().HasForeignKey(d => d.TaskId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<Station>().WithMany().HasForeignKey(d => d.StationCode).OnDelete(DeleteBehavior.Restrict);
+            e.HasIndex(d => d.StationCode).IsUnique().HasFilter("\"EndedAt\" IS NULL").HasDatabaseName("UX_MachineDelays_OpenStation");
+            e.HasIndex(d => d.StepSequence);
         });
 
         model.Entity<OutboxMessage>(e =>

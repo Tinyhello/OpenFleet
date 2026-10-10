@@ -7,26 +7,23 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.Networking;
 using UnityEngine.UIElements;
+using Colors = OpenFleet.Unity.PresentationController.Colors;
 
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// P2 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間）、建立批次、查看批次目前的狀態與位置。
-    /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；批次清單以輪詢更新。
+    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間）、切換模擬速度、建立批次、
+    /// 查看缺車耽誤的時間與批次目前的狀態與位置。
+    /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；批次清單與缺車統計以輪詢更新。
+    /// 由 PresentationController 在執行時建立。
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
     public sealed class ProductionPanel : MonoBehaviour
     {
-        [SerializeField] private FleetView fleetView;
-        [SerializeField] private float refreshSeconds = 1f;
+        private const float RefreshSeconds = 1f;
 
-        private static readonly Color PanelColor = new Color(0.10f, 0.12f, 0.15f, 0.92f);
-        private static readonly Color MutedColor = new Color(0.65f, 0.69f, 0.75f);
-        private static readonly Color ErrorColor = new Color(1f, 0.55f, 0.45f);
-        private static readonly double[] SpeedOptions = { 1, 5, 10 };
-        private static readonly Color SelectedColor = new Color(0.98f, 0.78f, 0.35f);
-        private static readonly Color InputTextColor = new Color(0.08f, 0.09f, 0.11f);
-        private static readonly Color OkColor = new Color(0.55f, 0.9f, 0.6f);
+        /// <summary>模擬時間倍率的級距（使用者 2026-10-10 指定）；上限要和後端的 SimulationSpeed.MaxTimeScale 一致。</summary>
+        private static readonly double[] SpeedOptions = { 1, 10, 20, 30 };
 
         private readonly List<(ProcessStepDto Step, SliderInt Seconds, SliderInt ToolLife)> _stepFields = new List<(ProcessStepDto, SliderInt, SliderInt)>();
         private readonly Dictionary<string, string> _stationNames = new Dictionary<string, string>();
@@ -35,17 +32,21 @@ namespace OpenFleet.Unity
         private VisualElement _stepRows;
         private VisualElement _lotRows;
         private SliderInt _lotQuantity;
-        private SliderInt _handoverSeconds;
+        private SliderInt _pieceHandlingSeconds;
+        private SliderInt _agvHandoverSeconds;
         private SliderInt _toolChangeSeconds;
+        private SliderInt _toolThreshold;
         private Label _quantityHint;
         private Label _status;
+        private Label _shortage;
+        private Label _incident;
         private ProductionSettingsDto _settings;
         private readonly List<(double Scale, Button Button)> _speedButtons = new List<(double, Button)>();
 
         /// <summary>滑鼠是否在面板上；攝影機用來避免捲動清單時同時縮放畫面。</summary>
         public static bool PointerOverPanel { get; private set; }
 
-        private string Api => fleetView != null ? fleetView.ApiBaseUrl : "http://localhost:5229";
+        private string Api => PresentationController.Instance.Fleet.ApiBaseUrl;
 
         private void OnEnable()
         {
@@ -103,7 +104,7 @@ namespace OpenFleet.Unity
             s.right = 10;
             s.width = 360;
             s.maxHeight = Length.Percent(92);
-            s.backgroundColor = PanelColor;
+            s.backgroundColor = Colors.Panel;
             s.color = Color.white;
             s.fontSize = 14;
             s.paddingTop = s.paddingBottom = 10;
@@ -134,10 +135,15 @@ namespace OpenFleet.Unity
             _quantityHint = Hint(string.Empty);
             settings.Add(_quantityHint);
 
-            _handoverSeconds = NumberField("上下料（秒／件）", 1, 20);
-            settings.Add(_handoverSeconds);
-            _toolChangeSeconds = NumberField("換刀時間（秒）", 1, 120);
+            // 機台取放：加工前取一件、加工後取出，各花這麼久。AGV 交接：一框整個交給站點或取走，和件數無關。
+            _pieceHandlingSeconds = NumberField("機台取放（秒／件）", 1, 20);
+            settings.Add(_pieceHandlingSeconds);
+            _agvHandoverSeconds = NumberField("AGV 交接（秒／框）", 1, 120);
+            settings.Add(_agvHandoverSeconds);
+            _toolChangeSeconds = NumberField("換刀時間（秒）", 1, 300);
             settings.Add(_toolChangeSeconds);
+            _toolThreshold = NumberField("叫刀門檻（剩餘件）", 1, 200);
+            settings.Add(_toolThreshold);
 
             _stepRows = new VisualElement();
             settings.Add(_stepRows);
@@ -147,7 +153,7 @@ namespace OpenFleet.Unity
             settingButtons.Add(ActionButton("重新載入", () => StartCoroutine(LoadSettings())));
             settings.Add(settingButtons);
 
-            // 測試用：加快模擬時間。倍率由後端保存並轉給模擬器，行駛、上下料、加工、換刀一起變快。
+            // 測試用：加快模擬時間。倍率由後端保存並轉給模擬器，行駛、交接、加工、換刀一起變快。
             _panel.Add(Heading("模擬速度（測試用）"));
             var speedButtons = Row();
             foreach (var scale in SpeedOptions)
@@ -159,6 +165,21 @@ namespace OpenFleet.Unity
             }
 
             _panel.Add(speedButtons);
+
+            // 重大事故：某個車型全部離線。平常隱藏，發生時用紅字顯示在最上面。
+            _incident = new Label();
+            _incident.style.whiteSpace = WhiteSpace.Normal;
+            _incident.style.color = Colors.Incident;
+            _incident.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _incident.style.marginTop = 6;
+            _incident.style.display = DisplayStyle.None;
+            _panel.Add(_incident);
+
+            // 缺車統計：車都在忙、叫不到車時，機台真的停下來的時間，按工序列出。
+            _panel.Add(Heading("缺車耽誤"));
+            _shortage = Hint("尚未讀到資料。");
+            _shortage.style.whiteSpace = WhiteSpace.Normal;
+            _panel.Add(_shortage);
 
             _panel.Add(Heading("批次"));
             var lotButtons = Row();
@@ -199,7 +220,7 @@ namespace OpenFleet.Unity
                 {
                     var applied = FleetJson.Deserialize<SimulationSettingsDto>(request.downloadHandler.text).TimeScale;
                     ShowSpeed(applied);
-                    SetStatus(applied > 1 ? $"模擬時間 {applied:0} 倍速。後端重啟後會回到 1 倍。" : "模擬時間恢復正常速度。", OkColor);
+                    SetStatus(applied > 1 ? $"模擬時間 {applied:0} 倍速。後端重啟後會回到 1 倍。" : "模擬時間恢復正常速度。", Colors.Ok);
                 }
             }
         }
@@ -210,7 +231,7 @@ namespace OpenFleet.Unity
             foreach (var (value, button) in _speedButtons)
             {
                 var selected = Mathf.Approximately((float)value, (float)scale);
-                button.style.backgroundColor = selected ? SelectedColor : new StyleColor(StyleKeyword.Null);
+                button.style.backgroundColor = selected ? Colors.Selected : new StyleColor(StyleKeyword.Null);
                 button.style.unityFontStyleAndWeight = selected ? FontStyle.Bold : FontStyle.Normal;
             }
         }
@@ -253,15 +274,17 @@ namespace OpenFleet.Unity
             _lotQuantity.value = settings.LotQuantity;
             _quantityHint.text = $"1～{settings.MaxLotQuantity}（待加工料容量；目前不拆批）";
 
-            SetValue(_handoverSeconds, settings.HandoverSecondsPerPiece);
+            SetValue(_pieceHandlingSeconds, settings.PieceHandlingSeconds);
+            SetValue(_agvHandoverSeconds, settings.AgvHandoverSeconds);
             SetValue(_toolChangeSeconds, settings.ToolChangeSeconds);
+            SetValue(_toolThreshold, settings.ToolRequestThresholdPieces);
 
             _stepRows.Clear();
             _stepFields.Clear();
             foreach (var step in settings.Steps)
             {
                 _stepRows.Add(Hint($"{step.Sequence}. {step.StationName}"));
-                var seconds = NumberField("加工（秒／件）", 1, 20);
+                var seconds = NumberField("加工（秒／件）", 1, 120);
                 SetValue(seconds, step.SecondsPerPiece);
                 _stepRows.Add(seconds);
 
@@ -288,13 +311,15 @@ namespace OpenFleet.Unity
         {
             if (_settings == null)
             {
-                SetStatus("尚未讀到設定，請先按「重新載入」。", ErrorColor);
+                SetStatus("尚未讀到設定，請先按「重新載入」。", Colors.Error);
                 yield break;
             }
 
             _settings.LotQuantity = _lotQuantity.value;
-            _settings.HandoverSecondsPerPiece = _handoverSeconds.value;
+            _settings.PieceHandlingSeconds = _pieceHandlingSeconds.value;
+            _settings.AgvHandoverSeconds = _agvHandoverSeconds.value;
             _settings.ToolChangeSeconds = _toolChangeSeconds.value;
+            _settings.ToolRequestThresholdPieces = _toolThreshold.value;
             foreach (var (step, seconds, toolLife) in _stepFields)
             {
                 step.SecondsPerPiece = seconds.value;
@@ -307,7 +332,7 @@ namespace OpenFleet.Unity
                 if (Succeeded(request, "套用設定"))
                 {
                     ShowSettings(FleetJson.Deserialize<ProductionSettingsDto>(request.downloadHandler.text));
-                    SetStatus("設定已套用。已開始的加工與搬運不受影響，之後開始的才採用新值。", OkColor);
+                    SetStatus("設定已套用。已開始的加工與搬運不受影響，之後開始的才採用新值。", Colors.Ok);
                 }
             }
         }
@@ -319,7 +344,7 @@ namespace OpenFleet.Unity
                 yield return request.SendWebRequest();
                 if (Succeeded(request, successMessage))
                 {
-                    SetStatus(successMessage + "。", OkColor);
+                    SetStatus(successMessage + "。", Colors.Ok);
                     yield return RefreshLots();
                 }
             }
@@ -330,8 +355,88 @@ namespace OpenFleet.Unity
             while (true)
             {
                 yield return RefreshLots();
-                yield return new WaitForSecondsRealtime(refreshSeconds);
+                yield return RefreshShortage();
+                yield return new WaitForSecondsRealtime(RefreshSeconds);
             }
+        }
+
+        private IEnumerator RefreshShortage()
+        {
+            using (var request = UnityWebRequest.Get($"{Api}/api/shortage"))
+            {
+                yield return request.SendWebRequest();
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    yield break;
+                }
+
+                var shortage = FleetJson.Deserialize<VehicleShortageDto>(request.downloadHandler.text);
+                var text = new StringBuilder();
+                text.Append(shortage.WaitingTasks > 0 ? $"目前 {shortage.WaitingTasks} 個任務叫不到車" : "目前沒有任務在等車");
+                text.Append($"；累計等車 {Duration(shortage.WaitSeconds)}（{shortage.WaitCount} 次）");
+                foreach (var step in shortage.Steps)
+                {
+                    text.Append($"\n{step.Sequence}. {step.StationName}　停機 {Duration(step.DelaySeconds)}");
+                    text.Append($"（等料 {Duration(step.WaitingForMaterialSeconds)}／成品未搬走 {Duration(step.OutputNotRemovedSeconds)}／等刀 {Duration(step.WaitingForToolSeconds)}）");
+                    if (step.CurrentCause.HasValue && step.CurrentReason == ShortageReason.VehiclesBusy)
+                    {
+                        text.Append("　停機中");
+                    }
+                }
+
+                _shortage.text = text.ToString();
+                _shortage.style.color = shortage.WaitingTasks > 0 ? Colors.Shortage : Colors.Muted;
+                ShowIncident(shortage);
+            }
+        }
+
+        /// <summary>
+        /// 車輛全部離線是重大事故，和缺車分開顯示：事故進行中，或曾經因此耽誤過，才顯示這一段。
+        /// </summary>
+        private void ShowIncident(VehicleShortageDto shortage)
+        {
+            var offlineSeconds = 0d;
+            foreach (var step in shortage.Steps)
+            {
+                offlineSeconds += step.OfflineSeconds;
+            }
+
+            var active = shortage.OfflineVehicleTypes.Count > 0;
+            if (!active && shortage.OfflineWaitCount == 0)
+            {
+                _incident.style.display = DisplayStyle.None;
+                return;
+            }
+
+            var text = new StringBuilder();
+            if (active)
+            {
+                var types = new List<string>();
+                foreach (var type in shortage.OfflineVehicleTypes)
+                {
+                    types.Add(type == VehicleType.Large ? "大型車" : type == VehicleType.Small ? "小型車" : type.ToString());
+                }
+
+                text.Append($"重大事故：{string.Join("、", types)}全部離線");
+                if (shortage.OfflineWaitingTasks > 0)
+                {
+                    text.Append($"，{shortage.OfflineWaitingTasks} 個任務派不出去");
+                }
+
+                text.Append('\n');
+            }
+
+            text.Append($"離線事故累計：任務等待 {Duration(shortage.OfflineWaitSeconds)}（{shortage.OfflineWaitCount} 次），機台停機 {Duration(offlineSeconds)}");
+            _incident.text = text.ToString();
+            _incident.style.color = active ? Colors.Incident : Colors.Muted;
+            _incident.style.display = DisplayStyle.Flex;
+        }
+
+        /// <summary>模擬時間的秒數顯示成「分:秒」。</summary>
+        private static string Duration(double seconds)
+        {
+            var total = Mathf.Max(0, Mathf.RoundToInt((float)seconds));
+            return $"{total / 60}:{total % 60:00}";
         }
 
         private IEnumerator RefreshLots()
@@ -356,7 +461,7 @@ namespace OpenFleet.Unity
                     var row = new Label($"{lot.LotNumber}　{lot.Quantity} 件\n{Describe(lot)}");
                     row.style.whiteSpace = WhiteSpace.Normal;
                     row.style.marginBottom = 6;
-                    row.style.color = lot.Status == LotStatus.Staged ? MutedColor : Color.white;
+                    row.style.color = lot.Status == LotStatus.Staged ? Colors.Muted : Color.white;
                     _lotRows.Add(row);
                 }
             }
@@ -397,7 +502,7 @@ namespace OpenFleet.Unity
             }
 
             var detail = request.responseCode == 400 ? ValidationMessage(request.downloadHandler?.text) : request.error;
-            SetStatus($"{action}失敗：{detail}", ErrorColor);
+            SetStatus($"{action}失敗：{detail}", Colors.Error);
             Debug.LogWarning($"[OpenFleet] {action} failed: {request.responseCode} {request.error} {request.downloadHandler?.text}");
             return false;
         }
@@ -441,7 +546,7 @@ namespace OpenFleet.Unity
         {
             var label = new Label(text);
             label.style.fontSize = 12;
-            label.style.color = MutedColor;
+            label.style.color = Colors.Muted;
             label.style.marginBottom = 4;
             return label;
         }
@@ -460,7 +565,7 @@ namespace OpenFleet.Unity
             var input = field.Q<TextField>();
             if (input != null)
             {
-                input.style.color = InputTextColor;
+                input.style.color = Colors.InputText;
                 input.style.minWidth = 48;
             }
 
@@ -479,7 +584,7 @@ namespace OpenFleet.Unity
         {
             var button = new Button(onClick) { text = text };
             button.style.flexGrow = 1;
-            button.style.color = InputTextColor;
+            button.style.color = Colors.InputText;
             button.style.height = 28;
             return button;
         }

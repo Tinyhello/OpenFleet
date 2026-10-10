@@ -38,7 +38,7 @@ public static class TransportEndpoints
         {
             Id = t.Id,
             LotId = t.LotId,
-            LotNumber = t.Lot.LotNumber,
+            LotNumber = t.Lot!.LotNumber,
             FromStationCode = t.FromStationCode,
             ToStationCode = t.ToStationCode,
             Quantity = t.Quantity,

@@ -1,5 +1,4 @@
 using System.Collections;
-using System.Collections.Generic;
 using OpenFleet.Contracts;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -8,36 +7,24 @@ namespace OpenFleet.Unity
 {
     /// <summary>
     /// 車隊顯示：每次連上 Broker 就取一次 HTTP 快照，之後以 MQTT 狀態更新；兩者都經過 Version 比對。
-    /// 依後端回報的車型選用 AGV Prefab；另提供簡易面板送出 Ping、讓攝影機跟隨車輛。
+    /// 車輛物件由 PresentationController 依車型建立；這裡另提供簡易面板送出 Ping、讓攝影機跟隨車輛。
     /// </summary>
-    [RequireComponent(typeof(FleetMqttClient))]
+    [RequireComponent(typeof(FleetMqttClient), typeof(PresentationController))]
     public sealed class FleetView : MonoBehaviour
     {
         [SerializeField] private string apiBaseUrl = "http://localhost:5229";
-        [SerializeField] private Color onlineColor = new Color(0.2f, 0.8f, 0.3f);
-        [SerializeField] private Color offlineColor = new Color(0.45f, 0.45f, 0.45f);
 
-        [Header("AGV Prefabs")]
-        [SerializeField] private VehicleView largeVehiclePrefab;
-        [SerializeField] private VehicleView smallVehiclePrefab;
-        [Tooltip("後端設定裡沒有車型的車輛。")]
-        [SerializeField] private VehicleView unknownVehiclePrefab;
-
-        [SerializeField] private FactoryCameraController cameraController;
-
-        private readonly SortedDictionary<string, VehicleView> _vehicles = new SortedDictionary<string, VehicleView>();
+        private PresentationController _presentation;
         private FleetMqttClient _mqtt;
         private string _status = "Connecting...";
 
         /// <summary>後端 HTTP API 的位址；其他面板共用這一個設定。</summary>
         public string ApiBaseUrl => apiBaseUrl;
 
-        /// <summary>目前畫面上的車輛（唯讀）。</summary>
-        public IEnumerable<VehicleView> Vehicles => _vehicles.Values;
-
         private void Awake()
         {
             _mqtt = GetComponent<FleetMqttClient>();
+            _presentation = GetComponent<PresentationController>();
         }
 
         private void OnEnable()
@@ -92,23 +79,21 @@ namespace OpenFleet.Unity
 
         private void Apply(VehicleState state)
         {
-            if (_vehicles.TryGetValue(state.VehicleId, out var view) && view.VehicleType != state.VehicleType && IsNewer(state, view.State))
+            if (_presentation.TryGetVehicle(state.VehicleId, out var view) && view.VehicleType != state.VehicleType && IsNewer(state, view.State))
             {
                 // 車型設定改變（後端重啟後才會發生）：換成對應的模型。
                 Debug.Log($"[OpenFleet] {state.VehicleId} type changed to {state.VehicleType}.");
-                Destroy(view.gameObject);
-                _vehicles.Remove(state.VehicleId);
+                _presentation.RemoveVehicle(state.VehicleId);
                 view = null;
             }
 
             if (view == null)
             {
-                view = VehicleView.Create(PrefabFor(state.VehicleType), state.VehicleId, transform);
-                _vehicles.Add(state.VehicleId, view);
+                view = _presentation.SpawnVehicle(state.VehicleId, state.VehicleType);
             }
 
             var previous = view.State;
-            if (!view.Apply(state, onlineColor, offlineColor))
+            if (!view.Apply(state))
             {
                 return;
             }
@@ -134,16 +119,6 @@ namespace OpenFleet.Unity
             return current == null || state.StateEpoch != current.StateEpoch || state.Version > current.Version;
         }
 
-        private VehicleView PrefabFor(VehicleType type)
-        {
-            switch (type)
-            {
-                case VehicleType.Large: return largeVehiclePrefab;
-                case VehicleType.Small: return smallVehiclePrefab;
-                default: return unknownVehiclePrefab;
-            }
-        }
-
         private IEnumerator Ping(string vehicleId)
         {
             using (var request = new UnityWebRequest($"{apiBaseUrl}/api/vehicles/{UnityWebRequest.EscapeURL(vehicleId)}/ping", UnityWebRequest.kHttpVerbPOST))
@@ -162,12 +137,12 @@ namespace OpenFleet.Unity
         private void OnGUI()
         {
             // 高度依行數計算，避免空白的背景擋住場景。
-            var lines = _vehicles.Count + (cameraController != null ? 2 : 1);
+            var cameraController = _presentation.CameraController;
+            var lines = _presentation.VehicleCount + (cameraController != null ? 2 : 1);
             GUILayout.BeginArea(new Rect(10, 10, 520, 12 + lines * 25), GUI.skin.box);
             GUILayout.Label(_status);
-            foreach (var pair in _vehicles)
+            foreach (var view in _presentation.Vehicles)
             {
-                var view = pair.Value;
                 var s = view.State;
                 GUILayout.BeginHorizontal();
                 GUILayout.Label($"{s.VehicleId}  {s.VehicleType}  {s.Connectivity}  v{s.Version}  ping: {(s.LastCommandEvent?.ToString() ?? "-")}");

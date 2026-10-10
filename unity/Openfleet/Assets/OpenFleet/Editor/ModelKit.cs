@@ -49,7 +49,7 @@ namespace OpenFleet.Unity.Editor
                 _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             }
 
-            var go = new GameObject("Label");
+            var go = new GameObject(VehicleView.LabelName);
             go.transform.SetParent(parent, false);
             go.transform.localPosition = position;
 

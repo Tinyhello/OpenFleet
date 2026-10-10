@@ -4,58 +4,48 @@ using OpenFleet.Contracts;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UIElements;
+using Colors = OpenFleet.Unity.PresentationController.Colors;
 
 namespace OpenFleet.Unity
 {
     /// <summary>
     /// 畫在場景物件上方的進度條（UI Toolkit，螢幕座標，每個 frame 跟著攝影機重新定位）：
-    /// 機台的備料區、成品區、加工進度與可收合的刀具進度；車輛上下料的進度。
+    /// 機台的備料區、成品區、加工進度與可收合的刀具進度；車輛與站點交接的進度。
     /// 站點狀態以 HTTP 輪詢取得，車輛狀態來自 FleetView 已經收到的 MQTT 更新；這裡不保存也不推算任何業務狀態。
+    /// 由 PresentationController 在執行時建立；場景物件（站點、車輛）與顏色都向它取得。
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
     public sealed class StatusOverlay : MonoBehaviour
     {
-        [SerializeField] private FleetView fleetView;
-        [SerializeField] private float refreshSeconds = 0.5f;
+        private const float RefreshSeconds = 0.5f;
 
-        [Header("路徑虛線")]
-        [Tooltip("虛線每一段的長度與間隔（公尺）。以世界座標計算，所以遠處的虛線會隨透視變短。")]
-        [SerializeField] private float dashLength = 0.7f;
-        [SerializeField] private float gapLength = 0.5f;
+        // 路徑虛線：每一段的長度與間隔（公尺）。以世界座標計算，所以遠處的虛線會隨透視變短。
+        private const float DashLength = 0.7f;
+        private const float GapLength = 0.5f;
 
-        [Tooltip("虛線往目的地流動的速度（公尺／秒）。只是動畫，和車速無關。")]
-        [SerializeField] private float dashFlowSpeed = 1.6f;
+        /// <summary>虛線往目的地流動的速度（公尺／秒）。只是動畫，和車速無關。</summary>
+        private const float DashFlowSpeed = 1.6f;
 
-        [Tooltip("虛線離地面的高度（公尺）。")]
-        [SerializeField] private float routeHeight = 0.1f;
+        /// <summary>虛線離地面的高度（公尺）。</summary>
+        private const float RouteHeight = 0.1f;
 
-        [Tooltip("上下料進度條在車輛上方的高度（公尺）。")]
-        [SerializeField] private float vehicleBarHeight = 2.1f;
+        /// <summary>交接進度條在車輛上方的高度（公尺）。</summary>
+        private const float VehicleBarHeight = 2.1f;
 
-        private static readonly Color BackColor = new Color(0.08f, 0.09f, 0.11f, 0.82f);
-        private static readonly Color TrackColor = new Color(1f, 1f, 1f, 0.16f);
-        private static readonly Color InboundColor = new Color(0.36f, 0.62f, 0.95f);
-        private static readonly Color OutboundColor = new Color(0.45f, 0.82f, 0.5f);
-        private static readonly Color MachiningColor = new Color(0.98f, 0.72f, 0.25f);
-        private static readonly Color ToolColor = new Color(0.78f, 0.6f, 0.95f);
-        private static readonly Color ToolChangeColor = new Color(0.98f, 0.45f, 0.4f);
-        private static readonly Color HandoverColor = new Color(0.35f, 0.85f, 0.9f);
-        private static readonly Color RouteColor = new Color(1f, 0.92f, 0.35f, 0.95f);
-        private static readonly Color RouteWaitingColor = new Color(1f, 0.92f, 0.35f, 0.3f);
-
-        private readonly Dictionary<string, StationAnchor> _anchors = new Dictionary<string, StationAnchor>();
         private readonly Dictionary<string, StationWidget> _stations = new Dictionary<string, StationWidget>();
         private readonly Dictionary<VehicleView, VehicleBar> _vehicleBars = new Dictionary<VehicleView, VehicleBar>();
         private readonly List<VehicleView> _stale = new List<VehicleView>();
         private readonly List<Vector3> _routePoints = new List<Vector3>();
+        private PresentationController _presentation;
         private VisualElement _root;
         private VisualElement _routeLayer;
         private Camera _camera;
 
-        private string Api => fleetView != null ? fleetView.ApiBaseUrl : "http://localhost:5229";
+        private string Api => _presentation.Fleet.ApiBaseUrl;
 
         private void OnEnable()
         {
+            _presentation = PresentationController.Instance;
             _root = GetComponent<UIDocument>().rootVisualElement;
             _root.Clear();
             _root.pickingMode = PickingMode.Ignore;
@@ -67,14 +57,6 @@ namespace OpenFleet.Unity
             _routeLayer.style.left = _routeLayer.style.top = _routeLayer.style.right = _routeLayer.style.bottom = 0;
             _routeLayer.generateVisualContent += DrawRoutes;
             _root.Add(_routeLayer);
-
-            _anchors.Clear();
-            foreach (var anchor in FindObjectsByType<StationAnchor>(FindObjectsInactive.Exclude))
-            {
-                _anchors[anchor.StationCode] = anchor;
-                // 還沒收到後端狀態前先當作沒有料。
-                anchor.ShowContents(false, false);
-            }
 
             StartCoroutine(RefreshLoop());
         }
@@ -102,13 +84,13 @@ namespace OpenFleet.Unity
                     }
                 }
 
-                yield return new WaitForSecondsRealtime(refreshSeconds);
+                yield return new WaitForSecondsRealtime(RefreshSeconds);
             }
         }
 
         private void Apply(StationStatusDto status)
         {
-            if (!_anchors.TryGetValue(status.Code, out var anchor))
+            if (!_presentation.Stations.TryGetValue(status.Code, out var anchor))
             {
                 return;
             }
@@ -155,22 +137,22 @@ namespace OpenFleet.Unity
         /// </summary>
         private void DrawRoutes(MeshGenerationContext context)
         {
-            if (_camera == null || fleetView == null || _root.panel == null)
+            if (_camera == null || _root.panel == null)
             {
                 return;
             }
 
             var painter = context.painter2D;
-            painter.strokeColor = RouteColor;
-            painter.fillColor = RouteColor;
+            painter.strokeColor = Colors.Route;
+            painter.fillColor = Colors.Route;
             painter.lineWidth = 3f;
             painter.lineCap = LineCap.Round;
 
-            var period = dashLength + gapLength;
+            var period = DashLength + GapLength;
             // 位移隨時間增加，虛線就往路徑的前方（目的地）移動。
-            var shift = Time.unscaledTime * dashFlowSpeed % period;
+            var shift = Time.unscaledTime * DashFlowSpeed % period;
 
-            foreach (var vehicle in fleetView.Vehicles)
+            foreach (var vehicle in _presentation.Vehicles)
             {
                 var state = vehicle.State;
                 if (state == null || state.Connectivity != VehicleConnectivity.Online || state.Route == null || state.Route.Count == 0)
@@ -189,7 +171,7 @@ namespace OpenFleet.Unity
                 // 畫兩次：先畫已放行的部分（亮），再畫還在等預約的部分（暗）。第 i 段的終點是路徑的第 i 個點。
                 for (var pass = 0; pass < 2; pass++)
                 {
-                    painter.strokeColor = pass == 0 ? RouteColor : RouteWaitingColor;
+                    painter.strokeColor = pass == 0 ? Colors.Route : Colors.RouteWaiting;
                     painter.BeginPath();
                     var travelled = 0f;
                     for (var i = 0; i < _routePoints.Count - 1; i++)
@@ -209,9 +191,9 @@ namespace OpenFleet.Unity
                         while (position < length)
                         {
                             var phase = Mathf.Repeat(travelled + position - shift, period);
-                            if (phase < dashLength)
+                            if (phase < DashLength)
                             {
-                                var end = Mathf.Min(position + dashLength - phase, length);
+                                var end = Mathf.Min(position + DashLength - phase, length);
                                 if (ToPanel(Vector3.Lerp(from, to, position / length), out var a)
                                     && ToPanel(Vector3.Lerp(from, to, end / length), out var b))
                                 {
@@ -236,7 +218,7 @@ namespace OpenFleet.Unity
                     painter.Stroke();
                 }
 
-                painter.strokeColor = RouteColor;
+                painter.strokeColor = Colors.Route;
                 if (ToPanel(_routePoints[_routePoints.Count - 1], out var destination))
                 {
                     painter.BeginPath();
@@ -251,7 +233,7 @@ namespace OpenFleet.Unity
 
         private Vector3 OnFloor(Vector3 position)
         {
-            position.y = routeHeight;
+            position.y = RouteHeight;
             return position;
         }
 
@@ -270,12 +252,7 @@ namespace OpenFleet.Unity
 
         private void UpdateVehicleBars()
         {
-            if (fleetView == null)
-            {
-                return;
-            }
-
-            foreach (var vehicle in fleetView.Vehicles)
+            foreach (var vehicle in _presentation.Vehicles)
             {
                 var state = vehicle.State;
                 var handover = state != null && state.Connectivity == VehicleConnectivity.Online
@@ -296,10 +273,11 @@ namespace OpenFleet.Unity
                 if (handover)
                 {
                     var percent = Mathf.RoundToInt((float)state.ActivityProgress * 100f);
-                    bar.Row.Set(state.Activity == VehicleActivity.Loading ? "上料" : "下料", (float)state.ActivityProgress, $"{percent}%");
+                        // AGV 與站點交接一框（或一把刀）：在取料點是取，在卸料點是交。
+                    bar.Row.Set(state.Activity == VehicleActivity.Loading ? "取貨" : "交貨", (float)state.ActivityProgress, $"{percent}%");
                 }
 
-                Place(bar.Root, vehicle.transform.position + Vector3.up * vehicleBarHeight, handover);
+                Place(bar.Root, vehicle.transform.position + Vector3.up * VehicleBarHeight, handover);
             }
 
             // 車型改變時 FleetView 會換一個物件，舊的進度條要移除。
@@ -340,7 +318,7 @@ namespace OpenFleet.Unity
             var s = element.style;
             s.position = Position.Absolute;
             s.translate = new Translate(Length.Percent(-50), Length.Percent(-50));
-            s.backgroundColor = BackColor;
+            s.backgroundColor = Colors.OverlayBack;
             s.color = Color.white;
             s.fontSize = 12;
             s.paddingTop = s.paddingBottom = 3;
@@ -348,7 +326,7 @@ namespace OpenFleet.Unity
             s.borderTopLeftRadius = s.borderTopRightRadius = s.borderBottomLeftRadius = s.borderBottomRightRadius = 4;
         }
 
-        /// <summary>車輛上方的上下料進度條。</summary>
+        /// <summary>車輛上方的交接進度條。</summary>
         private sealed class VehicleBar
         {
             public VehicleBar()
@@ -360,7 +338,7 @@ namespace OpenFleet.Unity
 
             public VisualElement Root { get; }
 
-            public BarRow Row { get; } = new BarRow(string.Empty, HandoverColor, 80);
+            public BarRow Row { get; } = new BarRow(string.Empty, Colors.Handover, 80);
         }
 
         /// <summary>一列進度條：標籤、長條、右側文字。</summary>
@@ -390,7 +368,7 @@ namespace OpenFleet.Unity
                 track.style.width = trackWidth;
                 track.style.height = 8;
                 track.style.flexShrink = 0;
-                track.style.backgroundColor = TrackColor;
+                track.style.backgroundColor = Colors.BarTrack;
                 Root.Add(track);
 
                 _fill = new VisualElement { pickingMode = PickingMode.Ignore };
@@ -441,14 +419,15 @@ namespace OpenFleet.Unity
         {
             private const float TrackWidth = 64f;
 
-            private readonly BarRow _inbound = new BarRow("備料", InboundColor, TrackWidth);
-            private readonly BarRow _outbound = new BarRow("成品", OutboundColor, TrackWidth);
-            private readonly BarRow _machining = new BarRow("加工", MachiningColor, TrackWidth);
-            private readonly BarRow _tool = new BarRow("刀具", ToolColor, TrackWidth);
+            private readonly BarRow _inbound = new BarRow("備料", Colors.Inbound, TrackWidth);
+            private readonly BarRow _outbound = new BarRow("成品", Colors.Outbound, TrackWidth);
+            private readonly BarRow _machining = new BarRow("加工", Colors.Machining, TrackWidth);
+            private readonly BarRow _tool = new BarRow("刀具", Colors.Tool, TrackWidth);
             private readonly Button _toolToggle;
             private readonly Label _summary = new Label { pickingMode = PickingMode.Ignore };
             private bool _toolExpanded;
             private bool _isMachine;
+            private string _spare = string.Empty;
 
             public StationWidget(StationAnchor anchor)
             {
@@ -468,7 +447,7 @@ namespace OpenFleet.Unity
                 _toolToggle.style.marginTop = 3;
                 _toolToggle.style.marginBottom = _toolToggle.style.marginLeft = _toolToggle.style.marginRight = 0;
                 _toolToggle.style.paddingTop = _toolToggle.style.paddingBottom = 0;
-                _toolToggle.style.color = new Color(0.08f, 0.09f, 0.11f);
+                _toolToggle.style.color = Colors.InputText;
                 Root.Add(_toolToggle);
                 Root.Add(_tool.Root);
                 ShowToolRow();
@@ -508,21 +487,45 @@ namespace OpenFleet.Unity
                 if (changing)
                 {
                     // 換刀時機台暫停：主要的加工列直接顯示「換刀」，不必展開刀具列也看得到。
-                    _machining.Set("換刀", (float)tool.ChangeProgress, $"{Mathf.RoundToInt((float)tool.ChangeProgress * 100f)}%", ToolChangeColor);
+                    _machining.Set("換刀", (float)tool.ChangeProgress, $"{Mathf.RoundToInt((float)tool.ChangeProgress * 100f)}%", Colors.ToolChange);
                 }
                 else if (status.Machining != null)
                 {
                     var m = status.Machining;
-                    _machining.Set("加工", Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", MachiningColor);
+                    _machining.Set("加工", Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
+                }
+                else if (status.ShortageCause.HasValue)
+                {
+                    // 機台因為叫不到車而停著：整條填滿，和一般的待機區分開來。
+                    // 車都在忙是缺車；車輛全部離線是重大事故，用不同的字與顏色。
+                    var offline = status.ShortageReason == ShortageReason.FleetOffline;
+                    string waitingFor;
+                    switch (status.ShortageCause.Value)
+                    {
+                        case MachineDelayCause.WaitingForMaterial: waitingFor = "等料"; break;
+                        case MachineDelayCause.WaitingForTool: waitingFor = "等刀"; break;
+                        default: waitingFor = "待搬走"; break;
+                    }
+
+                    _machining.Set(offline ? "離線" : "缺車", 1f, waitingFor, offline ? Colors.Incident : Colors.Shortage);
+                }
+                else if (tool != null && tool.WaitingForTool)
+                {
+                    // 刀具已到壽命、新刀已經在路上：停機等刀，但不是缺車。
+                    _machining.Set("等刀", 1f, "配送中", Colors.WaitingForTool);
                 }
                 else
                 {
-                    _machining.Set("加工", 0f, "待機", MachiningColor);
+                    _machining.Set("加工", 0f, "待機", Colors.Machining);
                 }
 
                 if (tool != null)
                 {
                     _tool.Set("刀具", Ratio(tool.PiecesUsed, tool.LifePieces), $"{tool.PiecesUsed}/{tool.LifePieces}");
+                    // 備用的新刀狀態寫在按鈕上，不必展開也看得到。
+                    _spare = tool.Spare == ToolSpareStatus.Delivered ? "　新刀已到"
+                        : tool.Spare == ToolSpareStatus.Requested ? "　新刀配送中"
+                        : string.Empty;
                 }
 
                 ShowToolRow();
@@ -537,7 +540,7 @@ namespace OpenFleet.Unity
             private void ShowToolRow()
             {
                 _toolToggle.style.display = _isMachine ? DisplayStyle.Flex : DisplayStyle.None;
-                _toolToggle.text = _toolExpanded ? "刀具 ▲" : "刀具 ▼";
+                _toolToggle.text = (_toolExpanded ? "刀具 ▲" : "刀具 ▼") + _spare;
                 _tool.SetVisible(_isMachine && _toolExpanded);
             }
 

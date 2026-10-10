@@ -48,7 +48,16 @@ GET {{api}}/api/transport-tasks
 ### 站點
 GET {{api}}/api/stations
 
-### 測試用：模擬時間 10 倍速（1 = 正常；後端重啟後回到 1）
+### 缺車統計：各工序機台因缺車停下來的時間
+GET {{api}}/api/shortage
+
+### 缺車等待區間（每個任務）
+GET {{api}}/api/shortage/waits
+
+### 機台耽誤區間（每台機台）
+GET {{api}}/api/shortage/delays
+
+### 測試用：模擬時間 10 倍速（1～30，1 = 正常；後端重啟後回到 1）
 PUT {{api}}/api/simulation
 Content-Type: application/json
 

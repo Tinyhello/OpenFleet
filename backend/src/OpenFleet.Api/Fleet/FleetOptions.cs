@@ -23,7 +23,7 @@ public sealed class FleetOptions
     /// </summary>
     public Dictionary<string, VehicleType> VehicleTypes { get; set; } = new(StringComparer.Ordinal);
 
-    /// <summary>參與自動派工的車輛。示範設定是兩台大型車。</summary>
+    /// <summary>參與自動派工的車輛。示範設定是兩台大型車（物料）與一台小型車（刀具）。</summary>
     public List<string> DispatchVehicleIds { get; set; } = [];
 
     public TimeSpan DispatchInterval { get; set; } = TimeSpan.FromSeconds(1);
