@@ -39,6 +39,7 @@ namespace OpenFleet.Unity
         private SliderInt _testEmptyVehicleSpeed;
         private SliderInt _defectPercent;
         private SliderInt _maxReworkCount;
+        private SliderInt _reworkBatchMin;
         private Label _inspection;
         private SliderInt _truckMinutes;
         private SliderInt _testTruckSpeed;
@@ -111,7 +112,7 @@ namespace OpenFleet.Unity
             s.position = Position.Absolute;
             s.top = 10;
             s.right = 10;
-            s.width = 360;
+            s.width = 380;
             s.maxHeight = Length.Percent(92);
             s.backgroundColor = Colors.Panel;
             s.color = Color.white;
@@ -121,6 +122,13 @@ namespace OpenFleet.Unity
             s.borderTopLeftRadius = s.borderTopRightRadius = s.borderBottomLeftRadius = s.borderBottomRightRadius = 6;
             _root.Add(_panel);
 
+            // 展開示範設定後內容比畫面高：整個面板在最大高度內捲動，各區塊不會被擠在一起。
+            // 捲軸只在內容超過高度時出現；面板的寬度已經把捲軸算進去，出現時文字不會因此多換行。
+            var panelScroll = new ScrollView(ScrollViewMode.Vertical);
+            panelScroll.horizontalScrollerVisibility = ScrollerVisibility.Hidden;
+            _panel.Add(panelScroll);
+            var content = panelScroll.contentContainer;
+
             // 設定預設收合，平常只留批次清單，不擋住場景；點標題展開。
             var settings = new Foldout { text = "示範設定（點此展開）", value = false };
             settings.RegisterValueChangedCallback(e =>
@@ -128,6 +136,7 @@ namespace OpenFleet.Unity
                 if (e.target == settings)
                 {
                     settings.text = e.newValue ? "示範設定" : "示範設定（點此展開）";
+                    panelScroll.scrollOffset = Vector2.zero;
                 }
             });
             settings.Q<Toggle>().style.marginLeft = 0;
@@ -135,11 +144,11 @@ namespace OpenFleet.Unity
             title.style.fontSize = 16;
             title.style.unityFontStyleAndWeight = FontStyle.Bold;
             title.style.color = Color.white;
-            _panel.Add(settings);
+            content.Add(settings);
 
             settings.Add(Hint("暫用數值，尚未定案；套用後存進後端資料庫。"));
 
-            _lotQuantity = NumberField("批量（支）", 1, 300);
+            _lotQuantity = NumberField("批量（組）", 1, 300);
             settings.Add(_lotQuantity);
             _quantityHint = Hint(string.Empty);
             settings.Add(_quantityHint);
@@ -168,6 +177,9 @@ namespace OpenFleet.Unity
             settings.Add(_defectPercent);
             _maxReworkCount = NumberField("反工上限（次）", 0, 3);
             settings.Add(_maxReworkCount);
+            // 鍍層不良的反工品累積到這麼多支才重新電鍍；沒有其他料會再進電鍍時，不足的也放行。
+            _reworkBatchMin = NumberField("反工重鍍下限（支）", 1, 300);
+            settings.Add(_reworkBatchMin);
 
             // 出貨：貨車每隔這麼久來一次，把出貨站上的箱子載走；測試模式下用右邊的倍率加快。
             _truckMinutes = NumberField("貨車間隔（分）", 1, 240);
@@ -188,8 +200,8 @@ namespace OpenFleet.Unity
             var testRow = Row();
             _testMode = ActionButton("測試模式", () => StartCoroutine(ToggleTestMode()));
             testRow.Add(_testMode);
-            _panel.Add(testRow);
-            _panel.Add(Hint("開啟後各站依自己的倍率加快；AGV 交接與空車車速也依設定加快。"));
+            content.Add(testRow);
+            content.Add(Hint("開啟後各站依自己的倍率加快；AGV 交接與空車車速也依設定加快。"));
 
             // 重大事故：某個車型全部離線。平常隱藏，發生時用紅字顯示在最上面。
             _incident = new Label();
@@ -198,47 +210,47 @@ namespace OpenFleet.Unity
             _incident.style.unityFontStyleAndWeight = FontStyle.Bold;
             _incident.style.marginTop = 6;
             _incident.style.display = DisplayStyle.None;
-            _panel.Add(_incident);
+            content.Add(_incident);
 
             // 需要人工處理的搬運：失敗而且系統不能自己重派（物料可能在車上）。平常是空的。
             _attention = new VisualElement();
-            _panel.Add(_attention);
+            content.Add(_attention);
 
             // 缺車統計：車都在忙、叫不到車時，機台真的停下來的時間，按工序列出。
-            _panel.Add(Heading("缺車耽誤"));
+            content.Add(Heading("缺車耽誤"));
             _shortage = Hint("尚未讀到資料。");
             _shortage.style.whiteSpace = WhiteSpace.Normal;
-            _panel.Add(_shortage);
+            content.Add(_shortage);
 
             // 品管的累計結果：合格、反工（表面回拋光、鍍層回電鍍）、報廢（尺寸不良，或反工次數用完）。
-            _panel.Add(Heading("品管"));
+            content.Add(Heading("品管"));
             _inspection = Hint("尚未讀到資料。");
             _inspection.style.whiteSpace = WhiteSpace.Normal;
-            _panel.Add(_inspection);
+            content.Add(_inspection);
 
-            // 包裝與出貨：同批次的框全部包完才併成一箱送到出貨站，貨車定時來載走。
-            _panel.Add(Heading("出貨"));
+            // 包裝與出貨：同批次同一種零件的框全部包完才併成一箱送到出貨站；貨車定時來，把整批到齊的箱子載走。
+            content.Add(Heading("出貨"));
             _shipping = Hint("尚未讀到資料。");
             _shipping.style.whiteSpace = WhiteSpace.Normal;
-            _panel.Add(_shipping);
+            content.Add(_shipping);
 
-            _panel.Add(Heading("批次"));
+            content.Add(Heading("批次"));
             var lotButtons = Row();
             // 桿徑決定一框裝幾支（Φ30 裝 30 支、Φ24 裝 45 支）；批次超過一框就分成多框，AGV 一趟送一框。
             lotButtons.Add(ActionButton("建立批次 Φ30", () => StartCoroutine(Post("/api/lots", "{\"rodDiameterMm\":30}", "已建立批次"))));
             lotButtons.Add(ActionButton("Φ24", () => StartCoroutine(Post("/api/lots", "{\"rodDiameterMm\":24}", "已建立批次"))));
             lotButtons.Add(ActionButton("清除示範資料", () => StartCoroutine(Post("/api/demo/reset", null, "已清除批次與搬運資料"))));
-            _panel.Add(lotButtons);
+            content.Add(lotButtons);
 
             _status = Hint(string.Empty);
             _status.style.whiteSpace = WhiteSpace.Normal;
-            _panel.Add(_status);
+            content.Add(_status);
 
             var scroll = new ScrollView(ScrollViewMode.Vertical);
-            scroll.style.maxHeight = 220;
+            scroll.style.maxHeight = 200;
             scroll.style.marginTop = 6;
             _lotRows = scroll.contentContainer;
-            _panel.Add(scroll);
+            content.Add(scroll);
         }
 
         /// <summary>
@@ -310,7 +322,7 @@ namespace OpenFleet.Unity
             ShowTestMode(settings.TestMode);
             _lotQuantity.highValue = settings.MaxLotQuantity;
             _lotQuantity.value = settings.LotQuantity;
-            _quantityHint.text = $"1～{settings.MaxLotQuantity} 支；一框 Φ30 裝 30 支、Φ24 裝 45 支，超過就分成多框";
+            _quantityHint.text = $"1～{settings.MaxLotQuantity} 組，一組是上沖、下沖、中模各一；一框 Φ30 裝 30 支、Φ24 裝 45 支（中模一律 30 個），超過就分成多框";
 
             SetValue(_pieceHandlingSeconds, settings.PieceHandlingSeconds);
             SetValue(_agvHandoverSeconds, settings.AgvHandoverSeconds);
@@ -322,6 +334,7 @@ namespace OpenFleet.Unity
             // 這兩個欄位 0 是有意義的值（不產生不良、不反工），不能用 SetValue（它會把 0 當成 1）。
             _defectPercent.value = Mathf.RoundToInt((float)(settings.DefectRate * 100d));
             _maxReworkCount.value = settings.MaxReworkCount;
+            _reworkBatchMin.value = settings.ReworkBatchMinPieces;
             SetValue(_truckMinutes, settings.TruckIntervalSeconds / 60d);
             SetValue(_testTruckSpeed, settings.TestTruckSpeed);
 
@@ -422,6 +435,7 @@ namespace OpenFleet.Unity
             _settings.TestEmptyVehicleSpeed = _testEmptyVehicleSpeed.value;
             _settings.DefectRate = _defectPercent.value / 100d;
             _settings.MaxReworkCount = _maxReworkCount.value;
+            _settings.ReworkBatchMinPieces = _reworkBatchMin.value;
             _settings.TruckIntervalSeconds = _truckMinutes.value * 60d;
             _settings.TestTruckSpeed = _testTruckSpeed.value;
             foreach (var apply in _stepAppliers)
@@ -610,8 +624,8 @@ namespace OpenFleet.Unity
                 var remaining = Mathf.Max(0, Mathf.CeilToInt((float)summary.TruckRemainingSeconds));
                 _shipping.text =
                     $"下一班貨車：{remaining / 60} 分 {remaining % 60:00} 秒後\n" +
-                    $"已包裝、等同批次到齊：{summary.PackedPieces} 支\n" +
-                    $"在出貨站等貨車：{summary.WaitingBoxes} 箱／{summary.WaitingPieces} 支\n" +
+                    $"已包裝、等同零件的框到齊：{summary.PackedPieces} 支\n" +
+                    $"在出貨站等貨車：{summary.WaitingBoxes} 箱／{summary.WaitingPieces} 支（整批到齊 {summary.ReadyBoxes} 箱）\n" +
                     $"累計已出貨：{summary.ShippedBoxes} 箱／{summary.ShippedPieces} 支";
             }
         }
@@ -682,7 +696,7 @@ namespace OpenFleet.Unity
                     _lotRows.Add(Hint("還沒有批次。"));
                 }
 
-                // 一個批次分成好幾框，各自搬運與加工：每個批次一段，底下列出「幾框在哪裡做什麼」。
+                // 一個批次有三種零件，各自分成好幾框、各自搬運與加工：每個批次一段，底下每一種零件列出「幾框在哪裡做什麼」。
                 var order = new List<string>();
                 var batches = new Dictionary<string, List<LotDto>>();
                 foreach (var lot in lots)
@@ -700,40 +714,55 @@ namespace OpenFleet.Unity
                 foreach (var batchNumber in order)
                 {
                     var bins = batches[batchNumber];
-                    // 整批包裝完會併成一箱：之後只列那一箱，原本的料框（已空）與報廢的框不再列。
-                    var box = bins.Find(b => b.IsBox);
-                    if (box != null)
-                    {
-                        var boxRow = new Label($"{batchNumber}　{box.Quantity} 支／1 箱（Φ{box.RodDiameterMm}）\n{Describe(box)}");
-                        boxRow.style.whiteSpace = WhiteSpace.Normal;
-                        boxRow.style.marginBottom = 6;
-                        boxRow.style.color = box.Status == LotStatus.Shipped ? Colors.Muted : Color.white;
-                        _lotRows.Add(boxRow);
-                        continue;
-                    }
-
-                    var pieces = 0;
                     var finished = true;
-                    var places = new List<string>();
-                    var counts = new Dictionary<string, int>();
-                    foreach (var bin in bins)
+                    var text = new StringBuilder($"{batchNumber}（Φ{bins[0].RodDiameterMm}）");
+                    foreach (var part in ProductParts.All)
                     {
-                        pieces += bin.Quantity;
-                        finished &= bin.Status == LotStatus.Staged || bin.Status == LotStatus.Scrapped;
-                        var place = Describe(bin);
-                        if (!counts.ContainsKey(place))
+                        var partBins = bins.FindAll(b => b.PartCode == part);
+                        if (partBins.Count == 0)
                         {
-                            counts[place] = 0;
-                            places.Add(place);
+                            continue;
                         }
 
-                        counts[place]++;
-                    }
+                        // 這一種零件包裝完會併成一箱：之後只列那一箱，原本的料框（已空）與報廢的框不再列。
+                        var box = partBins.Find(b => b.IsBox);
+                        if (box != null)
+                        {
+                            finished &= box.Status == LotStatus.Shipped;
+                            text.Append($"\n{ProductParts.Name(part)}　{box.Quantity} 支／1 箱：{Describe(box)}");
+                            continue;
+                        }
 
-                    var text = new StringBuilder($"{batchNumber}　{pieces} 支／{bins.Count} 框（Φ{bins[0].RodDiameterMm}）");
-                    foreach (var place in places)
-                    {
-                        text.Append(bins.Count == 1 ? $"\n{place}" : $"\n{counts[place]} 框 {place}");
+                        // 報廢的框不算在數量裡（報廢的料會另外補做）。
+                        finished = false;
+                        var pieces = 0;
+                        var active = 0;
+                        var places = new List<string>();
+                        var counts = new Dictionary<string, int>();
+                        foreach (var bin in partBins)
+                        {
+                            if (bin.Status == LotStatus.Scrapped)
+                            {
+                                continue;
+                            }
+
+                            pieces += bin.Quantity;
+                            active++;
+                            var place = Describe(bin);
+                            if (!counts.ContainsKey(place))
+                            {
+                                counts[place] = 0;
+                                places.Add(place);
+                            }
+
+                            counts[place]++;
+                        }
+
+                        text.Append($"\n{ProductParts.Name(part)}　{pieces} 支／{active} 框");
+                        foreach (var place in places)
+                        {
+                            text.Append($"\n　{counts[place]} 框 {place}");
+                        }
                     }
 
                     var row = new Label(text.ToString());
@@ -749,16 +778,16 @@ namespace OpenFleet.Unity
         {
             var place = lot.VehicleId ?? (_stationNames.TryGetValue(lot.StationCode ?? string.Empty, out var name) ? name : lot.StationCode);
             // 品管分出來要反工的料另外裝框，和同批次其他的框分開列。
-            var rework = lot.ReworkCount > 0 && lot.Status != LotStatus.Staged ? "（反工）" : string.Empty;
+            var rework = lot.IsMakeup ? "（補做）" : lot.ReworkCount > 0 && lot.Status != LotStatus.Staged ? "（反工）" : string.Empty;
             switch (lot.Status)
             {
                 case LotStatus.AwaitingTransport: return $"在 {place} 等待搬運{rework}";
                 case LotStatus.InTransit: return $"在 {place} 車上運送中{rework}";
                 case LotStatus.Queued: return $"在 {place} 排隊等待加工{rework}";
                 case LotStatus.Processing: return $"在 {place} 加工中{rework}";
-                case LotStatus.Staged: return lot.IsBox ? $"在 {place} 等貨車" : $"已送達 {place} 暫存";
+                case LotStatus.Staged: return lot.IsBox ? $"在 {place} 等貨車（整批到齊才載）" : $"已送達 {place} 暫存";
                 case LotStatus.Scrapped: return $"在 {place} 整框報廢";
-                case LotStatus.Packed: return $"在 {place} 已包裝，等同批次到齊";
+                case LotStatus.Packed: return $"在 {place} 已包裝，等同零件的框到齊";
                 case LotStatus.Shipped: return "已出貨";
                 default: return lot.Status.ToString();
             }
@@ -831,6 +860,7 @@ namespace OpenFleet.Unity
             label.style.fontSize = 12;
             label.style.color = Colors.Muted;
             label.style.marginBottom = 4;
+            label.style.whiteSpace = WhiteSpace.Normal;
             return label;
         }
 

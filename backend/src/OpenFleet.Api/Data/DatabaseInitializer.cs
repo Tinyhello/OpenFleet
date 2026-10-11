@@ -39,12 +39,12 @@ public static class DatabaseInitializer
     /// 回火的開爐條件沿用淬火的 150～300 支、電鍍有料就開（下限 1 支），是 Claude 的推定，待使用者確認。
     /// 品管逐支全檢、每支 60 秒是使用者提供的數值（2026-10-10）；品管的測試倍率 20 是 Claude 挑的。
     /// 包裝逐支、每支 60 秒是使用者提供的數值（2026-10-10）；包裝的測試倍率 20 是 Claude 挑的。
-    /// 測試模式的專用倍率（TestSpeed）：粗加工與精加工 20、淬火與回火 250 是使用者指定的；電鍍 60、拋光 10 是 Claude 挑的。面板可以改。
+    /// 測試模式的專用倍率（TestSpeed）：粗加工與精加工 80（原本 20，使用者 2026-10-10 改）、淬火與回火 250 是使用者指定的；電鍍 60、拋光 10 是 Claude 挑的。面板可以改。
     /// </summary>
     private static readonly ProcessStep[] DemoSteps =
     [
-        new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = 20 },
-        new() { Sequence = 2, StationCode = "fine", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, UsesTool = true, ToolLifePieces = 250, TestSpeed = 20 },
+        new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = 80 },
+        new() { Sequence = 2, StationCode = "fine", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, UsesTool = true, ToolLifePieces = 250, TestSpeed = 80 },
         new()
         {
             Sequence = 3, StationCode = "heat", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300,
@@ -148,7 +148,6 @@ public static class DatabaseInitializer
             db.ProductionSettings.Add(new ProductionSettings
             {
                 LotQuantity = 30,
-                PartCode = "upper-punch",
                 SourceStationCode = "raw-store",
                 BufferStationCode = DemoBufferStation,
                 ToolStoreStationCode = "tool-store",
@@ -166,6 +165,8 @@ public static class DatabaseInitializer
                 // 使用者 2026-10-10：示範用不良率 10%，同一支最多反工 1 次。
                 DefectRate = 0.1,
                 MaxReworkCount = 1,
+                // 使用者 2026-10-10：鍍層不良的反工品最少 30 支才重新電鍍。
+                ReworkBatchMinPieces = 30,
                 TruckIntervalSeconds = DemoTruckIntervalSeconds,
                 TestTruckSpeed = 60,
             });

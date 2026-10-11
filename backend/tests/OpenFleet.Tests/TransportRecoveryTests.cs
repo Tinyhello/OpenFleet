@@ -21,7 +21,7 @@ public sealed class TransportRecoveryTests(PostgresFixture postgres) : IAsyncLif
         _database = await TestDatabase.CreateAsync(postgres);
         await _database.UseSimpleMachiningAsync();
         await using var scope = _database.NewScope();
-        _lot = (await scope.Production.CreateBatchAsync(null, null, default)).Single();
+        _lot = (await scope.Production.CreateBatchAsync(null, null, [ProductParts.UpperPunch], default)).Single();
     }
 
     public Task DisposeAsync() => Task.CompletedTask;

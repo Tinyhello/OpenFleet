@@ -27,6 +27,7 @@ namespace OpenFleet.Tests;
 public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan LongTimeout = TimeSpan.FromSeconds(120);
 
     private readonly int _port = GetFreePort();
     private MqttServer _broker = null!;
@@ -129,6 +130,8 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         settings.LotQuantity = 20;
         settings.PieceHandlingSeconds = 0;
         settings.AgvHandoverSeconds = 0.01;
+        // 一組三種零件輪流上同一台車床，每換一種就要換線：調到幾乎不花時間。
+        settings.ChangeoverSeconds = 0.05;
         // 品管不產生不良：這個測試只驗證整條線接得起來，反工與報廢另有測試。
         settings.DefectRate = 0;
         // 後段的整爐工序：有料就開、一下就做完，這個測試只驗證整條線接得起來。
@@ -142,12 +145,16 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
 
         var created = await _http.PostAsJsonAsync("/api/lots", new CreateLotRequest(), JsonDefaults.Options);
         Assert.Equal(HttpStatusCode.Created, created.StatusCode);
-        var lot = Assert.Single((await created.Content.ReadFromJsonAsync<List<LotDto>>(JsonDefaults.Options))!);
-        Assert.Equal((20, 1, 1, 30), (lot.Quantity, lot.BinIndex, lot.BinCount, lot.RodDiameterMm));
+        // 20 組：上沖、下沖、中模各 20 支，各一框。
+        var bins = (await created.Content.ReadFromJsonAsync<List<LotDto>>(JsonDefaults.Options))!;
+        Assert.Equal(ProductParts.All, bins.Select(b => b.PartCode));
+        Assert.All(bins, b => Assert.Equal((20, 1, 1, 30), (b.Quantity, b.BinIndex, b.BinCount, b.RodDiameterMm)));
+        var lot = bins[0];
 
-        // 這一框包裝完、整批（只有一框）併成一箱，箱子送到出貨站等貨車。
+        // 每一種零件包裝完各併成一箱，三箱都送到出貨站，整批到齊、等貨車。只有一台車要跑 27 趟，所以等久一點。
         await EventuallyAsync(async () =>
-            (await _http.GetFromJsonAsync<ShippingSummaryDto>("/api/shipping", JsonDefaults.Options)) is { WaitingBoxes: 1, WaitingPieces: 20 });
+            (await _http.GetFromJsonAsync<ShippingSummaryDto>("/api/shipping", JsonDefaults.Options)) is { WaitingBoxes: 3, WaitingPieces: 60, ReadyBoxes: 3 },
+            LongTimeout);
 
         var trace = await GetTraceAsync(lot.Id);
         Assert.Equal((LotStatus.Boxed, "packing"), (trace.Lot.Status, trace.Lot.StationCode));
@@ -164,12 +171,12 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(8, trace.Tasks.Count);
         Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
 
-        // 站點狀態：兩站的刀具各累計 20 件，出貨站有 20 件在等貨車；車輛卸完料後是空車。
+        // 站點狀態：兩站的刀具各累計 60 件，出貨站有 60 件在等貨車；車輛卸完料後是空車。
         var stations = (await _http.GetFromJsonAsync<List<StationStatusDto>>("/api/stations/status", JsonDefaults.Options))!;
-        Assert.Equal(20, stations.Single(s => s.Code == "rough").Tool!.PiecesUsed);
-        Assert.Equal(20, stations.Single(s => s.Code == "fine").Tool!.PiecesUsed);
+        Assert.Equal(60, stations.Single(s => s.Code == "rough").Tool!.PiecesUsed);
+        Assert.Equal(60, stations.Single(s => s.Code == "fine").Tool!.PiecesUsed);
         Assert.Null(stations.Single(s => s.Code == "polish").Tool);
-        Assert.Equal(20, stations.Single(s => s.Code == "shipping").InboundQuantity);
+        Assert.Equal(60, stations.Single(s => s.Code == "shipping").InboundQuantity);
         Assert.NotNull(stations.Single(s => s.Code == "shipping").Truck);
         await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });
 
@@ -326,9 +333,9 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         return server;
     }
 
-    private static async Task EventuallyAsync(Func<Task<bool>> condition)
+    private static async Task EventuallyAsync(Func<Task<bool>> condition, TimeSpan? timeout = null)
     {
-        var deadline = DateTime.UtcNow + Timeout;
+        var deadline = DateTime.UtcNow + (timeout ?? Timeout);
         while (DateTime.UtcNow < deadline)
         {
             try
@@ -345,7 +352,7 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             await Task.Delay(100);
         }
 
-        Assert.Fail($"Condition not met within {Timeout}.");
+        Assert.Fail($"Condition not met within {timeout ?? Timeout}.");
     }
 
     private static int GetFreePort()

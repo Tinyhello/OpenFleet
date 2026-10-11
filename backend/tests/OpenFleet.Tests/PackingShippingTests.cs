@@ -57,7 +57,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
         await using (var scope = _database.NewScope())
         {
             box = await scope.Db.Lots.SingleAsync(l => l.IsBox);
-            Assert.Equal(($"{batch}-BOX", batch, 5, LotStatus.AwaitingTransport, "packing"),
+            Assert.Equal(($"{batch}-U-BOX", batch, 5, LotStatus.AwaitingTransport, "packing"),
                 (box.LotNumber, box.BatchNumber, box.Quantity, box.Status, box.StationCode));
             var task = await scope.Db.TransportTasks.SingleAsync();
             Assert.Equal((box.Id, "packing", "shipping", 5), (task.LotId!.Value, task.FromStationCode, task.ToStationCode, task.Quantity));
@@ -80,7 +80,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal((5, LotStatus.Shipped, "shipping"), await StateAsync(box.Id));
         summary = await ShippingAsync();
         Assert.Equal((0, 0, 1, 5, 3600d), (summary.WaitingBoxes, summary.WaitingPieces, summary.ShippedBoxes, summary.ShippedPieces, summary.TruckRemainingSeconds));
-        Assert.Equal((batch, $"{batch}-BOX", 5), (summary.Shipments[0].BatchNumber, summary.Shipments[0].LotNumber, summary.Shipments[0].Quantity));
+        Assert.Equal((batch, $"{batch}-U-BOX", 5), (summary.Shipments[0].BatchNumber, summary.Shipments[0].LotNumber, summary.Shipments[0].Quantity));
         await using (var scope = _database.NewScope())
         {
             var shipped = await scope.Db.InventoryMovements.SingleAsync(m => m.Reason == "Shipped");
@@ -91,7 +91,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
     }
 
     [Fact]
-    public async Task Batch_is_boxed_when_its_last_outstanding_bin_is_scrapped_at_inspection()
+    public async Task Batch_waits_for_the_make_up_of_scrapped_pieces_before_it_is_boxed()
     {
         // 同一個批次：一框已經到包裝站，另一框還在品管，而且兩支都會被判尺寸不良。
         var batch = NewBatch();
@@ -108,15 +108,78 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
             Assert.False(await scope.Db.Lots.AnyAsync(l => l.IsBox));
         }
 
-        // 品管那一框整框報廢：同批次沒有別的框還在流動，只裝包好的那 1 支。
+        // 品管那一框整框報廢：報廢的 2 支自動補做，批次要等補做的料包裝完才裝箱。
         await AdvanceAsync(2);
         Assert.Equal(LotStatus.Scrapped, (await StateAsync(late.Id)).Status);
-        Assert.Equal(LotStatus.Boxed, (await StateAsync(packed.Id)).Status);
+        Assert.Equal(LotStatus.Packed, (await StateAsync(packed.Id)).Status);
+        MaterialLot makeup;
+        await using (var scope = _database.NewScope())
+        {
+            Assert.False(await scope.Db.Lots.AnyAsync(l => l.IsBox));
+            makeup = await scope.Db.Lots.SingleAsync(l => l.IsMakeup);
+            Assert.Equal((batch, 2, "raw-store"), (makeup.BatchNumber, makeup.Quantity, makeup.StationCode));
+        }
+
+        // 補做的料走完製程（這裡省略，直接放到包裝站）、包裝完：這一種零件才裝箱，數量回到原本的 3 支。
+        await using (var scope = _database.NewScope())
+        {
+            await scope.Db.TransportTasks.Where(t => t.LotId == makeup.Id).ExecuteDeleteAsync();
+            var lot = await scope.Db.Lots.SingleAsync(l => l.Id == makeup.Id);
+            scope.Db.Entry(lot).Property(l => l.CurrentStepSequence).CurrentValue = Packing;
+            lot.PlaceAt("packing", _database.Time.GetUtcNow());
+            scope.Production.OnLotArrived(lot, _database.Time.GetUtcNow());
+            await scope.Db.SaveChangesAsync();
+        }
+
+        await AdvanceAsync(0);
+        await AdvanceAsync(4);
         await using (var scope = _database.NewScope())
         {
             var box = await scope.Db.Lots.SingleAsync(l => l.IsBox);
-            Assert.Equal((1, LotStatus.AwaitingTransport, "packing"), (box.Quantity, box.Status, box.StationCode));
+            Assert.Equal((3, LotStatus.AwaitingTransport, "packing"), (box.Quantity, box.Status, box.StationCode));
         }
+    }
+
+    [Fact]
+    public async Task Each_part_gets_its_own_box_and_the_truck_only_takes_a_batch_once_every_part_has_arrived()
+    {
+        // 同一個批次：上沖已經到包裝站，下沖還在品管。
+        var batch = NewBatch();
+        await ArriveAsync("packing", Packing, 2, batch, 1, ProductParts.UpperPunch);
+        await ArriveAsync("qc", Inspection, 4, batch, 1, ProductParts.LowerPunch);
+        await AdvanceAsync(0);
+
+        // 上沖包完：不用等下沖，這一種零件自己裝一箱送去出貨站。
+        await AdvanceAsync(4);
+        MaterialLot upperBox;
+        await using (var scope = _database.NewScope())
+        {
+            upperBox = await scope.Db.Lots.SingleAsync(l => l.IsBox);
+            Assert.Equal(($"{batch}-U-BOX", ProductParts.UpperPunch, 2), (upperBox.LotNumber, upperBox.PartCode, upperBox.Quantity));
+        }
+
+        await DeliverAsync("shipping");
+        var summary = await ShippingAsync();
+        Assert.Equal((1, 0), (summary.WaitingBoxes, summary.ReadyBoxes));
+
+        // 貨車來了：下沖還沒到，上沖的箱子不載，留到下一班。
+        await AdvanceAsync(3600);
+        Assert.Equal(LotStatus.Staged, (await StateAsync(upperBox.Id)).Status);
+        Assert.Equal(0, (await ShippingAsync()).ShippedBoxes);
+
+        // 下沖檢完、包完、裝箱、送到出貨站：整批到齊。
+        await DeliverAsync("packing");
+        await AdvanceAsync(0);
+        await AdvanceAsync(8);
+        await DeliverAsync("shipping");
+        summary = await ShippingAsync();
+        Assert.Equal((2, 2), (summary.WaitingBoxes, summary.ReadyBoxes));
+
+        // 下一班貨車把兩箱一起載走。
+        await AdvanceAsync(3600);
+        summary = await ShippingAsync();
+        Assert.Equal((0, 2, 6), (summary.WaitingBoxes, summary.ShippedBoxes, summary.ShippedPieces));
+        Assert.Equal(new[] { ProductParts.LowerPunch, ProductParts.UpperPunch }, summary.Shipments.Select(s => s.PartCode).Order());
     }
 
     [Fact]
@@ -184,11 +247,12 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
     private static string NewBatch() => $"B-{Guid.NewGuid():N}"[..10];
 
     /// <summary>把批次裡的一框直接放到某站排隊（省略前面的工序）。</summary>
-    private async Task<MaterialLot> ArriveAsync(string station, int step, int quantity, string batch, int binIndex)
+    private async Task<MaterialLot> ArriveAsync(
+        string station, int step, int quantity, string batch, int binIndex, string partCode = ProductParts.UpperPunch)
     {
         await using var scope = _database.NewScope();
         var now = _database.Time.GetUtcNow();
-        var lot = MaterialLot.Receive("upper-punch", quantity, station, step, batch, binIndex, 2, 30, now);
+        var lot = MaterialLot.Receive(partCode, quantity, station, step, batch, binIndex, 2, 30, now);
         lot.PlaceAt(station, now);
         scope.Db.Lots.Add(lot);
         scope.Production.OnLotArrived(lot, now);
@@ -205,12 +269,16 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
         await scope.Production.AdvanceOperationsAsync(default);
     }
 
-    /// <summary>派出等待中的那一趟搬運並送達。</summary>
-    private async Task DeliverAsync()
+    /// <summary>派出等待中的一趟搬運並送達；指定 <paramref name="to"/> 時確認送到的是那一站。</summary>
+    private async Task DeliverAsync(string? to = null)
     {
         await using (var scope = _database.NewScope())
         {
             Assert.Equal(1, await scope.Transport.DispatchPendingAsync([Online("agv-a")], default));
+            if (to is not null)
+            {
+                Assert.Equal(to, (await scope.Db.TransportTasks.SingleAsync(t => t.Status == TransportTaskStatus.Assigned)).ToStationCode);
+            }
         }
 
         await _database.CompleteDeliveryAsync("agv-a");

@@ -70,9 +70,12 @@ public sealed class ProcessStep
     /// <summary>整爐工序的名稱，顯示用（淬火、回火、電鍍）。</summary>
     public string? StageName { get; set; }
 
-    /// <summary>某個桿徑在這道整爐工序的一爐上限。混裝時每一框占「支數 ÷ 這個值」。</summary>
-    public int BatchCapacityFor(int rodDiameterMm) =>
-        rodDiameterMm == 24 && BatchMaxPiecesRod24 > 0 ? BatchMaxPiecesRod24 : BatchMaxPieces;
+    /// <summary>
+    /// 某種零件、某個桿徑在這道整爐工序的一爐上限。混裝時每一框占「支數 ÷ 這個值」。
+    /// 中模不是桿狀，比照 30 mm（使用者 2026-10-10 同意先這樣設）。
+    /// </summary>
+    public int BatchCapacityFor(string partCode, int rodDiameterMm) =>
+        partCode != ProductParts.Die && rodDiameterMm == 24 && BatchMaxPiecesRod24 > 0 ? BatchMaxPiecesRod24 : BatchMaxPieces;
 
     /// <summary>
     /// 測試模式下這一站的專用倍率（使用者 2026-10-10：取消整體的時間加速，改成測試模式下每一站各自的倍率）。
@@ -210,8 +213,8 @@ public sealed class ProductionSettings
     public const int SingletonId = 1;
 
     public int Id { get; set; } = SingletonId;
+    /// <summary>新批次的預設數量（組）。</summary>
     public int LotQuantity { get; set; }
-    public required string PartCode { get; set; }
     public required string SourceStationCode { get; set; }
 
     /// <summary>最後一道工序完成後送往的暫存站。</summary>
@@ -272,6 +275,12 @@ public sealed class ProductionSettings
     public int MaxReworkCount { get; set; }
 
     /// <summary>
+    /// 鍍層不良的反工品累積到這麼多支才重新電鍍（使用者 2026-10-10：最少 30 支，只算反工品；
+    /// 廠內沒有其他料會再進電鍍時，不足的尾料也放行）。
+    /// </summary>
+    public int ReworkBatchMinPieces { get; set; }
+
+    /// <summary>
     /// 貨車多久來出貨站一次（秒）。使用者 2026-10-10：貨車定時來；間隔 1 小時是 Claude 挑的示範值。
     /// </summary>
     public double TruckIntervalSeconds { get; set; }
@@ -328,12 +337,13 @@ public sealed class TruckSchedule
     public void Restart(double intervalSeconds) => RemainingSeconds = intervalSeconds;
 }
 
-/// <summary>出貨紀錄（只新增）：某個批次的出貨箱被貨車載走。</summary>
+/// <summary>出貨紀錄（只新增）：某個批次某一種零件的出貨箱被貨車載走。</summary>
 public sealed class Shipment
 {
     public long Id { get; set; }
     public Guid LotId { get; set; }
     public required string BatchNumber { get; set; }
+    public required string PartCode { get; set; }
     public required string LotNumber { get; set; }
     public int Quantity { get; set; }
     public DateTimeOffset ShippedAt { get; set; }
@@ -368,8 +378,11 @@ public sealed class MaterialLot
     /// <summary>這一框的料已經反工過幾次。品管用它判斷還能不能再反工。</summary>
     public int ReworkCount { get; private set; }
 
-    /// <summary>這一筆是整批包裝後的出貨箱（使用者 2026-10-10：整批一箱），不是料框。</summary>
+    /// <summary>這一筆是整批包裝後的出貨箱（使用者 2026-10-10：整批一箱；每一種零件各一箱），不是料框。</summary>
     public bool IsBox { get; private set; }
+
+    /// <summary>這一框是品管報廢後自動補做的料（使用者 2026-10-10：缺的自動補做）。爐前等的料裡有它時可以不滿下限就開爐。</summary>
+    public bool IsMakeup { get; private set; }
 
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
@@ -387,7 +400,7 @@ public sealed class MaterialLot
         return new MaterialLot
         {
             Id = Guid.NewGuid(),
-            LotNumber = $"{batchNumber}-{binIndex:00}",
+            LotNumber = $"{batchNumber}-{ProductParts.Letter(partCode)}{binIndex:00}",
             BatchNumber = batchNumber,
             BinIndex = binIndex,
             BinCount = binCount,
@@ -509,6 +522,28 @@ public sealed class MaterialLot
         UpdatedAt = now,
     };
 
+    /// <summary>
+    /// 品管報廢了 <paramref name="quantity"/> 支：在原料倉補投同樣數量的同一種零件，重走整條製程。
+    /// 批次編號相同，所以這個批次要等補做的料包裝完才裝箱；框號是原本的框號加上 -M 與第幾次檢驗。
+    /// </summary>
+    public static MaterialLot ReceiveMakeup(MaterialLot source, int quantity, string stationCode, int? firstStep, DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid(),
+        LotNumber = $"{source.LotNumber}-M{source.ReworkCount + 1}",
+        BatchNumber = source.BatchNumber,
+        BinIndex = source.BinIndex,
+        BinCount = source.BinCount,
+        RodDiameterMm = source.RodDiameterMm,
+        PartCode = source.PartCode,
+        Quantity = quantity,
+        Status = LotStatus.AwaitingTransport,
+        StationCode = stationCode,
+        CurrentStepSequence = firstStep,
+        IsMakeup = true,
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
     /// <summary>這一框包裝完：留在包裝站，等同批次其他的框。</summary>
     public void FinishPacking(DateTimeOffset now)
     {
@@ -527,8 +562,8 @@ public sealed class MaterialLot
     }
 
     /// <summary>
-    /// 同批次已包裝的框（<paramref name="packed"/>）併成一箱，在包裝站等待搬運到出貨站。
-    /// 批次編號相同；箱號是批次編號加上 -BOX。
+    /// 同批次、同一種零件已包裝的框（<paramref name="packed"/>）併成一箱，在包裝站等待搬運到出貨站。
+    /// 批次編號相同；箱號是批次編號加上零件的字母與 -BOX。
     /// </summary>
     public static MaterialLot PackBox(IReadOnlyList<MaterialLot> packed, DateTimeOffset now)
     {
@@ -536,7 +571,7 @@ public sealed class MaterialLot
         return new MaterialLot
         {
             Id = Guid.NewGuid(),
-            LotNumber = $"{first.BatchNumber}-BOX",
+            LotNumber = $"{first.BatchNumber}-{ProductParts.Letter(first.PartCode)}-BOX",
             BatchNumber = first.BatchNumber,
             BinIndex = 1,
             BinCount = 1,

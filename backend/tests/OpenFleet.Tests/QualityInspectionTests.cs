@@ -45,7 +45,9 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         var bins = await scope.Db.Lots.OrderBy(l => l.LotNumber).ToListAsync();
 
         // 原本的框留下合格的 7 支，送往包裝站。
-        Assert.Equal(new[] { lot.LotNumber, $"{lot.LotNumber}-RP", $"{lot.LotNumber}-RS" }, bins.Select(b => b.LotNumber));
+        Assert.Equal(new[] { lot.LotNumber, $"{lot.LotNumber}-M1", $"{lot.LotNumber}-RP", $"{lot.LotNumber}-RS" }, bins.Select(b => b.LotNumber));
+        var makeup = bins[1];
+        bins.RemoveAt(1);
         Assert.Equal((7, LotStatus.AwaitingTransport, "qc", Packing, 0), (bins[0].Quantity, bins[0].Status, bins[0].StationCode, bins[0].CurrentStepSequence!.Value, bins[0].ReworkCount));
 
         // 要反工的另外裝框，批次編號相同：鍍層不良回電鍍、表面不良回拋光，各記一次反工。
@@ -63,6 +65,13 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         var result = await scope.Db.InspectionResults.SingleAsync();
         Assert.Equal((10, 7, 2, 1), (result.Inspected, result.Passed, result.Reworked, result.Scrapped));
         Assert.Equal((1, 1, 1), (result.SurfaceDefects, result.PlatingDefects, result.DimensionDefects));
+
+        // 缺的自動補做：報廢 1 支，當下就在原料倉補投 1 支同一種零件（同批次），從第一道工序重做。
+        Assert.Equal((1, true, LotStatus.AwaitingTransport, "raw-store", 1, 0, lot.PartCode, lot.RodDiameterMm),
+            (makeup.Quantity, makeup.IsMakeup, makeup.Status, makeup.StationCode, makeup.CurrentStepSequence!.Value, makeup.ReworkCount, makeup.PartCode, makeup.RodDiameterMm));
+        var replenish = await scope.Db.TransportTasks.SingleAsync(t => t.LotId == makeup.Id);
+        Assert.Equal(("raw-store", "rough", TransportTaskKind.Replenishment), (replenish.FromStationCode, replenish.ToStationCode, replenish.Kind));
+        Assert.Equal(1, (await scope.Db.InventoryMovements.SingleAsync(m => m.Reason == "MakeupReceived")).Quantity);
     }
 
     [Fact]
@@ -89,8 +98,10 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         Assert.Equal((1, LotStatus.AwaitingTransport, "qc", Packing, 1), await StateAsync(lot.Id));
 
         await using var scope = _database.NewScope();
-        Assert.Equal(1, await scope.Db.Lots.CountAsync());
-        Assert.Equal("packing", (await scope.Db.TransportTasks.SingleAsync(t => t.Status == TransportTaskStatus.Pending)).ToStationCode);
+        // 除了原本的框，只多了補做報廢那 1 支的框（框號記下是第 2 次檢驗時報廢的）。
+        Assert.Equal(new[] { lot.LotNumber, $"{lot.LotNumber}-M2" }, await scope.Db.Lots.OrderBy(l => l.LotNumber).Select(l => l.LotNumber).ToListAsync());
+        Assert.Equal(new[] { "packing", "rough" },
+            await scope.Db.TransportTasks.Where(t => t.Status == TransportTaskStatus.Pending).Select(t => t.ToStationCode).OrderBy(c => c).ToListAsync());
         var summary = await scope.Production.GetInspectionSummaryAsync(default);
         Assert.Equal((4, 1, 2, 1, 3), (summary.Inspected, summary.Passed, summary.Reworked, summary.Scrapped, summary.SurfaceDefects));
     }
@@ -105,7 +116,9 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
 
         Assert.Equal((2, LotStatus.Scrapped, "qc", null, 0), await StateAsync(lot.Id));
         await using var scope = _database.NewScope();
-        Assert.False(await scope.Db.TransportTasks.AnyAsync());
+        // 唯一的搬運是補做的那 2 支（原料倉 → 粗加工）；報廢的框本身不搬。
+        var task = await scope.Db.TransportTasks.SingleAsync();
+        Assert.Equal((2, "raw-store", "rough"), (task.Quantity, task.FromStationCode, task.ToStationCode));
 
         // 報廢的框不占用品管站：下一框照常開始檢驗。
         await ArriveAsync("qc", Inspection, 3);

@@ -318,10 +318,13 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<bool>("IsBox")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("IsMakeup")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("LotNumber")
                         .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<string>("PartCode")
                         .IsRequired()
@@ -566,13 +569,11 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<int>("MaxReworkCount")
                         .HasColumnType("integer");
 
-                    b.Property<string>("PartCode")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
                     b.Property<double>("PieceHandlingSeconds")
                         .HasColumnType("double precision");
+
+                    b.Property<int>("ReworkBatchMinPieces")
+                        .HasColumnType("integer");
 
                     b.Property<string>("SourceStationCode")
                         .IsRequired()
@@ -681,6 +682,11 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasColumnType("uuid");
 
                     b.Property<string>("LotNumber")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("PartCode")
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");

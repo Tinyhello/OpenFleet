@@ -26,7 +26,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         // 一批送到粗加工並開始加工。
         await using (var scope = _database.NewScope())
         {
-            (await scope.Production.CreateBatchAsync(null, null, default)).Single();
+            (await scope.Production.CreateBatchAsync(null, null, [ProductParts.UpperPunch], default)).Single();
         }
 
         Assert.Equal(1, await DispatchAsync(Online("agv-a"), Online("agv-s")));

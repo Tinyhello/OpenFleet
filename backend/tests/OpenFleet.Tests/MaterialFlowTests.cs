@@ -547,7 +547,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
             Assert.Equal((0.1, 1), (defaults.DefectRate, defaults.MaxReworkCount));
             // 測試模式預設關閉；各站的專用倍率：粗加工與精加工 20、淬火與回火 250、電鍍 60、拋光 10、品管 20、包裝 20；AGV 交接 40、空車 2。
             Assert.False(defaults.TestMode);
-            Assert.Equal(new[] { 20d, 20d, 250d, 250d, 60d, 10d, 20d, 20d }, defaults.Steps.Select(step => step.TestSpeed));
+            Assert.Equal(new[] { 80d, 80d, 250d, 250d, 60d, 10d, 20d, 20d }, defaults.Steps.Select(step => step.TestSpeed));
             Assert.Equal((600d, 40d, 2d), (defaults.ChangeoverSeconds, defaults.TestHandoverSpeed, defaults.TestEmptyVehicleSpeed));
             Assert.Equal((5d, 30d, 90d, 50, true),
                 (defaults.PieceHandlingSeconds, defaults.AgvHandoverSeconds, defaults.ToolChangeSeconds, defaults.ToolRequestThresholdPieces, defaults.ToolDeliveryEnabled));
@@ -566,7 +566,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         var updated = await scope.Production.UpdateSettingsAsync(settings, default);
         Assert.Equal((12, 1.5, 12d, 45d), (updated.LotQuantity, updated.PieceHandlingSeconds, updated.AgvHandoverSeconds, updated.ToolChangeSeconds));
         Assert.Equal(new[] { (4d, 100), (2d, 250) }, updated.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
-        Assert.Equal(12, ((await scope.Production.CreateBatchAsync(null, null, default)).Single()).Quantity);
+        Assert.Equal(12, ((await scope.Production.CreateBatchAsync(null, null, [ProductParts.UpperPunch], default)).Single()).Quantity);
 
         // 一個批次最多 300 支。
         await Invalid(s => s.LotQuantity = 301);
@@ -583,7 +583,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await Invalid(s => s.AgvHandoverSeconds = -1);
         await Invalid(s => s.ToolRequestThresholdPieces = -1);
         await Invalid(s => s.ToolChangeSeconds = double.NaN);
-        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(0, null, default));
+        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(0, null, [ProductParts.UpperPunch], default));
 
         async Task Invalid(Action<ProductionSettingsDto> change)
         {
@@ -608,7 +608,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     private async Task<MaterialLot> CreateLotAsync()
     {
         await using var scope = _database.NewScope();
-        var lot = (await scope.Production.CreateBatchAsync(null, null, default)).Single();
+        var lot = (await scope.Production.CreateBatchAsync(null, null, [ProductParts.UpperPunch], default)).Single();
         // 讓建立時間有先後，派工順序才是確定的。
         _database.Time.Advance(TimeSpan.FromMilliseconds(10));
         return lot;

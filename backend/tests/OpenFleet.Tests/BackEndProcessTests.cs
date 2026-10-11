@@ -37,14 +37,14 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         await using var scope = _database.NewScope();
 
         // 桿徑 30 mm 一框 30 支：100 支分成 30、30、30、10。
-        var thick = await scope.Production.CreateBatchAsync(100, 30, default);
+        var thick = await scope.Production.CreateBatchAsync(100, 30, [ProductParts.UpperPunch], default);
         Assert.Equal(new[] { 30, 30, 30, 10 }, thick.Select(b => b.Quantity));
         Assert.Equal(new[] { (1, 4), (2, 4), (3, 4), (4, 4) }, thick.Select(b => (b.BinIndex, b.BinCount)));
         Assert.Single(thick.Select(b => b.BatchNumber).Distinct());
-        Assert.Equal(thick.Select(b => $"{b.BatchNumber}-{b.BinIndex:00}"), thick.Select(b => b.LotNumber));
+        Assert.Equal(thick.Select(b => $"{b.BatchNumber}-U{b.BinIndex:00}"), thick.Select(b => b.LotNumber));
 
         // 桿徑 24 mm 一框 45 支：100 支分成 45、45、10。
-        var thin = await scope.Production.CreateBatchAsync(100, 24, default);
+        var thin = await scope.Production.CreateBatchAsync(100, 24, [ProductParts.UpperPunch], default);
         Assert.Equal(new[] { 45, 45, 10 }, thin.Select(b => b.Quantity));
         Assert.NotEqual(thick[0].BatchNumber, thin[0].BatchNumber);
 
@@ -54,10 +54,34 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         Assert.All(tasks, t => Assert.Equal(("raw-store", "rough", TransportTaskKind.Replenishment), (t.FromStationCode, t.ToStationCode, t.Kind)));
 
         // 省略時用設定的數量與 30 mm；一個批次最多 300 支；桿徑只有 24 與 30。
-        Assert.Equal((30, 30), ((await scope.Production.CreateBatchAsync(null, null, default)).Single().Quantity, 30));
-        Assert.Equal(10, (await scope.Production.CreateBatchAsync(300, 30, default)).Count);
-        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(301, 30, default));
-        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(30, 25, default));
+        Assert.Equal((30, 30), ((await scope.Production.CreateBatchAsync(null, null, [ProductParts.UpperPunch], default)).Single().Quantity, 30));
+        Assert.Equal(10, (await scope.Production.CreateBatchAsync(300, 30, [ProductParts.UpperPunch], default)).Count);
+        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(301, 30, [ProductParts.UpperPunch], default));
+        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(30, 25, [ProductParts.UpperPunch], default));
+    }
+
+    [Fact]
+    public async Task Batch_of_sets_makes_every_part_and_dies_always_go_thirty_to_a_bin()
+    {
+        await using var scope = _database.NewScope();
+
+        // 50 組、桿徑 24 mm：上沖與下沖一框 45 支（45、5），中模一框 30 個（30、20）。
+        var bins = await scope.Production.CreateBatchAsync(50, 24, null, default);
+        Assert.Equal(
+            new[]
+            {
+                ("upper-punch", "U01", 45), ("upper-punch", "U02", 5), ("lower-punch", "L01", 45), ("lower-punch", "L02", 5),
+                ("die", "D01", 30), ("die", "D02", 20),
+            },
+            bins.Select(b => (b.PartCode, b.LotNumber[(b.BatchNumber.Length + 1)..], b.Quantity)));
+        Assert.Single(bins.Select(b => b.BatchNumber).Distinct());
+        Assert.All(bins, b => Assert.Equal((2, 24), (b.BinCount, b.RodDiameterMm)));
+        Assert.Equal(6, await scope.Db.TransportTasks.CountAsync());
+
+        // 可以只做其中幾種；不認得的零件是輸入錯誤。
+        Assert.Equal(new[] { "upper-punch", "die" }, (await scope.Production.CreateBatchAsync(10, 30, ["die", "upper-punch"], default)).Select(b => b.PartCode));
+        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(10, 30, ["middle"], default));
+        await Assert.ThrowsAsync<RequestValidationException>(() => scope.Production.CreateBatchAsync(10, 30, [], default));
     }
 
     [Fact]
@@ -65,7 +89,7 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     {
         await using (var scope = _database.NewScope())
         {
-            await scope.Production.CreateBatchAsync(90, 24, default);
+            await scope.Production.CreateBatchAsync(90, 24, [ProductParts.UpperPunch], default);
         }
 
         // 粗加工的備料區容量是 30 支，但 45 支的一框至少要放得下一框；第二框要等。
@@ -158,6 +182,75 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
+    public async Task Furnace_runs_a_short_load_only_for_make_up_material_and_only_when_nothing_else_is_coming()
+    {
+        // 一般的料 30 支在淬火站等，另一框還在精加工：不到 150 支，不開爐。
+        await ArriveAsync("heat", 3, "B-A", 30);
+        await ArriveAsync("fine", 2, "B-B", 4);
+        await AdvanceAsync(0);
+        Assert.False((await StationAsync("heat")).Batch!.Running);
+
+        // 補做的 2 支也到了淬火站：等的料裡有補做品，但精加工那一框還會來，先等。
+        await ArriveMakeupAsync("heat", 3, "B-A", 2);
+        await AdvanceAsync(0);
+        Assert.False((await StationAsync("heat")).Batch!.Running);
+
+        // 精加工那一框做完、送到淬火站：前面的工序都空了，雖然只有 36 支也開爐。
+        await AdvanceAsync(8);
+        await DeliverAllAsync();
+        await AdvanceAsync(0);
+        var heat = await StationAsync("heat");
+        Assert.Equal((true, 36), (heat.Batch!.Running, heat.Batch.Quantity));
+    }
+
+    [Fact]
+    public async Task Short_load_without_make_up_material_keeps_waiting_even_when_nothing_else_is_coming()
+    {
+        await ArriveAsync("heat", 3, "B-A", 30);
+        await AdvanceAsync(0);
+        _database.Time.Advance(TimeSpan.FromHours(5));
+        await AdvanceAsync(0);
+        Assert.False((await StationAsync("heat")).Batch!.Running);
+    }
+
+    [Fact]
+    public async Task Plating_rework_waits_for_thirty_pieces_and_then_runs_like_any_other_load()
+    {
+        // 回來重鍍的 20 支在電鍍站等；還有一框在拋光（之後可能也會被判鍍層不良），所以不到 30 支先不開。
+        await ArriveReworkAsync("plating", 5, "B-A", 20);
+        await ArriveAsync("polish", 6, "B-B", 10);
+        await AdvanceAsync(0);
+        var plating = await StationAsync("plating");
+        Assert.Equal((false, 20), (plating.Batch!.Running, plating.InboundQuantity));
+
+        // 新料照常「有料就開」，不會被等待中的反工品擋住，也不會順便把反工品帶進去。
+        await ArriveAsync("plating", 5, "B-C", 5);
+        await AdvanceAsync(0);
+        plating = await StationAsync("plating");
+        Assert.Equal((true, 5, 20), (plating.Batch!.Running, plating.Batch.Quantity, plating.InboundQuantity));
+
+        // 另一個批次的反工品 10 支也到了：合計滿 30 支，等這一爐做完就開（可以跨批次）。
+        await ArriveReworkAsync("plating", 5, "B-D", 10);
+        await AdvanceAsync(60);
+        plating = await StationAsync("plating");
+        Assert.Equal((true, 30, 0), (plating.Batch!.Running, plating.Batch.Quantity, plating.InboundQuantity));
+    }
+
+    [Fact]
+    public async Task Plating_rework_tail_is_released_when_no_other_material_can_still_reach_plating()
+    {
+        // 反工品只有 3 支；另一框還在品管，檢完之前可能還有鍍層不良，先等。
+        await ArriveReworkAsync("plating", 5, "B-A", 3);
+        await ArriveAsync("qc", 7, "B-A", 2);
+        await AdvanceAsync(0);
+        Assert.False((await StationAsync("plating")).Batch!.Running);
+
+        // 品管那一框檢完、全部合格（往包裝去了）：品管之前已經沒有別的料，不足 30 支的尾料也放行。
+        await AdvanceAsync(4);
+        Assert.Equal((true, 3), ((await StationAsync("plating")).Batch!.Running, (await StationAsync("plating")).Batch!.Quantity));
+    }
+
+    [Fact]
     public async Task Plating_load_is_limited_per_rod_diameter_and_the_two_diameters_can_be_mixed()
     {
         // 一爐 30 mm 最多 40 支、24 mm 最多 56 支。30 mm 的 30 支占 3/4 爐；
@@ -230,6 +323,14 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         rough = await StationAsync("rough");
         Assert.Equal((false, 2), (rough.Machining!.ChangingOver, rough.Machining.PiecesCompleted));
 
+        // 同桿徑、換一種零件也要換線：B-B 做完後接著做同批次的下沖。
+        await AdvanceAsync(1);
+        await DeliverAllAsync();
+        await ArrivePartAsync("rough", 1, "B-B", ProductParts.LowerPunch, 24, [5]);
+        await AdvanceAsync(0);
+        rough = await StationAsync("rough");
+        Assert.Equal((true, 5), (rough.Machining!.ChangingOver, rough.Machining.Quantity));
+
         // 拋光不是機床：桿徑不同也不換線。
         await ArriveRodAsync("polish", 6, "B-D", 30, 5);
         await AdvanceAsync(10);
@@ -275,14 +376,28 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     private Task ArriveAsync(string station, int step, string batchNumber, params int[] bins) =>
         ArriveRodAsync(station, step, batchNumber, 30, bins);
 
-    private async Task ArriveRodAsync(string station, int step, string batchNumber, int rodDiameterMm, params int[] bins)
+    private Task ArriveRodAsync(string station, int step, string batchNumber, int rodDiameterMm, params int[] bins) =>
+        ArrivePartAsync(station, step, batchNumber, ProductParts.UpperPunch, rodDiameterMm, bins);
+
+    /// <summary>回來重鍍的反工品（已經反工過一次）。</summary>
+    private Task ArriveReworkAsync(string station, int step, string batchNumber, params int[] bins) =>
+        ArrivePartAsync(station, step, batchNumber, ProductParts.UpperPunch, 30, bins, reworkCount: 1);
+
+    /// <summary>品管報廢後自動補做的料。</summary>
+    private Task ArriveMakeupAsync(string station, int step, string batchNumber, params int[] bins) =>
+        ArrivePartAsync(station, step, batchNumber, ProductParts.UpperPunch, 30, bins, makeup: true);
+
+    private async Task ArrivePartAsync(
+        string station, int step, string batchNumber, string partCode, int rodDiameterMm, int[] bins, int reworkCount = 0, bool makeup = false)
     {
         await using var scope = _database.NewScope();
         var now = _database.Time.GetUtcNow();
         var existing = await scope.Db.Lots.CountAsync(l => l.BatchNumber == batchNumber);
         for (var i = 0; i < bins.Length; i++)
         {
-            var lot = MaterialLot.Receive("upper-punch", bins[i], station, step, batchNumber, existing + i + 1, existing + bins.Length, rodDiameterMm, now);
+            var lot = MaterialLot.Receive(partCode, bins[i], station, step, batchNumber, existing + i + 1, existing + bins.Length, rodDiameterMm, now);
+            scope.Db.Entry(lot).Property(l => l.ReworkCount).CurrentValue = reworkCount;
+            scope.Db.Entry(lot).Property(l => l.IsMakeup).CurrentValue = makeup;
             lot.PlaceAt(station, now);
             scope.Db.Lots.Add(lot);
             scope.Production.OnLotArrived(lot, now.AddMilliseconds(i));

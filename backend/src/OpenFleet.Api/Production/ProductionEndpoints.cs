@@ -29,7 +29,7 @@ public static class ProductionEndpoints
             production.UpdateSettingsAsync(request, ct));
 
         api.MapGet("/lots", async (OpenFleetDbContext db, CancellationToken ct) =>
-            (await db.Lots.AsNoTracking().OrderByDescending(l => l.CreatedAt).ThenBy(l => l.BinIndex).Take(200).ToListAsync(ct)).Select(ToDto));
+            (await db.Lots.AsNoTracking().OrderByDescending(l => l.CreatedAt).ThenBy(l => l.BinIndex).Take(500).ToListAsync(ct)).Select(ToDto));
 
         // 追蹤一個批次：目前位置、每次位置異動、每道工序的加工紀錄、每一趟搬運。
         api.MapGet("/lots/{id:guid}", async (Guid id, OpenFleetDbContext db, CancellationToken ct) =>
@@ -108,7 +108,7 @@ public static class ProductionEndpoints
         // 建立一個批次；回應是它分成的每一框。
         api.MapPost("/lots", async (CreateLotRequest? request, ProductionService production, CancellationToken ct) =>
         {
-            var bins = await production.CreateBatchAsync(request?.Quantity, request?.RodDiameterMm, ct);
+            var bins = await production.CreateBatchAsync(request?.Quantity, request?.RodDiameterMm, request?.PartCodes, ct);
             return Results.Created("/api/lots", bins.Select(ToDto).ToList());
         });
 
@@ -142,6 +142,7 @@ public static class ProductionEndpoints
         Status = lot.Status,
         ReworkCount = lot.ReworkCount,
         IsBox = lot.IsBox,
+        IsMakeup = lot.IsMakeup,
         StationCode = lot.StationCode,
         VehicleId = lot.VehicleId,
         CurrentStepSequence = lot.CurrentStepSequence,

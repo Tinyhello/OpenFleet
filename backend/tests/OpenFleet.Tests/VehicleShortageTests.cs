@@ -186,7 +186,7 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
     private async Task<MaterialLot> CreateLotAsync()
     {
         await using var scope = _database.NewScope();
-        var lot = (await scope.Production.CreateBatchAsync(null, null, default)).Single();
+        var lot = (await scope.Production.CreateBatchAsync(null, null, [ProductParts.UpperPunch], default)).Single();
         _database.Time.Advance(TimeSpan.FromMilliseconds(10));
         return lot;
     }

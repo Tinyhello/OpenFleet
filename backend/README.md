@@ -61,13 +61,13 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `POST /api/vehicles/{id}/ping` | P1 通訊驗證指令 |
 | `GET /api/stations` | 站點與交接點座標 |
 | `GET /api/stations/status` | 每站的備料區、成品區件數與容量、加工進度、刀具狀態；整爐工序的站另有開爐門檻、這一爐的階段與剩餘時間（顯示端輪詢用） |
-| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具、機床換線時間；測試模式的開關與倍率（各站、AGV 交接、空車車速）；逐件工序的每件加工秒數與刀具壽命；整爐工序的開爐下限、一爐上限（電鍍依桿徑）與時間；品管的不良率與反工上限；貨車間隔。PUT 是整份取代，不合規則回 400 |
-| `POST /api/lots` | 模擬收料：在原料倉建立一個批次。可帶 `{"quantity": n, "rodDiameterMm": 24 或 30}`；批次依桿徑的料框容量分成多框，每一框各建立一趟搬運。回應是每一框 |
+| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具、機床換線時間；測試模式的開關與倍率（各站、AGV 交接、空車車速）；逐件工序的每件加工秒數與刀具壽命；整爐工序的開爐下限、一爐上限（電鍍依桿徑）與時間；品管的不良率、反工上限與反工重鍍的下限；貨車間隔。PUT 是整份取代，不合規則回 400 |
+| `POST /api/lots` | 模擬收料：在原料倉建立一個批次。可帶 `{"quantity": 組數, "rodDiameterMm": 24 或 30, "partCodes": [...]}`；一組是上沖、下沖、中模各一（`partCodes` 可以只做其中幾種），每一種零件依料框容量分成多框，每一框各建立一趟搬運。回應是每一框 |
 | `GET /api/lots`、`GET /api/lots/{id}` | 料框清單（同一批次的框有相同的 `batchNumber`）；單一框的完整追蹤 |
 | `GET /api/transport-tasks`、`GET /api/transport-tasks/{id}`、`.../{id}/events` | 搬運任務、派工狀態與狀態歷史。`needsAttention` 為 true 表示搬運失敗、等人工處理 |
 | `POST /api/transport-tasks/{id}/resolve` | 人工處理失敗的搬運：`{"resolution": "returnToSource"}`（已放回取料站，系統重新派一趟）或 `"deliverToDestination"`（已由人工送達）。車輛在線且任務還在進行時回 400 |
 | `GET /api/inspection` | 品管的累計結果：檢驗、合格、反工、報廢的支數，以及表面／鍍層／尺寸三種不良原因的支數 |
-| `GET /api/shipping` | 出貨：下一班貨車還要多久、已包裝在等同批次到齊的支數、在出貨站等貨車的箱數與支數、累計出貨與最近 20 筆出貨紀錄 |
+| `GET /api/shipping` | 出貨：下一班貨車還要多久、已包裝在等同零件的框到齊的支數、在出貨站等貨車的箱數與支數（其中整批到齊的箱數）、累計出貨與最近 20 筆出貨紀錄 |
 | `GET /api/shortage` | 缺車統計（車都在忙）：此刻叫不到車的任務數、任務等車的累計，以及各工序機台因缺車停下來的時間（等不到料、成品沒被搬走、等刀）。車型全部離線是重大事故，另外列在 `offline…` 欄位，不算進缺車。秒數是實際時間 |
 | `GET /api/shortage/waits`、`GET /api/shortage/delays` | 最近 100 筆缺車等待區間（每個任務）與機台耽誤區間（每台機台） |
 | `POST /api/demo/reset` | 清除所有批次與搬運資料、刀具計數歸零（設定、站點、車輛保留）。只供本機示範 |
@@ -86,7 +86,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | 路網 | 資料庫 `RouteNodes`／`RouteEdges`（`DemoRoadNetwork` 建立） | 內外兩條車道、車道間的連接、站點與車位的支線；須與 Unity `FactoryLayout` 的車道位置相同 |
 | 交通控制 | 後端 `Traffic:*` | 每 0.2 秒一輪、前方預約 2 個節點、被擋 4 秒後改道 |
 | 車速 | 模擬器 `Simulator:Speed`、`FullLoadSpeed`、`LoadCapacity` | 空車 2 m/s；載貨依件數線性遞減，滿載 30 件時 1 m/s |
-| 批量 | 資料庫，由 Unity 面板或 `PUT /api/settings` 修改 | 30 件 |
+| 批量 | 資料庫，由 Unity 面板或 `PUT /api/settings` 修改 | 30 組（三種零件各 30） |
 | 機台取放 | 同上 | 每件 5 秒：加工前取一件、加工後取出，各一次。每件的週期＝5 ＋ 加工時間 ＋ 5 |
 | AGV 交接 | 同上 | 一框 30 秒，和件數無關；取料、卸料各一次，由後端寫進搬運指令 |
 | 加工 | 同上 | 每件 2 秒，逐件計數，整批做完才放行 |

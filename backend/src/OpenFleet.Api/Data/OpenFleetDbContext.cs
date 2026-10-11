@@ -107,7 +107,6 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         model.Entity<ProductionSettings>(e =>
         {
             e.Property(s => s.Id).ValueGeneratedNever();
-            e.Property(s => s.PartCode).HasMaxLength(32);
             e.Property(s => s.SourceStationCode).HasMaxLength(32);
             e.Property(s => s.BufferStationCode).HasMaxLength(32);
             e.Property(s => s.ToolStoreStationCode).HasMaxLength(32);
@@ -125,7 +124,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
                 t.HasCheckConstraint("CK_Lots_Quantity", "\"Quantity\" > 0");
             });
             e.Property(l => l.Id).ValueGeneratedNever();
-            e.Property(l => l.LotNumber).HasMaxLength(32);
+            // 框號會一路加上後綴（零件、反工、補做），所以比批次編號長。
+            e.Property(l => l.LotNumber).HasMaxLength(64);
             e.Property(l => l.BatchNumber).HasMaxLength(32);
             e.HasIndex(l => l.BatchNumber);
             e.Property(l => l.PartCode).HasMaxLength(32);
@@ -154,7 +154,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         model.Entity<Shipment>(e =>
         {
             e.Property(s => s.BatchNumber).HasMaxLength(32);
-            e.Property(s => s.LotNumber).HasMaxLength(32);
+            e.Property(s => s.PartCode).HasMaxLength(32);
+            e.Property(s => s.LotNumber).HasMaxLength(64);
             e.HasOne<MaterialLot>().WithMany().HasForeignKey(s => s.LotId).OnDelete(DeleteBehavior.Cascade);
         });
 

@@ -87,6 +87,43 @@ namespace OpenFleet.Contracts
         ToolDelivery,
     }
 
+    /// <summary>
+    /// 一組產品（一套沖模）包含的三種零件。建立批次時每一種各做同樣的數量，各自分框、各自走完整條製程，
+    /// 包裝後各裝一箱；同批次的箱子在出貨站到齊後才由貨車載走。
+    /// </summary>
+    public static class ProductParts
+    {
+        public const string UpperPunch = "upper-punch";
+        public const string LowerPunch = "lower-punch";
+        public const string Die = "die";
+
+        /// <summary>一組裡的每一種零件，依這個順序建立與顯示。</summary>
+        public static readonly string[] All = { UpperPunch, LowerPunch, Die };
+
+        public static string Name(string partCode)
+        {
+            switch (partCode)
+            {
+                case UpperPunch: return "上沖";
+                case LowerPunch: return "下沖";
+                case Die: return "中模";
+                default: return partCode;
+            }
+        }
+
+        /// <summary>框號裡代表零件的字母（U、L、D）。</summary>
+        public static string Letter(string partCode)
+        {
+            switch (partCode)
+            {
+                case UpperPunch: return "U";
+                case LowerPunch: return "L";
+                case Die: return "D";
+                default: return "X";
+            }
+        }
+    }
+
     /// <summary>搬運指令裡 LoadCode 的固定值。</summary>
     public static class LoadCodes
     {
@@ -176,13 +213,12 @@ namespace OpenFleet.Contracts
     /// <summary>可由面板修改的示範設定；GET 與 PUT /api/settings 共用。</summary>
     public sealed class ProductionSettingsDto
     {
-        /// <summary>新批次的預設數量（支）。一個批次會依料框容量分成好幾框。</summary>
+        /// <summary>新批次的預設數量（組）。一組是上沖、下沖、中模各一；每一種零件各自依料框容量分成好幾框。</summary>
         public int LotQuantity { get; set; }
 
-        /// <summary>唯讀：一個批次的數量上限。PUT 時忽略。</summary>
+        /// <summary>唯讀：一個批次的數量上限（組）。PUT 時忽略。</summary>
         public int MaxLotQuantity { get; set; }
 
-        public string PartCode { get; set; } = string.Empty;
         public string SourceStationCode { get; set; } = string.Empty;
         public string BufferStationCode { get; set; } = string.Empty;
 
@@ -230,7 +266,13 @@ namespace OpenFleet.Contracts
         /// <summary>同一支最多可以反工幾次；已經反工這麼多次的料再被判不良就報廢。0 表示不反工。</summary>
         public int MaxReworkCount { get; set; }
 
-        /// <summary>貨車多久來出貨站一次（秒）。來的時候把出貨站上的出貨箱全部載走。</summary>
+        /// <summary>
+        /// 鍍層不良的反工品要累積到這麼多支才重新電鍍（只算反工品，可以跨批次）。
+        /// 廠內已經沒有其他料會再進電鍍時，不足這個數量的也放行。
+        /// </summary>
+        public int ReworkBatchMinPieces { get; set; }
+
+        /// <summary>貨車多久來出貨站一次（秒）。來的時候把整批到齊的出貨箱載走。</summary>
         public double TruckIntervalSeconds { get; set; }
 
         /// <summary>測試模式下貨車間隔加快的倍率。</summary>
@@ -243,8 +285,11 @@ namespace OpenFleet.Contracts
     /// <summary>建立一個批次（POST /api/lots）；回應是這個批次分成的每一框。</summary>
     public sealed class CreateLotRequest
     {
-        /// <summary>整個批次的支數；省略時使用設定的 LotQuantity。</summary>
+        /// <summary>整個批次的組數（每一種零件各做這麼多）；省略時使用設定的 LotQuantity。</summary>
         public int? Quantity { get; set; }
+
+        /// <summary>只做其中幾種零件（<see cref="ProductParts"/> 的代碼）；省略時三種都做。</summary>
+        public List<string>? PartCodes { get; set; }
 
         /// <summary>桿徑（mm）：24 或 30，決定一框裝幾支；省略時為 30。</summary>
         public int? RodDiameterMm { get; set; }
@@ -272,8 +317,11 @@ namespace OpenFleet.Contracts
         /// <summary>這一框的料已經反工過幾次；0 表示沒有反工過。</summary>
         public int ReworkCount { get; set; }
 
-        /// <summary>這一筆是整批包裝後的出貨箱，不是料框。</summary>
+        /// <summary>這一筆是整批包裝後的出貨箱，不是料框。同批次每一種零件各一箱。</summary>
         public bool IsBox { get; set; }
+
+        /// <summary>這一框是品管報廢後自動補做的料。</summary>
+        public bool IsMakeup { get; set; }
 
         /// <summary>批次所在站點；在車上時為 null。</summary>
         public string? StationCode { get; set; }
@@ -605,10 +653,11 @@ namespace OpenFleet.Contracts
         public int DimensionDefects { get; set; }
     }
 
-    /// <summary>一次出貨：一個批次的出貨箱被貨車載走。</summary>
+    /// <summary>一次出貨：一個批次某一種零件的出貨箱被貨車載走。</summary>
     public sealed class ShipmentDto
     {
         public string BatchNumber { get; set; } = string.Empty;
+        public string PartCode { get; set; } = string.Empty;
         public string LotNumber { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public DateTimeOffset ShippedAt { get; set; }
@@ -624,11 +673,14 @@ namespace OpenFleet.Contracts
         /// <summary>在包裝站已經包好、還在等同批次其他框的支數。</summary>
         public int PackedPieces { get; set; }
 
-        /// <summary>已到出貨站、等貨車的箱數與支數。</summary>
+        /// <summary>已到出貨站、等貨車的箱數與支數（包含同批次其他零件還沒到齊的）。</summary>
         public int WaitingBoxes { get; set; }
         public int WaitingPieces { get; set; }
 
-        /// <summary>累計已出貨的箱數（一個批次一箱）與支數。</summary>
+        /// <summary>其中整批已經到齊、下一班貨車就會載走的箱數。</summary>
+        public int ReadyBoxes { get; set; }
+
+        /// <summary>累計已出貨的箱數（一個批次每種零件一箱）與支數。</summary>
         public int ShippedBoxes { get; set; }
         public int ShippedPieces { get; set; }
 
