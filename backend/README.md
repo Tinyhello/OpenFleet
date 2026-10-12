@@ -153,21 +153,6 @@ Api <─ telemetry (QoS0，序號) ───────────────
 
 - 車輛位置與連線狀態仍只在記憶體；後端重啟後由遙測重建，並換新的 `stateEpoch`。
 - 斷線期間的訊息不補收（CleanSession）；Unity 每次連上 Broker 都重新取 HTTP 快照，並以 `stateEpoch` + `version` 對齊。
-- 沒有拆批、載具、刀具配送與庫存預留；搬運失敗後沒有恢復流程（見 P2實作紀錄第 7、9 節）。
+- 沒有拆批、載具、刀具配送與庫存預留；搬運失敗後沒有恢復流程（見 P2實作紀錄第 7、8 節）。
 - 路段預約只存在記憶體，後端重啟後由車輛位置重建；交通的已知限制見 P3實作紀錄第 5 節。
 - Mosquitto 允許匿名、未加密；PostgreSQL 帳密寫在設定檔；HTTP API 沒有驗證。只能在本機開發使用。
-
-## 對照 Unity 經驗的學習點
-
-| 程式位置 | .NET 概念 | Unity 對照 |
-| --- | --- | --- |
-| `MessagingServiceCollectionExtensions` | DI、Singleton、同一實例註冊成兩個服務 | 場景中唯一的 Manager 物件 |
-| `MqttConnection.ExecuteAsync` | `BackgroundService`、`CancellationToken`、重連迴圈 | 常駐 Coroutine，但這裡是真的非同步 I/O、不在主執行緒 |
-| `IMqttMessageHandler` 的 publisher 參數 | 避免建構子循環相依 | 避免兩個 MonoBehaviour 在 Awake 互抓 |
-| `StateChangeQueue`（`Channel<T>`） | 生產者／消費者、背壓策略 | Unity 端「MQTT 執行緒 → 主執行緒」佇列是同一個概念 |
-| `FleetStateStore` | `lock`、回傳複本避免共享可變狀態 | 多個元件同時改同一份資料 |
-| `VehicleEventProcessor`（Inbox）、`SimulatedFleet.HandleCommand` | 冪等性 | 網路遊戲的重送封包處理 |
-| `FleetStateStoreTests` | `TimeProvider`／`FakeTimeProvider` 控制時間 | 以 `Time.deltaTime` 注入做可測試邏輯 |
-| `EndToEndTests` | `WebApplicationFactory`、整合測試 | PlayMode 測試 |
-
-P2 新增的學習對照（DI 生命週期、領域模型、交易、並行控制、Outbox／Inbox）見 [P2實作紀錄.md](../document/P2實作紀錄.md) 第 8 節。
