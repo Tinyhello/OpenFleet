@@ -28,7 +28,7 @@
 | `Assets/OpenFleet/Scripts/StationAnchor.cs` | 場景中的站點與後端站點代碼的對應（物件名稱＝站點代碼，執行時由控制器加上）；進度條的位置、備料區／成品區有料時要顯示的物件 |
 | `Assets/OpenFleet/Scripts/Billboard.cs` | 文字標籤面向攝影機 |
 | `Assets/OpenFleet/Editor/FactorySceneBuilder.cs` | 選單 **OpenFleet → Build Factory Scene**：產生材質、`Resources` 底下的 AGV Prefab 與 UI 設定、`Factory.unity`（會覆寫） |
-| `Assets/OpenFleet/Editor/PlayerBuilder.cs` | 選單 **OpenFleet → Build Windows Player**：重建場景並建置 `Builds/Windows/OpenFleet.exe` |
+| `Assets/OpenFleet/Editor/PlayerBuilder.cs` | 選單 **OpenFleet → Build Windows Player**：重建場景並建置 `Builds/Windows/OpenFleet.exe`（Development build）。**Build Windows Player (Release)** 輸出到同一個位置，畫面右下角沒有 Development Build 字樣，錄影、展示用 |
 | `Assets/OpenFleet/Resources/Prefabs/` | AGV Prefab（`AGV_Large`、`AGV_Small`、`AGV_Unknown`），執行時以 `Resources.Load` 載入 |
 | `Assets/OpenFleet/Resources/UI/` | UI Toolkit 的 PanelSettings 與主題（由 Build Factory Scene 產生），執行時以 `Resources.Load` 載入 |
 | `Assets/OpenFleet/Editor/FactoryLayout.cs` | 暫定佈局：站點位置、內外兩條車道（須與後端的示範路網 `DemoRoadNetwork` 相同） |
@@ -64,6 +64,8 @@
    - **粗加工、精加工**接著做的那一框桿徑不同時，加工列會先顯示「換線」與進度。
    - **拋光**：和車床一樣逐件加工，但沒有刀具列。
    - **原料倉、暫存點**：有料時顯示件數。
+
+錄影或截圖時用 `OpenFleet.exe -hide-panels` 啟動：不顯示左上的車輛面板與右邊的操作面板，機台與車輛上的進度條照常顯示。這時批次要用 API 建立（見 backend/README.md）。
 
 中文輸入法開啟時，數字鍵會被輸入法攔截，輸入框打不進數字；請用滑桿，或先切到英數模式。
 

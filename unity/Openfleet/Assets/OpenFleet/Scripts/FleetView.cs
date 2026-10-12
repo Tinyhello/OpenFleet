@@ -136,6 +136,11 @@ namespace OpenFleet.Unity
         // 驗證用的簡易面板；正式 UI（任務清單、車輛詳情）之後再做。
         private void OnGUI()
         {
+            if (PresentationController.PanelsHidden)
+            {
+                return;
+            }
+
             // 高度依行數計算，避免空白的背景擋住場景。
             var cameraController = _presentation.CameraController;
             var lines = _presentation.VehicleCount + (cameraController != null ? 2 : 1);

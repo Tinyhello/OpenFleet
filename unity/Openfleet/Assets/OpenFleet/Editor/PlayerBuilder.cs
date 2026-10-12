@@ -5,7 +5,8 @@ using UnityEngine;
 namespace OpenFleet.Unity.Editor
 {
     /// <summary>
-    /// 建置 Windows 桌面版（Development build）。Editor 不在前景時 Play Mode 幾乎不更新畫面，所以驗證用 Player。
+    /// 建置 Windows 桌面版。Editor 不在前景時 Play Mode 幾乎不更新畫面，所以驗證用 Player。
+    /// 平常用 Development build；錄影、展示用 Release（畫面右下角沒有 Development Build 字樣）。兩者輸出到同一個位置。
     /// 也可以從命令列執行：Unity -batchmode -quit -projectPath unity/Openfleet -executeMethod OpenFleet.Unity.Editor.PlayerBuilder.BuildWindows
     /// </summary>
     internal static class PlayerBuilder
@@ -13,7 +14,12 @@ namespace OpenFleet.Unity.Editor
         private const string OutputPath = "Builds/Windows/OpenFleet.exe";
 
         [MenuItem("OpenFleet/Build Windows Player")]
-        public static void BuildWindows()
+        public static void BuildWindows() => Build(BuildOptions.Development);
+
+        [MenuItem("OpenFleet/Build Windows Player (Release)")]
+        public static void BuildWindowsRelease() => Build(BuildOptions.None);
+
+        private static void Build(BuildOptions options)
         {
             FactorySceneBuilder.Build();
 
@@ -22,7 +28,7 @@ namespace OpenFleet.Unity.Editor
                 scenes = new[] { FactorySceneBuilder.ScenePath },
                 locationPathName = OutputPath,
                 target = BuildTarget.StandaloneWindows64,
-                options = BuildOptions.Development,
+                options = options,
             });
 
             if (report.summary.result != BuildResult.Succeeded)
@@ -37,7 +43,7 @@ namespace OpenFleet.Unity.Editor
                 return;
             }
 
-            Debug.Log($"[OpenFleet] Player built: {OutputPath} ({report.summary.totalSize / (1024 * 1024)} MB)");
+            Debug.Log($"[OpenFleet] Player built ({options}): {OutputPath} ({report.summary.totalSize / (1024 * 1024)} MB)");
         }
     }
 }

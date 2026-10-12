@@ -86,6 +86,11 @@ namespace OpenFleet.Unity
         /// <summary>場景中的站點，以後端的站點代碼為鍵。</summary>
         public IReadOnlyDictionary<string, StationAnchor> Stations => _stations;
 
+        /// <summary>
+        /// 以 <c>-hide-panels</c> 啟動時不顯示車輛面板與操作面板（錄影、截圖用）；機台與車輛上的進度條照常顯示。
+        /// </summary>
+        public static bool PanelsHidden { get; } = System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-hide-panels") >= 0;
+
         private void Awake()
         {
             Instance = this;
@@ -103,7 +108,10 @@ namespace OpenFleet.Unity
             }
 
             CreateDocument<StatusOverlay>("Status Overlay", panelSettings, -1);
-            CreateDocument<ProductionPanel>("Production Panel", panelSettings, 0);
+            if (!PanelsHidden)
+            {
+                CreateDocument<ProductionPanel>("Production Panel", panelSettings, 0);
+            }
         }
 
         private void OnDestroy()
