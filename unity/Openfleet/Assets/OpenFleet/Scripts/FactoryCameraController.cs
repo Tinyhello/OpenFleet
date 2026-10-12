@@ -9,10 +9,10 @@ namespace OpenFleet.Unity
     /// </summary>
     public sealed class FactoryCameraController : MonoBehaviour
     {
-        [SerializeField] private Vector3 target = new Vector3(0f, 0f, 1f);
+        [SerializeField] private Vector3 target = new Vector3(0f, 0f, -1.5f);
         [SerializeField] private float yaw;
         [SerializeField] private float pitch = 50f;
-        [SerializeField] private float distance = 42f;
+        [SerializeField] private float distance = 50f;
         [SerializeField] private float minDistance = 5f;
         [SerializeField] private float maxDistance = 80f;
         [SerializeField] private float rotateSpeed = 0.25f;

@@ -31,6 +31,7 @@ def build():
     for sx in (-1, 1):
         for i in range(3):
             box(body, "Vent", (sx * 0.276, 0.17, 0.12 + i * 0.05), (0.004, 0.06, 0.02), "Sensor", bevel=0.0)
+    merge(body)
 
     tray = group(r, "Tool Tray")
     box(tray, "Tray", (0, 0.37, -0.06), (0.45, 0.03, 0.52), "Steel", bevel=0.006)
@@ -41,11 +42,13 @@ def build():
     for ix in range(2):
         for iz in range(3):
             tool_holder(tray, (-0.1 + ix * 0.2, 0.45, -0.22 + iz * 0.16))
+    merge(tray)
 
     lidar = group(r, "Lidar", (0, 0, 0.32))
     cyl(lidar, "Base", (0, 0.38, 0), 0.11, 0.02, "Steel", segments=20, bevel=0.004)
     cyl(lidar, "Head", (0, 0.41, 0), 0.09, 0.04, "Sensor", segments=20, bevel=0.008)
     cyl(lidar, "Cap", (0, 0.433, 0), 0.095, 0.008, "AgvSmallAccent", segments=20, bevel=0.003)
+    merge(lidar)
 
     wheels = group(r, "Wheels")
     for x in (-0.26, 0.26):
@@ -53,4 +56,5 @@ def build():
             w = group(wheels, "Wheel", (x, 0.08, z))
             cyl(w, "Tire", (0, 0, 0), 0.16, 0.06, "Rubber", axis="x", segments=24, bevel=0.014)
             cyl(w, "Hub", (0, 0, 0), 0.08, 0.064, "AgvSmallAccent", axis="x", segments=16, bevel=0.004)
+    merge(wheels)
     return save_and_export(NAME)

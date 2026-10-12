@@ -141,18 +141,24 @@ public sealed class RoadNetwork
 }
 
 /// <summary>
-/// 示範路網（暫定佈局）：環狀走道有內外兩條車道，車道之間在各站的位置有連接路段；
+/// 示範路網（暫定佈局）：環狀走道有內外兩條車道，車道之間每 4 m 有連接路段；
 /// 站點交接點與充電車位是只有一個出入口的支線。啟動時寫入資料庫（RouteNodes／RouteEdges）。
 /// 節點間距不小於車長，所以「一個節點只給一台車」就足以保證車輛不會重疊。
+/// 交接點的位置必須和 DatabaseInitializer 的站點、Unity 的 FactoryLayout 相同。
 /// </summary>
 public static class DemoRoadNetwork
 {
-    private const double OuterZ = 6, OuterX = 18, InnerZ = 4.2, InnerX = 16.2, HandoffZ = 7.6, ParkingZ = 0.2;
+    private const double OuterZ = 7, OuterX = 22, InnerZ = 5.2, InnerX = 20.2, ParkingZ = 0.2;
 
-    /// <summary>回火爐在走道內側的島區中央，交接點接在內圈車道下邊（距離和其他站一樣是 1.6 m）。</summary>
-    private const double TemperX = 0, TemperHandoffZ = -2.6;
+    /// <summary>外圈站點的交接點離外圈車道 2.4 m：停在交接點上的車不會壓到車道。</summary>
+    public const double HandoffZ = 9.4;
 
-    private static readonly double[] StationColumns = [-16, -8, 0, 8, 16];
+    /// <summary>刀具庫在走道內側的島區中央，交接點接在內圈車道下邊。</summary>
+    public const double IslandX = 0, IslandHandoffZ = -3.2;
+
+    /// <summary>下排六站（原料倉到電鍍）與上排四站（出貨、包裝、品管、拋光）的位置；上排的 -12 與 12 是成品倉與雜物倉庫，沒有交接點。</summary>
+    private static readonly double[] BottomColumns = [-20, -12, -4, 4, 12, 20];
+    private static readonly double[] TopColumns = [-20, -4, 4, 20];
     private static readonly double[] ParkingColumns = [-10.3, -8, -5.7];
 
     public static string Code(double x, double z) => FormattableString.Invariant($"{x:0.##},{z:0.##}");
@@ -181,7 +187,7 @@ public static class DemoRoadNetwork
         }
 
         // 外圈車道：下邊與上邊每 4 m 一個節點，兩側各兩個。
-        double[] outerXs = [-16, -12, -8, -4, 0, 4, 8, 12, 16];
+        double[] outerXs = [-20, -16, -12, -8, -4, 0, 4, 8, 12, 16, 20];
         var outer = new List<string> { Add(-OuterX, -OuterZ) };
         outer.AddRange(outerXs.Select(x => Add(x, -OuterZ)));
         outer.AddRange([Add(OuterX, -OuterZ), Add(OuterX, -2), Add(OuterX, 2), Add(OuterX, OuterZ)]);
@@ -190,8 +196,8 @@ public static class DemoRoadNetwork
         Ring(outer);
 
         // 內圈車道：轉角兼作最外側兩站的連接點；上邊多了三個充電車位的出入口。
-        double[] innerBottomXs = [-12, -8, -4, 0, 4, 8, 12];
-        double[] innerTopXs = [12, 8, 4, 0, -5.7, -8, -10.3];
+        double[] innerBottomXs = [-16, -12, -8, -4, 0, 4, 8, 12, 16];
+        double[] innerTopXs = [16, 12, 8, 4, 0, -5.7, -8, -10.3, -16];
         var inner = new List<string> { Add(-InnerX, -InnerZ) };
         inner.AddRange(innerBottomXs.Select(x => Add(x, -InnerZ)));
         inner.AddRange([Add(InnerX, -InnerZ), Add(InnerX, 0), Add(InnerX, InnerZ)]);
@@ -202,7 +208,7 @@ public static class DemoRoadNetwork
         // 內外車道之間的連接路段。
         foreach (var side in new[] { -1d, 1d })
         {
-            foreach (var x in new double[] { -12, -8, -4, 0, 4, 8, 12 })
+            foreach (var x in innerBottomXs)
             {
                 if (nodes.ContainsKey(Code(x, side * InnerZ)))
                 {
@@ -210,21 +216,23 @@ public static class DemoRoadNetwork
                 }
             }
 
-            Link(Code(-16, side * OuterZ), Code(-InnerX, side * InnerZ));
-            Link(Code(16, side * OuterZ), Code(InnerX, side * InnerZ));
+            Link(Code(-20, side * OuterZ), Code(-InnerX, side * InnerZ));
+            Link(Code(20, side * OuterZ), Code(InnerX, side * InnerZ));
         }
 
         // 站點交接點：接在外圈車道上的支線。
-        foreach (var side in new[] { -1d, 1d })
+        foreach (var x in BottomColumns)
         {
-            foreach (var x in StationColumns)
-            {
-                Link(Add(x, side * HandoffZ), Code(x, side * OuterZ));
-            }
+            Link(Add(x, -HandoffZ), Code(x, -OuterZ));
         }
 
-        // 回火爐（外圈的十個位置都用完了，所以放在島區）：接在內圈車道下邊的支線。
-        Link(Add(TemperX, TemperHandoffZ), Code(TemperX, -InnerZ));
+        foreach (var x in TopColumns)
+        {
+            Link(Add(x, HandoffZ), Code(x, OuterZ));
+        }
+
+        // 刀具庫（島區中央）：接在內圈車道下邊的支線。
+        Link(Add(IslandX, IslandHandoffZ), Code(IslandX, -InnerZ));
 
         // 充電車位：接在內圈車道上邊的支線。
         foreach (var x in ParkingColumns)

@@ -21,7 +21,7 @@ MODELS = [
     "AGV_Large", "AGV_Small", "AGV_Unknown",
     "Station_RawMaterialStore", "Station_CncLathe", "Station_HeatTreatment", "Station_Plating",
     "Station_Polishing", "Station_QualityInspection", "Station_Packing", "Station_Shipping",
-    "Station_ToolStore", "ChargingBay",
+    "Station_ToolStore", "Station_FinishedGoodsStore", "Station_MiscStore", "ChargingBay",
 ]
 
 

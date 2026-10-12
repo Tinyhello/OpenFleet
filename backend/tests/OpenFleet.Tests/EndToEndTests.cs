@@ -80,8 +80,8 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             // agv-t1 從充電車位出發；agv-t2 從品管站的交接點出發，沒有任務所以會被引導回車位。
             ["Simulator:StartPositions:agv-t1:X"] = "-10.3",
             ["Simulator:StartPositions:agv-t1:Z"] = "0.2",
-            ["Simulator:StartPositions:agv-t2:X"] = "8",
-            ["Simulator:StartPositions:agv-t2:Z"] = "7.6",
+            ["Simulator:StartPositions:agv-t2:X"] = "4",
+            ["Simulator:StartPositions:agv-t2:Z"] = "9.4",
             // 加快車速與交接，讓整個物料流程在幾秒內跑完。
             ["Simulator:Speed"] = "40",
             ["Simulator:HandoverDuration"] = "00:00:00.100",

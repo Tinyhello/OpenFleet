@@ -4,6 +4,8 @@
 與 Assets/OpenFleet/Editor 的 ModelKit 參數一致，方便對照原本的基本幾何模型。
 轉換：Unity (x, y, z) -> Blender (-x, -z, y)；FBX 以 -Z forward / Y up + Apply Transform 匯出後，
 Unity 端原點、方向、比例都與原本程式組裝的模型相同。
+Apply Transform 只轉到直接掛在根物件下的那一層：每一組零件匯出前都要 merge()，
+網格留在空物件底下的話，Unity 匯入後 Y、Z 軸會對調。
 
 材質名稱必須等於 Assets/OpenFleet/Materials 下的 .mat 檔名，Unity 匯入時依名稱換成專案材質。
 """

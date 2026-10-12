@@ -84,9 +84,9 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     {
         await CreateLotAsync();
 
-        // 取料點（原料倉）在 (-16, -7.6)。agv-a 的直線距離比較近，但它在充電車位裡，要先繞出來；
+        // 取料點（原料倉）在 (-20, -9.4)。agv-a 的直線距離比較近，但它在充電車位裡，要先繞出來；
         // agv-b 在外圈車道上，沿路網開過去比較短。
-        var assignment = await DispatchAsync(Online("agv-a", x: -10.3, z: 0.2), Online("agv-b", x: -8, z: -6));
+        var assignment = await DispatchAsync(Online("agv-a", x: -10.3, z: 0.2), Online("agv-b", x: -4, z: -7));
 
         Assert.Equal("agv-b", assignment.VehicleId);
     }

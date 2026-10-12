@@ -13,22 +13,24 @@ public static class DatabaseInitializer
 {
     /// <summary>
     /// 暫定佈局的交接點（與 Unity 的 FactoryLayout 相同：站點中心往走道方向 3.4 m）。
-    /// 回火爐是後來加的，外圈十個位置都用完了，所以放在走道內側的島區中央，交接點接在內圈車道上。
+    /// 下排由左到右是原料倉到電鍍（淬火與回火相鄰），上排由右到左是拋光、（雜物倉庫）、品管、包裝、（成品倉）、出貨，
+    /// 括號裡的兩個只是場景、不是站點；
+    /// 刀具庫在走道內側的島區中央（使用者 2026-10-12 指定的相鄰關係；實際座標是 Claude 排的）。
     /// 待加工料容量 30 件是已確認的數值；倉庫與暫存點（淬火站入口）的容量規則還沒定，所以留空。
     /// </summary>
     private static readonly Station[] DemoStations =
     [
-        new() { Code = "raw-store", Name = "原料倉", HandoffX = -16, HandoffZ = -7.6 },
-        new() { Code = "rough", Name = "粗加工", HandoffX = -8, HandoffZ = -7.6, InboundCapacity = 30, OutboundCapacity = 30 },
-        new() { Code = "fine", Name = "精加工", HandoffX = 0, HandoffZ = -7.6, InboundCapacity = 30, OutboundCapacity = 30 },
-        new() { Code = "heat", Name = "淬火", HandoffX = 8, HandoffZ = -7.6 },
-        new() { Code = "temper", Name = "回火", HandoffX = 0, HandoffZ = -2.6 },
-        new() { Code = "plating", Name = "電鍍", HandoffX = 16, HandoffZ = -7.6 },
-        new() { Code = "polish", Name = "拋光", HandoffX = 16, HandoffZ = 7.6 },
-        new() { Code = "qc", Name = "品管", HandoffX = 8, HandoffZ = 7.6 },
-        new() { Code = "packing", Name = "包裝", HandoffX = 0, HandoffZ = 7.6 },
-        new() { Code = "shipping", Name = "出貨", HandoffX = -8, HandoffZ = 7.6 },
-        new() { Code = "tool-store", Name = "刀具庫", HandoffX = -16, HandoffZ = 7.6 },
+        new() { Code = "raw-store", Name = "原料倉", HandoffX = -20, HandoffZ = -DemoRoadNetwork.HandoffZ },
+        new() { Code = "rough", Name = "粗加工", HandoffX = -12, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
+        new() { Code = "fine", Name = "精加工", HandoffX = -4, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
+        new() { Code = "heat", Name = "淬火", HandoffX = 4, HandoffZ = -DemoRoadNetwork.HandoffZ },
+        new() { Code = "temper", Name = "回火", HandoffX = 12, HandoffZ = -DemoRoadNetwork.HandoffZ },
+        new() { Code = "plating", Name = "電鍍", HandoffX = 20, HandoffZ = -DemoRoadNetwork.HandoffZ },
+        new() { Code = "polish", Name = "拋光", HandoffX = 20, HandoffZ = DemoRoadNetwork.HandoffZ },
+        new() { Code = "qc", Name = "品管", HandoffX = 4, HandoffZ = DemoRoadNetwork.HandoffZ },
+        new() { Code = "packing", Name = "包裝", HandoffX = -4, HandoffZ = DemoRoadNetwork.HandoffZ },
+        new() { Code = "shipping", Name = "出貨", HandoffX = -20, HandoffZ = DemoRoadNetwork.HandoffZ },
+        new() { Code = "tool-store", Name = "刀具庫", HandoffX = DemoRoadNetwork.IslandX, HandoffZ = DemoRoadNetwork.IslandHandoffZ },
     ];
 
     /// <summary>
@@ -107,14 +109,23 @@ public static class DatabaseInitializer
             {
                 // 舊資料庫升級：欄位是後來才加的，沒有值就補上示範值。
                 station.OutboundCapacity ??= demo.OutboundCapacity;
+
+                // 佈局不是面板能改的設定：舊資料庫的交接點跟著目前的示範佈局。
+                station.HandoffX = demo.HandoffX;
+                station.HandoffZ = demo.HandoffZ;
             }
         }
 
-        // 路網只補上缺少的節點與路段（舊資料庫沒有回火爐的支線）。
+        // 路網整份跟著目前的示範佈局：補上缺少的節點與路段，舊佈局留下來的刪掉。
         var (nodes, edges) = DemoRoadNetwork.Build();
-        var knownNodes = (await db.RouteNodes.Select(n => n.Code).ToListAsync()).ToHashSet(StringComparer.Ordinal);
-        var knownEdges = (await db.RouteEdges.Select(e => new { e.FromCode, e.ToCode }).ToListAsync())
-            .Select(e => RoadNetwork.EdgeKey(e.FromCode, e.ToCode)).ToHashSet();
+        var demoNodes = nodes.Select(n => n.Code).ToHashSet(StringComparer.Ordinal);
+        var demoEdges = edges.Select(e => RoadNetwork.EdgeKey(e.From, e.To)).ToHashSet();
+        var storedNodes = await db.RouteNodes.ToListAsync();
+        var storedEdges = await db.RouteEdges.ToListAsync();
+        db.RouteEdges.RemoveRange(storedEdges.Where(e => !demoEdges.Contains(RoadNetwork.EdgeKey(e.FromCode, e.ToCode))));
+        db.RouteNodes.RemoveRange(storedNodes.Where(n => !demoNodes.Contains(n.Code)));
+        var knownNodes = storedNodes.Select(n => n.Code).ToHashSet(StringComparer.Ordinal);
+        var knownEdges = storedEdges.Select(e => RoadNetwork.EdgeKey(e.FromCode, e.ToCode)).ToHashSet();
         db.RouteNodes.AddRange(nodes.Where(n => !knownNodes.Contains(n.Code)).Select(n => new RouteNode { Code = n.Code, X = n.X, Z = n.Z }));
         db.RouteEdges.AddRange(edges.Where(e => !knownEdges.Contains(RoadNetwork.EdgeKey(e.From, e.To)))
             .Select(e => new RouteEdge { FromCode = e.From, ToCode = e.To }));

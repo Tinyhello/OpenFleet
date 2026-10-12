@@ -26,11 +26,13 @@ def build():
     for x in (-0.4, 0.4):
         cyl(body, "E-Stop Base", (x, 0.33, -0.805), 0.07, 0.02, "LaneLine", axis="z", segments=20)
         cyl(body, "E-Stop", (x, 0.33, -0.825), 0.05, 0.03, "ToolCabinet", axis="z", segments=20, bevel=0.008)
+    merge(body)
 
     bumpers = group(r, "Bumpers")
     for sz in (-1, 1):
         box(bumpers, "Bumper", (0, 0.18, sz * 0.82), (1.0, 0.1, 0.05), "LaneLine", bevel=0.018)
         box(bumpers, "Bumper Edge", (0, 0.105, sz * 0.83), (0.96, 0.03, 0.04), "Rubber", bevel=0.01)
+    merge(bumpers)
 
     deck = group(r, "Lift Deck")
     box(deck, "Deck Plate", (0, 0.42, 0), (1.0, 0.06, 1.4), "AgvLargeDeck", bevel=0.02, segments=3)
@@ -39,11 +41,13 @@ def build():
     for x in (-0.46, 0.46):
         for z in (-0.66, 0.66):
             cyl(deck, "Locating Pin", (x, 0.465, z), 0.035, 0.03, "Steel", segments=12, bevel=0.006)
+    merge(deck)
 
     lidar = group(r, "Lidar", (0, 0, 0.68))
     cyl(lidar, "Base", (0, 0.465, 0), 0.15, 0.03, "Steel", segments=24, bevel=0.005)
     cyl(lidar, "Head", (0, 0.51, 0), 0.12, 0.06, "Sensor", segments=24, bevel=0.01)
     cyl(lidar, "Cap", (0, 0.545, 0), 0.13, 0.012, "AgvChassis", segments=24, bevel=0.004)
+    merge(lidar)
 
     wheels = group(r, "Wheels")
     for x in (-0.5, 0.5):
@@ -51,4 +55,5 @@ def build():
             w = group(wheels, "Wheel", (x, 0.12, z))
             cyl(w, "Tire", (0, 0, 0), 0.24, 0.1, "Rubber", axis="x", segments=28, bevel=0.02)
             cyl(w, "Hub", (0, 0, 0), 0.13, 0.104, "Steel", axis="x", segments=20, bevel=0.005)
+    merge(wheels)
     return save_and_export(NAME)

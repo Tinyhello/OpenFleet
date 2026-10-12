@@ -92,7 +92,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | 加工 | 同上 | 每件 2 秒，逐件計數，整批做完才放行 |
 | 刀具 | 同上 | 粗加工每 500 件、精加工每 250 件換刀；換刀 90 秒，期間機台暫停 |
 | 刀具配送 | 同上 | 刀具剩 50 件時叫小型車（`agv-03`）從刀具庫送一把新刀到機邊；到壽命時新刀已到就換刀，還沒到就停機等刀。`toolDeliveryEnabled` 設成 false 時視為新刀永遠在機邊 |
-| 站點與交接點 | 資料庫（`DatabaseInitializer` 建立） | 與 Unity `FactoryLayout` 的暫定佈局相同 |
+| 站點與交接點 | 資料庫（`DatabaseInitializer` 建立） | 與 Unity `FactoryLayout` 的暫定佈局相同。佈局不是面板能改的設定：啟動時站點的交接點與路網都會換成程式裡目前的示範佈局 |
 
 ## 資料流
 

@@ -182,6 +182,7 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
         }
 
         entry.Goal = goal;
+        entry.YieldLimit = null;
         entry.BlockedSince = null;
         entry.BlockedBy = null;
 
@@ -224,12 +225,28 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
             return;
         }
 
-        while (entry.Released < entry.Path.Count && entry.Released - entry.Reached < options.Lookahead)
+        // 退讓中：只放行到讓路的節點；到達的那一輪不往前要路，讓對方先拿走空出來的節點。
+        // 否則前瞻會把回程一起預約下來，要讓出來的節點從頭到尾都沒有放掉。
+        var limit = entry.Path.Count;
+        if (entry.YieldLimit is { } yieldLimit)
+        {
+            if (entry.Reached >= yieldLimit)
+            {
+                entry.YieldLimit = null;
+                entry.BlockedSince = null;
+                entry.BlockedBy = null;
+                return;
+            }
+
+            limit = Math.Min(limit, yieldLimit);
+        }
+
+        while (entry.Released < limit && entry.Released - entry.Reached < options.Lookahead)
         {
             var hops = 1;
 
             // 下一步是路口、再下一步是支線：兩個要一起拿到，否則停在路口之前。
-            if (entry.Released + 1 < entry.Path.Count && network.IsDeadEnd(entry.Path[entry.Released + 1]))
+            if (entry.Released + 1 < limit && network.IsDeadEnd(entry.Path[entry.Released + 1]))
             {
                 hops = 2;
             }
@@ -346,6 +363,7 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
         }
 
         Reroute(entry, route);
+        entry.YieldLimit = null;
         entry.NoReplanUntil = now + options.ReplanCooldown;
         entry.BlockedSince = null;
         entry.BlockedBy = null;
@@ -354,7 +372,7 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
 
     /// <summary>
     /// 退讓：先移到旁邊一個空的節點（優先選不是支線的），再從那裡回到原本的目的地。
-    /// 讓出來的節點就是對方要走的路。
+    /// 讓出來的節點就是對方要走的路；到達讓路的節點之前不會預約回程（見 Extend）。
     /// </summary>
     private bool TryYield(Entry entry, DateTimeOffset now)
     {
@@ -378,6 +396,7 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
         }
 
         Reroute(entry, [anchor, .. back]);
+        entry.YieldLimit = entry.Released + 1;
         entry.NoReplanUntil = now + options.ReplanCooldown;
         entry.BlockedSince = null;
         entry.BlockedBy = null;
@@ -450,5 +469,8 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
         public string? BlockedBy { get; set; }
         public DateTimeOffset? BlockedSince { get; set; }
         public DateTimeOffset NoReplanUntil { get; set; } = DateTimeOffset.MinValue;
+
+        /// <summary>退讓中：Released 最多到這個數（讓路的節點）；到達並空一輪之後清掉。</summary>
+        public int? YieldLimit { get; set; }
     }
 }
