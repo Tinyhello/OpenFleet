@@ -11,13 +11,16 @@ using Colors = OpenFleet.Unity.PresentationController.Colors;
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// 操作面板的下單與訂單（P5）：建立客戶訂單（可以好幾行，每一行是整組或單一零件），
-    /// 看每張訂單每一行每種零件的進度、工單與補做工單、出貨單與料框的位置，以及負責人同意分批出貨。
-    /// 訂單的狀態都在後端；這裡只讀取與送出請求。
+    /// 操作面板的下單與訂單（P5）：建立客戶訂單（可以好幾行，每一行是整組或單一零件，可以填交期），
+    /// 看每張訂單每一行每種零件的進度、工單與補做工單、出貨單與料框的位置，負責人同意分批出貨，
+    /// 以及負責人把訂單設成急單（P6）。訂單的狀態都在後端；這裡只讀取與送出請求。
     /// </summary>
     public sealed partial class ProductionPanel
     {
         private const int OrdersShown = 8;
+
+        /// <summary>交期預設幾天後：一組沖模從下單到完成約三週到一個月（使用者 2026-10-22）。0 表示不填交期。</summary>
+        private const int DefaultDueDays = 28;
 
         /// <summary>品項的選項：整組，或只做其中一種零件（對應品項代碼的字尾）。</summary>
         private static readonly string[] Kinds = { "整組", "只做上沖", "只做中模", "只做下沖" };
@@ -30,6 +33,7 @@ namespace OpenFleet.Unity
         private DropdownField _spec;
         private DropdownField _kind;
         private SliderInt _orderQuantity;
+        private SliderInt _dueDays;
         private VisualElement _pendingRows;
         private TextField _approver;
         private VisualElement _orderRows;
@@ -44,9 +48,12 @@ namespace OpenFleet.Unity
         private void BuildOrderForm(VisualElement content)
         {
             content.Add(Heading("下單"));
-            content.Add(Hint("一張訂單可以有好幾行，每一行是整組沖模（上沖、中模、下沖各一）或單一零件。整張訂單做完才一起出貨。"));
+            content.Add(Hint("一張訂單可以有好幾行，每一行是整組沖模（上沖、中模、下沖各一）或單一零件。整張訂單做完才一起出貨。" +
+                "交期是幾天後，0 表示不填；排程時急單最先，其次交期早的。"));
 
             _customer = Text("客戶", "示範客戶");
+            // 同一個 Idempotency-Key 只能送同樣的內容：客戶或交期改了就換新的鍵。
+            _customer.RegisterValueChangedCallback(_ => _orderKey = null);
             content.Add(_customer);
 
             _spec = new DropdownField("規格", new List<string> { "（讀取中）" }, 0);
@@ -61,6 +68,11 @@ namespace OpenFleet.Unity
             _orderQuantity.value = 30;
             content.Add(_orderQuantity);
 
+            _dueDays = NumberField("交期（天後）", 0, 60);
+            _dueDays.value = DefaultDueDays;
+            _dueDays.RegisterValueChangedCallback(_ => _orderKey = null);
+            content.Add(_dueDays);
+
             var buttons = Row();
             buttons.Add(ActionButton("加入明細", AddPendingLine));
             buttons.Add(ActionButton("送出訂單", () => StartCoroutine(SubmitOrder())));
@@ -74,8 +86,9 @@ namespace OpenFleet.Unity
         private void BuildOrderList(VisualElement content)
         {
             content.Add(Heading("訂單"));
-            content.Add(Hint("整張訂單做完才出貨；負責人同意的話可以先出已經湊成完整的組（只能分一次），剩下的到齊再出。"));
-            _approver = Text("同意分批的負責人", "廠長");
+            content.Add(Hint("整張訂單做完才出貨；負責人同意的話可以先出已經湊成完整的組（只能分一次），剩下的到齊再出。" +
+                "負責人也可以把訂單設成急單，排在所有訂單前面（各站排隊、裝爐、分配圓棒、派車都先處理）。"));
+            _approver = Text("負責人", "廠長");
             content.Add(_approver);
 
             var scroll = new ScrollView(ScrollViewMode.Vertical);
@@ -196,7 +209,13 @@ namespace OpenFleet.Unity
                 _orderKey = Guid.NewGuid().ToString("N");
             }
 
-            var body = new CreateSalesOrderRequest { Customer = _customer.value, Lines = lines };
+            // 交期只取日期，不帶時區（帶了 +08:00 的話，時區不同的後端會差一天）。
+            var body = new CreateSalesOrderRequest
+            {
+                Customer = _customer.value,
+                DueDate = _dueDays.value > 0 ? DateTime.SpecifyKind(DateTime.Today.AddDays(_dueDays.value), DateTimeKind.Unspecified) : (DateTime?)null,
+                Lines = lines,
+            };
             using (var request = JsonRequest(UnityWebRequest.kHttpVerbPOST, "/api/sales-orders", FleetJson.Serialize(body)))
             {
                 request.SetRequestHeader("Idempotency-Key", _orderKey);
@@ -233,6 +252,22 @@ namespace OpenFleet.Unity
                 if (Succeeded(request, "同意分批"))
                 {
                     SetStatus($"{orderNumber}：已同意分批出貨，已經湊成完整的組會先裝箱出貨。", Colors.Ok);
+                    yield return RefreshOrders();
+                }
+            }
+        }
+
+        /// <summary>設成急單（記下上面填的負責人）或取消急單。能不能設由後端檢查（例如已經做完的訂單不能設）。</summary>
+        private IEnumerator ToggleRush(Guid orderId, string orderNumber, bool isRush)
+        {
+            var json = isRush ? null : FleetJson.Serialize(new RushRequest { RequestedBy = _approver.value });
+            var method = isRush ? UnityWebRequest.kHttpVerbDELETE : UnityWebRequest.kHttpVerbPOST;
+            using (var request = JsonRequest(method, $"/api/sales-orders/{orderId}/rush", json))
+            {
+                yield return request.SendWebRequest();
+                if (Succeeded(request, isRush ? "取消急單" : "設為急單"))
+                {
+                    SetStatus(isRush ? $"{orderNumber}：已取消急單，之後照交期排。" : $"{orderNumber}：已設為急單，之後排在所有訂單前面。", Colors.Ok);
                     yield return RefreshOrders();
                 }
             }
@@ -395,9 +430,10 @@ namespace OpenFleet.Unity
         private static string OrderText(SalesOrderDto order)
         {
             var text = new StringBuilder();
-            if (order.DueDate.HasValue)
+            text.Append(order.DueDate.HasValue ? $"交期 {order.DueDate.Value:yyyy-MM-dd}\n" : "交期：未指定\n");
+            if (order.IsRush)
             {
-                text.Append($"交期 {order.DueDate.Value:yyyy-MM-dd}\n");
+                text.Append($"急單：{order.RushRequestedBy} 設定\n");
             }
 
             if (order.PartialApprovedBy != null)
@@ -505,9 +541,11 @@ namespace OpenFleet.Unity
             private readonly Label _header;
             private readonly Label _details;
             private readonly Button _approve;
+            private readonly Button _rush;
             private readonly Foldout _bins;
             private readonly Label _binText;
             private string _orderNumber = string.Empty;
+            private bool _isRush;
 
             public OrderView(ProductionPanel panel, Guid orderId)
             {
@@ -527,9 +565,12 @@ namespace OpenFleet.Unity
                 _details.style.whiteSpace = WhiteSpace.Normal;
                 Root.Add(_details);
 
+                var buttons = Row();
                 _approve = ActionButton("同意分批出貨", () => panel.StartCoroutine(panel.ApprovePartial(orderId, _orderNumber)));
-                _approve.style.marginTop = 4;
-                Root.Add(_approve);
+                buttons.Add(_approve);
+                _rush = ActionButton("設為急單", () => panel.StartCoroutine(panel.ToggleRush(orderId, _orderNumber, _isRush)));
+                buttons.Add(_rush);
+                Root.Add(buttons);
 
                 // 料框位置預設收合；展開與否在更新時保留。
                 _bins = new Foldout { text = "料框位置", value = false };
@@ -546,15 +587,22 @@ namespace OpenFleet.Unity
             public void Show(SalesOrderDto order, string bins)
             {
                 _orderNumber = order.Number;
-                _header.text = $"{order.Number}　{order.Customer}　{StatusText(order.Status)}";
-                _header.style.color = order.Status == SalesOrderStatus.Shipped ? Colors.Muted : Color.white;
+                _isRush = order.IsRush;
+                var shipped = order.Status == SalesOrderStatus.Shipped;
+                _header.text = $"{order.Number}　{order.Customer}　{StatusText(order.Status)}{(order.IsRush ? "　【急單】" : string.Empty)}";
+                _header.style.color = shipped ? Colors.Muted : order.IsRush ? Colors.Rush : Color.white;
                 _details.text = OrderText(order);
-                _details.style.color = order.Status == SalesOrderStatus.Shipped ? Colors.Muted : Color.white;
+                _details.style.color = shipped ? Colors.Muted : Color.white;
                 _binText.text = bins;
 
                 // 還沒同意過、也還沒開始出貨、還在生產中的訂單才能同意分批；能不能出由後端再檢查一次。
                 var approvable = order.PartialApprovedBy == null && order.Deliveries.Count == 0 && order.Status == SalesOrderStatus.InProduction;
                 _approve.style.display = approvable ? DisplayStyle.Flex : DisplayStyle.None;
+
+                // 還有東西在做的訂單才能設成急單或取消。
+                var producing = order.Status == SalesOrderStatus.InProduction || order.Status == SalesOrderStatus.PartiallyShipped;
+                _rush.style.display = producing ? DisplayStyle.Flex : DisplayStyle.None;
+                _rush.text = order.IsRush ? "取消急單" : "設為急單";
             }
         }
     }

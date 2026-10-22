@@ -293,6 +293,66 @@ public sealed class OrderService(
         return (await GetAsync(id, cancellationToken))!;
     }
 
+    /// <summary>
+    /// 負責人把訂單設成急單（使用者 2026-10-22：急單排在所有訂單前面）。之後這張訂單的框（含補做工單與出貨箱）
+    /// 在各站排隊、開爐裝爐、分配圓棒、派車時都排在一般訂單前面（<see cref="SchedulePriority"/>），下一輪就生效。
+    /// 已經是急單、已經全部做完或出貨的訂單回 409；兩個人同時按，由 xmin 擋下後到的那一個（409）。
+    /// </summary>
+    public async Task<SalesOrderDto> MarkRushAsync(Guid id, RushRequest request, CancellationToken cancellationToken)
+    {
+        var requestedBy = (request.RequestedBy ?? string.Empty).Trim();
+        if (requestedBy.Length is 0 or > 64)
+        {
+            throw new RequestValidationException("requestedBy", "The name of the person in charge is required and must be at most 64 characters.");
+        }
+
+        var order = await db.SalesOrders.Include(o => o.Lines).SingleOrDefaultAsync(o => o.Id == id, cancellationToken)
+            ?? throw new KeyNotFoundException($"Sales order {id} not found.");
+        if (order.IsRush)
+        {
+            throw new ConflictException($"Sales order {order.Number} is already a rush order.");
+        }
+
+        var status = (await BuildAsync([order], cancellationToken)).Single().Status;
+        if (status is SalesOrderStatus.Completed or SalesOrderStatus.Shipped)
+        {
+            throw new ConflictException($"Sales order {order.Number} is already finished; there is nothing left to rush.");
+        }
+
+        order.MarkRush(requestedBy, time.GetUtcNow());
+        await SaveRushAsync(order, cancellationToken);
+        logger.LogInformation("Sales order {Number}: marked as a rush order by {RequestedBy}.", order.Number, requestedBy);
+        return (await GetAsync(id, cancellationToken))!;
+    }
+
+    /// <summary>取消急單：之後照交期排。不是急單時回 409。</summary>
+    public async Task<SalesOrderDto> CancelRushAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var order = await db.SalesOrders.SingleOrDefaultAsync(o => o.Id == id, cancellationToken)
+            ?? throw new KeyNotFoundException($"Sales order {id} not found.");
+        if (!order.IsRush)
+        {
+            throw new ConflictException($"Sales order {order.Number} is not a rush order.");
+        }
+
+        order.CancelRush();
+        await SaveRushAsync(order, cancellationToken);
+        logger.LogInformation("Sales order {Number}: rush cancelled.", order.Number);
+        return (await GetAsync(id, cancellationToken))!;
+    }
+
+    private async Task SaveRushAsync(SalesOrder order, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ConflictException($"Sales order {order.Number} was changed by someone else; check whether it is already a rush order.");
+        }
+    }
+
     private async Task<List<SalesOrderDto>> BuildAsync(IReadOnlyList<SalesOrder> orders, CancellationToken cancellationToken)
     {
         var lineIds = orders.SelectMany(o => o.Lines).Select(l => l.Id).ToList();
@@ -356,6 +416,9 @@ public sealed class OrderService(
                 Status = StatusOf(lineDtos),
                 PartialApprovedBy = order.PartialApprovedBy,
                 PartialApprovedAt = order.PartialApprovedAt,
+                IsRush = order.IsRush,
+                RushRequestedBy = order.RushRequestedBy,
+                RushRequestedAt = order.RushRequestedAt,
                 Lines = lineDtos,
                 Deliveries = deliveries.Where(d => d.SalesOrderId == order.Id).Select(d => new DeliveryDto
                 {

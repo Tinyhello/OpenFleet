@@ -62,6 +62,27 @@ public sealed class FulfillmentTests(PostgresFixture postgres) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Checking_whether_an_order_can_be_boxed_does_not_hold_its_moving_bins()
+    {
+        // 上沖已經包好、中模在車上。檢查訂單能不能裝箱時，中模只讀狀態、不留在這一輪的工作單元裡：
+        // 否則它在同一輪裡被卸到下一站，這一輪後面的步驟（空機台開始下一框）會拿到舊的「在車上」而失敗。
+        var order = await CreateAsync(("P30-RD12", 30));
+        await PackAsync(order, 1, lot => lot.PartCode == ProductParts.UpperPunch);
+        Guid moving;
+        await using (var db = _database.NewContext())
+        {
+            var die = await db.Lots.SingleAsync(l => l.PartCode == ProductParts.Die);
+            die.LoadOnto("agv-a", _database.Time.GetUtcNow());
+            await db.SaveChangesAsync();
+            moving = die.Id;
+        }
+
+        await using var scope = _database.NewScope();
+        await scope.Production.AdvanceOperationsAsync(default);
+        Assert.DoesNotContain(scope.Db.ChangeTracker.Entries<MaterialLot>(), entry => entry.Entity.Id == moving);
+    }
+
+    [Fact]
     public async Task Whole_order_is_boxed_only_when_every_line_is_done_and_ships_when_all_boxes_are_there()
     {
         var order = await CreateAsync(("P30-RD12", 10), ("P24-SQ08-U", 5));

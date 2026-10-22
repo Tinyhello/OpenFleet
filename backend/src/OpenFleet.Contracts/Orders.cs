@@ -48,6 +48,15 @@ namespace OpenFleet.Contracts
         public int Quantity { get; set; }
     }
 
+    /// <summary>
+    /// 負責人把訂單設成急單（POST /api/sales-orders/{id}/rush）：之後這張訂單的框排在所有訂單前面。
+    /// 取消急單是 DELETE 同一個路徑。
+    /// </summary>
+    public sealed class RushRequest
+    {
+        public string RequestedBy { get; set; } = string.Empty;
+    }
+
     /// <summary>負責人同意這張訂單分批出貨（POST /api/sales-orders/{id}/partial-shipment）。一張訂單只能同意一次。</summary>
     public sealed class PartialShipmentRequest
     {
@@ -178,6 +187,13 @@ namespace OpenFleet.Contracts
         /// <summary>同意分批的負責人與時間；沒有同意過是 null。</summary>
         public string? PartialApprovedBy { get; set; }
         public DateTimeOffset? PartialApprovedAt { get; set; }
+
+        /// <summary>急單：排在所有訂單前面（各站排隊、開爐裝爐、分配圓棒、派車都先處理）。</summary>
+        public bool IsRush { get; set; }
+
+        /// <summary>把訂單設成急單的負責人與時間；不是急單時是 null。</summary>
+        public string? RushRequestedBy { get; set; }
+        public DateTimeOffset? RushRequestedAt { get; set; }
         public List<SalesOrderLineDto> Lines { get; set; } = new List<SalesOrderLineDto>();
         public List<DeliveryDto> Deliveries { get; set; } = new List<DeliveryDto>();
     }

@@ -30,6 +30,11 @@ public static class OrderEndpoints
         orders.MapPost("/{id:guid}/partial-shipment", (Guid id, PartialShipmentRequest request, OrderService service, CancellationToken ct) =>
             service.ApprovePartialShipmentAsync(id, request, ct));
 
+        // 負責人把訂單設成急單（排在所有訂單前面）；DELETE 取消。
+        orders.MapPost("/{id:guid}/rush", (Guid id, RushRequest request, OrderService service, CancellationToken ct) =>
+            service.MarkRushAsync(id, request, ct));
+        orders.MapDelete("/{id:guid}/rush", (Guid id, OrderService service, CancellationToken ct) => service.CancelRushAsync(id, ct));
+
         var workOrders = app.MapGroup("/api/production-orders").AddEndpointFilter<ApiErrorFilter>();
 
         workOrders.MapGet("/", (int? take, OrderService service, CancellationToken ct) => service.ListProductionOrdersAsync(take ?? 50, ct));

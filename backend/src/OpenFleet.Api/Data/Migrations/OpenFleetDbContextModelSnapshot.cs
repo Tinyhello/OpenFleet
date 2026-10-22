@@ -1225,6 +1225,13 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
+                    b.Property<DateTimeOffset?>("RushRequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RushRequestedBy")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<uint>("Version")
                         .IsConcurrencyToken()
                         .ValueGeneratedOnAddOrUpdate()

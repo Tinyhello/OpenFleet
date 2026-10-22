@@ -465,7 +465,7 @@ public sealed partial class ProductionService(
     }
 
     /// <summary>
-    /// 等料的框（圓棒不夠，或補做的料還沒分配）依建立順序再試一次：
+    /// 等料的框（圓棒不夠，或補做的料還沒分配）再試一次，急單、交期早的先分（<see cref="SchedulePriority"/>），其餘依建立順序：
     /// 補做的框先看現成的備料夠不夠整框，夠就直接送第一道加工；不夠就排切料、保留圓棒。
     /// 保留到夠了就送去切料。採購單收貨或盤點補進圓棒後，下一輪就會接上。
     /// 和其他寫入庫存的請求同時改到同一列時，這一輪放棄，下一輪重來。
@@ -482,6 +482,9 @@ public sealed partial class ProductionService(
         var waiting = await db.Lots.Where(l => l.Status == LotStatus.AwaitingMaterial)
             .OrderBy(l => l.CreatedAt).ThenBy(l => l.LotNumber)
             .ToListAsync(cancellationToken);
+        // 穩定排序：優先順序一樣的維持建立順序。
+        var priorities = await SchedulePriorities.ForLotsAsync(db, waiting, cancellationToken);
+        waiting = waiting.OrderBy(l => priorities[l.Id]).ToList();
         var first = steps.FirstOrDefault(s => !s.IsCutting);
         var lotIds = waiting.Select(l => l.Id).ToList();
         var jobs = await db.CuttingJobs.Where(j => lotIds.Contains(j.LotId)).ToDictionaryAsync(j => j.LotId, cancellationToken);
@@ -1060,7 +1063,8 @@ public sealed partial class ProductionService(
     }
 
     /// <summary>
-    /// 整爐工序開爐：這一站沒有在跑，而且排隊中的支數達到下限。照到站順序裝進去，裝到上限為止；
+    /// 整爐工序開爐：這一站沒有在跑，而且排隊中的支數達到下限。急單、交期早的框先裝（<see cref="SchedulePriority"/>），
+    /// 其餘照到站順序，裝到上限為止；
     /// 一框不拆開，放不下的那一框留到下一爐。不同批次可以混在同一爐（使用者 2026-10-10），出爐後仍是各自的框。
     /// 上限依桿徑不同的工序（電鍍）：每一框占「支數 ÷ 該桿徑的上限」，加起來不超過一爐。
     /// 湊不到下限就一直等，不設逾時（使用者 2026-10-10）。兩個例外（使用者 2026-10-10）：
@@ -1088,6 +1092,8 @@ public sealed partial class ProductionService(
         {
             return false;
         }
+
+        var priorities = await SchedulePriorities.ForLotsAsync(db, queued.Select(o => o.Lot), cancellationToken);
 
         // 還在製程中的每一框目前在哪一道工序（走完的、報廢的、出貨箱沒有工序）。
         var active = await db.Lots.AsNoTracking()
@@ -1120,7 +1126,8 @@ public sealed partial class ProductionService(
 
             var load = new List<OperationExecution>();
             var used = 0d;
-            foreach (var operation in waiting)
+            // 穩定排序：優先順序一樣的照到站順序。
+            foreach (var operation in waiting.OrderBy(o => priorities[o.LotId]))
             {
                 var share = (double)operation.Quantity / step.BatchCapacityFor(operation.Lot.RodDiameterMm);
                 if (used + share <= 1 + 1e-9)
@@ -1214,6 +1221,7 @@ public sealed partial class ProductionService(
         }
 
         var stationCodes = queued.Select(o => o.StationCode).Distinct().ToList();
+        var priorities = await SchedulePriorities.ForLotsAsync(db, queued.Select(o => o.Lot), cancellationToken);
         var busy = await db.Operations
             .Where(o => o.Status == OperationStatus.Running && o.MachineCode != null)
             .Select(o => o.MachineCode!)
@@ -1249,7 +1257,8 @@ public sealed partial class ProductionService(
             var step = steps.Single(s => s.StationCode == station);
             var waiting = queued.Where(o => o.StationCode == station).ToList();
             var assigned = MachineAssignment.Assign(
-                free, waiting, o => new MachineAssignment.Setup(o.Lot.BatchNumber, o.Lot.PartCode, o.Lot.RodDiameterMm), step.UsesTool);
+                free, waiting, o => new MachineAssignment.Setup(o.Lot.BatchNumber, o.Lot.PartCode, o.Lot.RodDiameterMm), step.UsesTool,
+                o => priorities[o.LotId]);
             foreach (var (machine, operation) in assigned)
             {
                 if (step.IsCutting && await db.CuttingJobs.AsNoTracking().SingleOrDefaultAsync(j => j.LotId == operation.LotId, cancellationToken) is { } job)

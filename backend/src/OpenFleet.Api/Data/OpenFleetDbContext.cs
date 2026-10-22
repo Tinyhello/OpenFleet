@@ -190,6 +190,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(o => o.RequestKey).HasMaxLength(64);
             e.Ignore(o => o.NumberSuffix);
             e.Property(o => o.PartialApprovedBy).HasMaxLength(64);
+            e.Property(o => o.RushRequestedBy).HasMaxLength(64);
+            e.Ignore(o => o.IsRush);
             e.Property(o => o.Version).IsRowVersion();
             e.HasIndex(o => o.Number).IsUnique();
             // 同一個 Idempotency-Key 只會有一張訂單；兩個同鍵的請求同時到，由資料庫擋下後到的那一個。

@@ -12,7 +12,9 @@ public sealed class SalesOrder
     public string Number { get; private set; } = string.Empty;
     public string Customer { get; private set; } = string.Empty;
 
-    /// <summary>交期；只是記錄，系統不會因為交期提醒（使用者 2026-10-22）。</summary>
+    /// <summary>
+    /// 交期。排程時交期早的訂單先做（P6，使用者 2026-10-22）；系統不會因為交期發出提醒（使用者 2026-10-22）。
+    /// </summary>
     public DateOnly? DueDate { get; private set; }
     public string? RequestKey { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
@@ -20,6 +22,15 @@ public sealed class SalesOrder
     /// <summary>負責人同意分批出貨（使用者 2026-10-22：分批要負責人同意，最多分一次）。</summary>
     public string? PartialApprovedBy { get; private set; }
     public DateTimeOffset? PartialApprovedAt { get; private set; }
+
+    /// <summary>
+    /// 負責人把這張訂單設成急單（使用者 2026-10-22：急單排在所有訂單前面）；不是急單時兩個都是 null。
+    /// 排程怎麼用它見 <see cref="Production.SchedulePriority"/>。
+    /// </summary>
+    public string? RushRequestedBy { get; private set; }
+    public DateTimeOffset? RushRequestedAt { get; private set; }
+
+    public bool IsRush => RushRequestedAt is not null;
 
     /// <summary>樂觀並行控制（xmin）：兩個人同時按同意，只有一個會成功。</summary>
     public uint Version { get; private set; }
@@ -47,6 +58,28 @@ public sealed class SalesOrder
 
         PartialApprovedBy = approvedBy;
         PartialApprovedAt = now;
+    }
+
+    public void MarkRush(string requestedBy, DateTimeOffset now)
+    {
+        if (IsRush)
+        {
+            throw new InvalidOperationException($"{Number} is already a rush order.");
+        }
+
+        RushRequestedBy = requestedBy;
+        RushRequestedAt = now;
+    }
+
+    public void CancelRush()
+    {
+        if (!IsRush)
+        {
+            throw new InvalidOperationException($"{Number} is not a rush order.");
+        }
+
+        RushRequestedBy = null;
+        RushRequestedAt = null;
     }
 
     public SalesOrderLine AddLine(string itemCode, int quantity)

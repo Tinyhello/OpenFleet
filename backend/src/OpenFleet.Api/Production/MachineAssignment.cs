@@ -3,7 +3,8 @@ namespace OpenFleet.Api.Production;
 /// <summary>
 /// 逐件工序的站：空下來的機台接哪一框（P6）。同一站的機台共用備料區，框在站上排隊，哪一台空下來就由它接手
 /// （使用者 2026-10-22：同一站的機台都能做所有規格）。
-/// 每台機台各自看自己上一框做的是什麼（P4 的規則，改成每台各自算）：
+/// 先看框的優先順序（<see cref="SchedulePriority"/>：急單、交期早的先做，使用者 2026-10-22）；
+/// 優先順序一樣時，每台機台各自看自己上一框做的是什麼（P4 的規則，改成每台各自算）：
 /// 1. 同批次、不用換線 → 2. 機床：不用換線；其他站：同批次 → 3. 機床：同批次；其他站：同零件同桿徑 → 4. 同桿徑 → 5. 到站順序。
 /// 機台還沒做過任何一框時不用換線。
 /// 同一站同時有好幾台空著時，每次先配排名最好的（機台, 框）組合，所以不用換線的框會交給上一框相同的那一台；
@@ -27,17 +28,22 @@ public static class MachineAssignment
     /// <summary>
     /// 把排隊的框（<paramref name="waiting"/>，依到站順序）配給空著的機台，回傳配好的組合；機台或框用完就停。
     /// <paramref name="isLathe"/>：有刀具的工序（粗加工、精加工）才會換線，排序先看換線，其他站先看同批次。
+    /// <paramref name="priority"/>：每一框的優先順序；沒給時都一樣。
     /// </summary>
     public static List<(FreeMachine Machine, T Item)> Assign<T>(
-        IReadOnlyList<FreeMachine> machines, IReadOnlyList<T> waiting, Func<T, Setup> describe, bool isLathe)
+        IReadOnlyList<FreeMachine> machines, IReadOnlyList<T> waiting, Func<T, Setup> describe, bool isLathe,
+        Func<T, SchedulePriority>? priority = null)
     {
         var free = machines.ToList();
-        var queue = waiting.Select((item, index) => (Item: item, Index: index, Setup: describe(item))).ToList();
+        var queue = waiting
+            .Select((item, index) => (Item: item, Index: index, Setup: describe(item), Priority: priority?.Invoke(item) ?? SchedulePriority.None))
+            .ToList();
         var assigned = new List<(FreeMachine, T)>();
         while (free.Count > 0 && queue.Count > 0)
         {
             var best = free.SelectMany(machine => queue.Select(entry => (Machine: machine, Entry: entry)))
-                .OrderBy(pair => Rank(pair.Machine.Last, pair.Entry.Setup, isLathe))
+                .OrderBy(pair => pair.Entry.Priority)
+                .ThenBy(pair => Rank(pair.Machine.Last, pair.Entry.Setup, isLathe))
                 .ThenBy(pair => pair.Entry.Index)
                 .ThenBy(pair => pair.Machine.Number)
                 .First();

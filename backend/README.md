@@ -62,6 +62,13 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `GET /api/stations` | 站點與交接點座標 |
 | `GET /api/stations/status` | 每站的備料區、成品區件數與容量；逐件工序的站列出每台機台（粗加工、精加工各兩台）的加工進度、刀具與缺車停機；整爐工序的站另有開爐門檻、這一爐的階段與剩餘時間（顯示端輪詢用） |
 | `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具、機床換線時間；測試模式的開關與倍率（各站、AGV 交接、空車與載貨車速、貨車）；逐件工序的每件加工秒數與刀具壽命；整爐工序的開爐下限、一爐上限（電鍍依桿徑）與時間；品管的不良率、反工上限與反工重鍍的下限；貨車間隔。PUT 是整份取代，不合規則回 400 |
+| `GET /api/catalog/...` | 桿徑、沖頭規格、品項、BOM 與展開（見 P5實作紀錄第 2 節） |
+| `GET /api/inventory`、`/api/purchase-orders` 等 | 圓棒與備料庫存、安全庫存提醒、盤點調整、採購單與收貨（見 P5實作紀錄第 3 節） |
+| `POST /api/sales-orders` | 建立客戶訂單：客戶、交期（可不填）、每一行是整組或單一零件與數量；每一行開一張工單並建立它的框。可帶 `Idempotency-Key`，同鍵重送回同一張；400 輸入錯誤、409 同鍵不同內容 |
+| `GET /api/sales-orders`、`GET /api/sales-orders/{id}` | 訂單、每一行每種零件的進度、工單與補做工單、出貨單、是否急單 |
+| `POST /api/sales-orders/{id}/partial-shipment` | 負責人同意分批出貨：`{"approvedBy": "廠長"}`，先出已經湊成完整的組，一張訂單只能分一次 |
+| `POST /api/sales-orders/{id}/rush`、`DELETE` 同一路徑 | 負責人把訂單設成急單（`{"requestedBy": "廠長"}`）或取消：急單的框在各站排隊、裝爐、分配圓棒、派車時都排在其他訂單前面。已經是急單、已經做完或出貨的回 409 |
+| `GET /api/production-orders`、`GET /api/production-orders/{id}` | 工單（含補做）、開立時的規格、進度；查單一工單時含它的框 |
 | `POST /api/lots` | 模擬收料：在原料倉建立一個批次。可帶 `{"quantity": 組數, "rodDiameterMm": 24 或 30, "partCodes": [...]}`；一組是上沖、下沖、中模各一（`partCodes` 可以只做其中幾種），每一種零件依料框容量分成多框，每一框各建立一趟搬運。回應是每一框 |
 | `GET /api/lots`、`GET /api/lots/{id}` | 料框清單（同一批次的框有相同的 `batchNumber`）；單一框的完整追蹤 |
 | `GET /api/transport-tasks`、`GET /api/transport-tasks/{id}`、`.../{id}/events` | 搬運任務、派工狀態與狀態歷史。`needsAttention` 為 true 表示搬運失敗、等人工處理 |
@@ -92,6 +99,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | 加工 | 同上 | 每件 2 秒，逐件計數，整批做完才放行 |
 | 機台 | 資料庫 `Machines`（`DatabaseInitializer` 建立） | 粗加工、精加工各兩台車床，其他逐件工序的站一台（使用者 2026-10-22）。同一站的機台共用交接點、備料區與成品區，哪一台空下來就接下一框；刀具、換線與缺車停機每台各自算。一台車床的備料台 30 支，兩台的站共 60 支 |
 | 刀具 | 同上 | 粗加工每 500 件、精加工每 250 件換刀（每台車床各自計）；換刀 90 秒，期間那台機台暫停 |
+| 排程順序 | 程式（`SchedulePriority`） | 急單最先，其次交期早的，沒有交期的最後（使用者 2026-10-22）；一樣時照原本的規則（機台先做不用換線的與同批次的、爐照到站順序、派車照搬運種類與建立時間） |
 | 刀具配送 | 同上 | 刀具剩 50 件時叫小型車（`agv-03`）從刀具庫送一把新刀到機邊；到壽命時新刀已到就換刀，還沒到就停機等刀。`toolDeliveryEnabled` 設成 false 時視為新刀永遠在機邊 |
 | 站點與交接點 | 資料庫（`DatabaseInitializer` 建立） | 與 Unity `FactoryLayout` 的暫定佈局相同。佈局不是面板能改的設定：啟動時站點的交接點與路網都會換成程式裡目前的示範佈局 |
 

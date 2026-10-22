@@ -62,8 +62,14 @@ public sealed partial class ProductionService
         var lineOf = workOrders.ToDictionary(o => o.Id, o => o.SalesOrderLineId);
         var workOrderIds = lineOf.Keys.ToList();
         var mains = workOrders.Where(o => o.Kind == ProductionOrderKind.Main).ToDictionary(o => o.SalesOrderLineId);
-        var lots = await db.Lots
+        // 還在流動的框只讀狀態、不追蹤：它們同時會被搬運事件修改（例如卸料後開始排隊），追蹤的話，
+        // 這一輪後面的步驟（空機台開始下一框）拿到的會是這裡讀到的舊狀態。會被裝箱改動的只有包好、停在包裝站的框，只追蹤這些。
+        var states = await db.Lots.AsNoTracking()
             .Where(l => !l.IsBox && l.ProductionOrderId != null && workOrderIds.Contains(l.ProductionOrderId.Value))
+            .Select(l => new { l.Status, l.CurrentStepSequence })
+            .ToListAsync(cancellationToken);
+        var lots = await db.Lots
+            .Where(l => !l.IsBox && l.Status == LotStatus.Packed && l.ProductionOrderId != null && workOrderIds.Contains(l.ProductionOrderId.Value))
             .ToListAsync(cancellationToken);
 
         List<MaterialLot> Packed(SalesOrderLine line, string part) =>
@@ -103,7 +109,7 @@ public sealed partial class ProductionService
         }
 
         // 整張訂單：沒有還在流動的框（含補做與多做的），而且每一行每種零件包好的夠出剩下的。
-        if (lots.Any(l => Fulfillment.IsActive(l.Status, l.CurrentStepSequence)))
+        if (states.Any(l => Fulfillment.IsActive(l.Status, l.CurrentStepSequence)))
         {
             return changed;
         }

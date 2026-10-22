@@ -35,11 +35,16 @@ public sealed class TransportService(
     /// </summary>
     public async Task<int> DispatchPendingAsync(IReadOnlyCollection<VehicleState> onlineVehicles, CancellationToken cancellationToken)
     {
-        var pending = (await db.TransportTasks.Include(t => t.Lot)
+        var waitingTasks = await db.TransportTasks.Include(t => t.Lot)
             .Where(t => t.Status == TransportTaskStatus.Pending)
-            .ToListAsync(cancellationToken))
-            // 優先順序（使用者 2026-10-09 確認）：搬完成品（含各工序做完的半成品）→ 送刀具 → 補料；同級依建立時間。
-            .OrderBy(t => Priority(t.Kind)).ThenBy(t => t.CreatedAt).ThenBy(t => t.Id)
+            .ToListAsync(cancellationToken);
+        var priorities = await SchedulePriorities.ForLotsAsync(db, waitingTasks.Select(t => t.Lot).OfType<MaterialLot>(), cancellationToken);
+        var pending = waitingTasks
+            // 優先順序（使用者 2026-10-09 確認）：搬完成品（含各工序做完的半成品）→ 送刀具 → 補料。
+            // 同一種搬運裡急單、交期早的框先搬（P6，Claude 的建議，使用者以「進下一步」同意），其餘依建立時間。
+            .OrderBy(t => Priority(t.Kind))
+            .ThenBy(t => t.Lot is { } lot ? priorities[lot.Id] : SchedulePriority.None)
+            .ThenBy(t => t.CreatedAt).ThenBy(t => t.Id)
             .ToList();
         if (pending.Count == 0)
         {

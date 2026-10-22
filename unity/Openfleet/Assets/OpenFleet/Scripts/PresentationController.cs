@@ -64,6 +64,9 @@ namespace OpenFleet.Unity
             public static readonly Color Error = new Color(1f, 0.55f, 0.45f);
             public static readonly Color Ok = new Color(0.55f, 0.9f, 0.6f);
             public static readonly Color Selected = new Color(0.98f, 0.78f, 0.35f);
+
+            /// <summary>急單（排在所有訂單前面）的標示。</summary>
+            public static readonly Color Rush = new Color(1f, 0.62f, 0.3f);
             public static readonly Color InputText = new Color(0.08f, 0.09f, 0.11f);
         }
 
