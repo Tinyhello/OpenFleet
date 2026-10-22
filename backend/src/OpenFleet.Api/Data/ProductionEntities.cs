@@ -375,6 +375,9 @@ public sealed class MaterialLot
 
     /// <summary>沖頭規格代碼（決定備料長度）；P5 以前建立的框沒有，也不經過切料。</summary>
     public string? SpecCode { get; private set; }
+
+    /// <summary>屬於哪一張生產工單（補做的框屬於補做工單）；沒有訂單的批次是 null。</summary>
+    public Guid? ProductionOrderId { get; private set; }
     public string PartCode { get; private set; } = string.Empty;
     public int Quantity { get; private set; }
     public LotStatus Status { get; private set; }
@@ -409,11 +412,12 @@ public sealed class MaterialLot
     public static MaterialLot Receive(
         string partCode, int quantity, string stationCode, int? firstStep,
         string batchNumber, int binIndex, int binCount, int rodDiameterMm, DateTimeOffset now,
-        string? specCode = null, bool awaitingMaterial = false)
+        string? specCode = null, bool awaitingMaterial = false, Guid? productionOrderId = null)
     {
         return new MaterialLot
         {
             SpecCode = specCode,
+            ProductionOrderId = productionOrderId,
             Id = Guid.NewGuid(),
             LotNumber = $"{batchNumber}-{ProductParts.Letter(partCode)}{binIndex:00}",
             BatchNumber = batchNumber,
@@ -539,6 +543,7 @@ public sealed class MaterialLot
         BinCount = source.BinCount,
         RodDiameterMm = source.RodDiameterMm,
         SpecCode = source.SpecCode,
+        ProductionOrderId = source.ProductionOrderId,
         PartCode = source.PartCode,
         Quantity = quantity,
         Status = LotStatus.AwaitingTransport,
@@ -553,10 +558,13 @@ public sealed class MaterialLot
     /// 品管報廢了 <paramref name="quantity"/> 支：在原料倉補投同樣數量的同一種零件，重走整條製程。
     /// 批次編號相同，所以這個批次要等補做的料包裝完才裝箱；框號是原本的框號加上 -M 與第幾次檢驗。
     /// 有規格的框先等料（<paramref name="awaitingMaterial"/>）：補做也要有實際的備料或圓棒，由備料分配決定從哪一站開始。
+    /// 有工單的框屬於另開的補做工單（<paramref name="productionOrderId"/>），批次編號仍是主工單的號碼。
     /// </summary>
     public static MaterialLot ReceiveMakeup(
-        MaterialLot source, int quantity, string stationCode, int? firstStep, DateTimeOffset now, bool awaitingMaterial = false) => new()
+        MaterialLot source, int quantity, string stationCode, int? firstStep, DateTimeOffset now,
+        bool awaitingMaterial = false, Guid? productionOrderId = null) => new()
     {
+        ProductionOrderId = productionOrderId,
         Id = Guid.NewGuid(),
         LotNumber = $"{source.LotNumber}-M{source.ReworkCount + 1}",
         BatchNumber = source.BatchNumber,

@@ -1,5 +1,6 @@
 using OpenFleet.Api.Catalog;
 using OpenFleet.Api.Inventory;
+using OpenFleet.Api.Orders;
 using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
@@ -36,6 +37,7 @@ builder.Services.AddSingleton<IDefectSource, RandomDefectSource>();
 builder.Services.AddScoped<ProductionService>();
 builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<InventoryService>();
+builder.Services.AddScoped<OrderService>();
 builder.Services.AddScoped<VehicleShortageService>();
 builder.Services.AddScoped<TransportService>();
 builder.Services.AddScoped<VehicleEventProcessor>();
@@ -66,6 +68,7 @@ app.MapVehicleEndpoints();
 app.MapProductionEndpoints();
 app.MapCatalogEndpoints();
 app.MapInventoryEndpoints();
+app.MapOrderEndpoints();
 app.MapTransportEndpoints();
 
 app.Run();

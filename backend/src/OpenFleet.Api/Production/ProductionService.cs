@@ -240,11 +240,9 @@ public sealed class ProductionService(
     }
 
     /// <summary>
-    /// 模擬收料：在原料倉建立一個批次，<paramref name="quantity"/> 是組數；一組裡的每一種零件各做這麼多
-    /// （<paramref name="partCodes"/> 可以指定只做其中幾種）。每一種零件各自依料框容量分成好幾框。
-    /// 有規格時先用原料倉現成的備料（直接送第一道加工），不夠的從圓棒切（先送切料站）：
-    /// 圓棒依框的順序保留，保留不到的框先在原料倉等料，到貨後才送去切（使用者 2026-10-22：不等料，有多少先做多少）。
-    /// 所有的框、庫存異動、搬運任務在同一筆交易寫入；庫存被別人同時改動時整個重來。回傳這個批次的每一框。
+    /// 模擬收料：在原料倉建立一個沒有訂單的批次，<paramref name="quantity"/> 是組數；一組裡的每一種零件各做這麼多
+    /// （<paramref name="partCodes"/> 可以指定只做其中幾種）。面板與 API 下單改走客戶訂單（OrderService）；這裡留給測試與內部使用。
+    /// 框怎麼建立見 <see cref="ReceiveLotsAsync"/>。所有的框、庫存異動、搬運任務在同一筆交易寫入；庫存被別人同時改動時整個重來。
     /// </summary>
     public Task<List<MaterialLot>> CreateBatchAsync(
         int? quantity, int? rodDiameterMm, IReadOnlyList<string>? partCodes, CancellationToken cancellationToken) =>
@@ -254,93 +252,121 @@ public sealed class ProductionService(
         int? quantity, int? rodDiameterMm, IReadOnlyList<string>? partCodes, string? specCode, CancellationToken cancellationToken)
     {
         var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
-        var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
-        var cutting = steps.FirstOrDefault(s => s.IsCutting);
-        var first = steps.FirstOrDefault(s => !s.IsCutting);
-
         var total = quantity ?? settings.LotQuantity;
         ValidateQuantity(total, MaxBatchQuantity, "quantity");
+        var (spec, diameter) = await ResolveSpecAsync(specCode, rodDiameterMm, cancellationToken);
+        var parts = ValidateParts(partCodes);
 
-        PunchSpec? spec;
-        int diameter;
+        var batchNumber = $"B-{time.GetUtcNow():yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}";
+        var bins = await inventory.RunAsync(
+            () => ReceiveLotsAsync(spec, diameter, parts, total, batchNumber, null, cancellationToken), cancellationToken);
+
+        logger.LogInformation(
+            "Batch {BatchNumber} received at {Station}: {Quantity} set(s) of {Parts} ({Spec}, rod {Diameter} mm) in {Bins} bin(s), {Waiting} waiting for bars.",
+            batchNumber, settings.SourceStationCode, total, string.Join("+", parts), spec?.SpecCode ?? "no spec", diameter, bins.Count,
+            bins.Count(b => b.Status == LotStatus.AwaitingMaterial));
+        return bins;
+    }
+
+    /// <summary>
+    /// 規格：有指定就要存在、而且和指定的桿徑相符；沒有指定就用該桿徑的示範規格（找不到時是 null，料不經過切料）。
+    /// </summary>
+    public async Task<(ProductionSpec? Spec, int Diameter)> ResolveSpecAsync(string? specCode, int? rodDiameterMm, CancellationToken cancellationToken)
+    {
         if (specCode is not null)
         {
-            spec = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).SingleOrDefaultAsync(s => s.Code == specCode, cancellationToken)
+            var spec = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).SingleOrDefaultAsync(s => s.Code == specCode, cancellationToken)
                 ?? throw new RequestValidationException("specCode", $"Punch spec {specCode} does not exist.");
             if (rodDiameterMm is { } rod && rod != spec.RodDiameterMm)
             {
                 throw new RequestValidationException("rodDiameterMm", $"Punch spec {spec.Code} is for {spec.RodDiameterMm} mm rods.");
             }
 
-            diameter = spec.RodDiameterMm;
+            return (ProductionSpec.From(spec, CatalogService.DieOuterDiameterMm), spec.RodDiameterMm);
         }
-        else
+
+        var diameter = rodDiameterMm ?? DefaultRodDiameter;
+        if (!RodDiameters.Contains(diameter))
         {
-            diameter = rodDiameterMm ?? DefaultRodDiameter;
-            if (!RodDiameters.Contains(diameter))
-            {
-                throw new RequestValidationException("rodDiameterMm", $"Rod diameter must be one of {string.Join(", ", RodDiameters)} mm.");
-            }
-
-            var defaultCode = DefaultSpecs[diameter];
-            spec = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).SingleOrDefaultAsync(s => s.Code == defaultCode, cancellationToken);
+            throw new RequestValidationException("rodDiameterMm", $"Rod diameter must be one of {string.Join(", ", RodDiameters)} mm.");
         }
 
-        // 依一組的固定順序建立，不照輸入的順序；重複的只算一次。
+        var defaultCode = DefaultSpecs[diameter];
+        var fallback = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).SingleOrDefaultAsync(s => s.Code == defaultCode, cancellationToken);
+        return (fallback is null ? null : ProductionSpec.From(fallback, CatalogService.DieOuterDiameterMm), diameter);
+    }
+
+    /// <summary>依一組的固定順序（上沖、中模、下沖），不照輸入的順序；重複的只算一次。不認得的零件是輸入錯誤。</summary>
+    public static string[] ValidateParts(IReadOnlyList<string>? partCodes)
+    {
         var parts = partCodes is null ? ProductParts.All : ProductParts.All.Where(partCodes.Contains).ToArray();
         if (parts.Length == 0 || partCodes?.Any(code => !ProductParts.All.Contains(code)) == true)
         {
             throw new RequestValidationException("partCodes", $"Part codes must be one or more of {string.Join(", ", ProductParts.All)}.");
         }
 
-        var batchNumber = $"B-{time.GetUtcNow():yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}";
+        return parts;
+    }
+
+    /// <summary>
+    /// 開立工單：在原料倉建立這張工單的框，批次編號就是工單號碼。規格用工單開立時存下的那一份。
+    /// 不存檔：由呼叫端（建立訂單）在同一筆交易裡一起存。
+    /// </summary>
+    public Task<List<MaterialLot>> ReleaseAsync(ProductionOrder order, CancellationToken cancellationToken) =>
+        ReceiveLotsAsync(order.Spec, order.Spec.RodDiameterMm, order.Parts, order.Quantity, order.Number, order.Id, cancellationToken);
+
+    /// <summary>
+    /// 在原料倉建立一批框，每一種零件各自依料框容量分框（不存檔）。
+    /// 有規格時先用原料倉現成的備料（直接送第一道加工），不夠的從圓棒切（先送切料站）：
+    /// 圓棒依框的順序保留，保留不到的框先在原料倉等料，到貨後才送去切（使用者 2026-10-22：不等料，有多少先做多少）。
+    /// </summary>
+    private async Task<List<MaterialLot>> ReceiveLotsAsync(
+        ProductionSpec? spec, int diameter, IReadOnlyList<string> parts, int total, string batchNumber, Guid? productionOrderId,
+        CancellationToken cancellationToken)
+    {
+        var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
+        var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
+        var cutting = steps.FirstOrDefault(s => s.IsCutting);
+        var first = steps.FirstOrDefault(s => !s.IsCutting);
         var bar = spec is null || cutting is null
             ? null
             : await db.Items.AsNoTracking().SingleOrDefaultAsync(i => i.Code == CatalogService.BarItemCode, cancellationToken);
 
-        var bins = await inventory.RunAsync(async () =>
+        var now = time.GetUtcNow();
+        var bins = new List<MaterialLot>();
+        foreach (var part in parts)
         {
-            var now = time.GetUtcNow();
-            var bins = new List<MaterialLot>();
-            foreach (var part in parts)
+            if (spec is null || cutting is null || bar is null)
             {
-                var capacity = BinCapacity(diameter);
-                if (spec is null || cutting is null || bar is null)
+                // 沒有規格（或沒有切料站）：料直接從原料倉送第一道工序。
+                var sizes = SplitIntoBins(total, BinCapacity(diameter));
+                for (var i = 0; i < sizes.Count; i++)
                 {
-                    // 沒有規格（或沒有切料站）：料直接從原料倉送第一道工序。
-                    var sizes = SplitIntoBins(total, capacity);
-                    for (var i = 0; i < sizes.Count; i++)
-                    {
-                        bins.Add(ReceiveBin(part, sizes[i], first, batchNumber, i + 1, sizes.Count, diameter, null, settings, now));
-                    }
-
-                    continue;
+                    bins.Add(ReceiveBin(part, sizes[i], first, batchNumber, i + 1, sizes.Count, diameter, null, productionOrderId, settings, now));
                 }
 
-                bins.AddRange(await ReceivePartAsync(spec, part, total, capacity, cutting, first, bar, batchNumber, settings, now, cancellationToken));
+                continue;
             }
 
-            return bins;
-        }, cancellationToken);
+            bins.AddRange(await ReceivePartAsync(
+                spec, part, total, cutting, first, bar, batchNumber, productionOrderId, settings, now, cancellationToken));
+        }
 
-        logger.LogInformation(
-            "Batch {BatchNumber} received at {Station}: {Quantity} set(s) of {Parts} ({Spec}, rod {Diameter} mm) in {Bins} bin(s), {Waiting} waiting for bars.",
-            batchNumber, settings.SourceStationCode, total, string.Join("+", parts), spec?.Code ?? "no spec", diameter, bins.Count,
-            bins.Count(b => b.Status == LotStatus.AwaitingMaterial));
         return bins;
     }
 
     /// <summary>
-    /// 一種零件：先保留並領用現成的備料（裝成直接送第一道加工的框），不夠的從圓棒切。
+    /// 一種零件：先保留並領用現成的備料（裝成直接送第一道加工的框），不夠的從圓棒切。一框幾支依規格的桿徑。
     /// 整根切完、一根只切一種長度（使用者 2026-10-22）：圓棒根數＝要切的支數 ÷ 一根切幾支（無條件進位），多出來的切完入庫。
     /// 圓棒依累計支數分到各框（第 k 框用到第 ⌈累計支數 ÷ 一根切幾支⌉ 根為止），多出來的算在最後一框。
     /// </summary>
     private async Task<List<MaterialLot>> ReceivePartAsync(
-        PunchSpec spec, string part, int total, int capacity, ProcessStep cutting, ProcessStep? first, Item bar,
-        string batchNumber, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
+        ProductionSpec spec, string part, int total, ProcessStep cutting, ProcessStep? first, Item bar,
+        string batchNumber, Guid? productionOrderId, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var blankItem = CatalogService.BlankItemCode(spec.Code, part);
-        var blankLength = spec.BlankLengthOverrideFor(part) ?? spec.Rod!.BlankLengthFor(part);
+        var capacity = spec.PiecesPerBin;
+        var blankItem = CatalogService.BlankItemCode(spec.SpecCode, part);
+        var blankLength = spec.BlankLengthFor(part);
         var reference = $"{batchNumber}-{ProductParts.Letter(part)}";
 
         var fromStock = 0;
@@ -358,7 +384,7 @@ public sealed class ProductionService(
         var index = 0;
         foreach (var size in stockBins)
         {
-            lots.Add(ReceiveBin(part, size, first, batchNumber, ++index, binCount, spec.RodDiameterMm, spec.Code, settings, now));
+            lots.Add(ReceiveBin(part, size, first, batchNumber, ++index, binCount, spec.RodDiameterMm, spec.SpecCode, productionOrderId, settings, now));
         }
 
         if (toCut == 0)
@@ -376,7 +402,7 @@ public sealed class ProductionService(
             var barsThrough = (cumulative + perBar - 1) / perBar;
             var extra = i == cutBins.Count - 1 ? totalBars * perBar - toCut : 0;
             var lot = MaterialLot.Receive(part, cutBins[i], settings.SourceStationCode, cutting.Sequence, batchNumber, ++index, binCount,
-                spec.RodDiameterMm, now, spec.Code, awaitingMaterial: true);
+                spec.RodDiameterMm, now, spec.SpecCode, awaitingMaterial: true, productionOrderId);
             db.Lots.Add(lot);
             db.InventoryMovements.Add(InventoryMovement.Record(lot, from: null, "Received", now));
             var job = CuttingJob.Plan(lot, blankItem, bar.Code, blankLength, perBar, barsThrough - barsSoFar, extra, now);
@@ -391,9 +417,11 @@ public sealed class ProductionService(
 
     private MaterialLot ReceiveBin(
         string part, int size, ProcessStep? first, string batchNumber, int index, int binCount, int diameter, string? specCode,
-        ProductionSettings settings, DateTimeOffset now)
+        Guid? productionOrderId, ProductionSettings settings, DateTimeOffset now)
     {
-        var bin = MaterialLot.Receive(part, size, settings.SourceStationCode, first?.Sequence, batchNumber, index, binCount, diameter, now, specCode);
+        var bin = MaterialLot.Receive(
+            part, size, settings.SourceStationCode, first?.Sequence, batchNumber, index, binCount, diameter, now, specCode,
+            productionOrderId: productionOrderId);
         db.Lots.Add(bin);
         db.InventoryMovements.Add(InventoryMovement.Record(bin, from: null, "Received", now));
         db.TransportTasks.Add(TransportTask.Create(
@@ -451,17 +479,21 @@ public sealed class ProductionService(
         var first = steps.FirstOrDefault(s => !s.IsCutting);
         var lotIds = waiting.Select(l => l.Id).ToList();
         var jobs = await db.CuttingJobs.Where(j => lotIds.Contains(j.LotId)).ToDictionaryAsync(j => j.LotId, cancellationToken);
-        var specCodes = waiting.Select(l => l.SpecCode).OfType<string>().Distinct().ToList();
-        var specs = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).Where(s => specCodes.Contains(s.Code))
-            .ToDictionaryAsync(s => s.Code, cancellationToken);
+        // 有工單的框用工單開立時存下的規格；沒有工單的用規格的現值。
+        var orderIds = waiting.Select(l => l.ProductionOrderId).OfType<Guid>().Distinct().ToList();
+        var orderSpecs = await db.ProductionOrders.AsNoTracking().Where(o => orderIds.Contains(o.Id))
+            .ToDictionaryAsync(o => o.Id, o => o.Spec, cancellationToken);
+        var specCodes = waiting.Where(l => l.ProductionOrderId is null).Select(l => l.SpecCode).OfType<string>().Distinct().ToList();
+        var liveSpecs = (await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).Where(s => specCodes.Contains(s.Code)).ToListAsync(cancellationToken))
+            .ToDictionary(s => s.Code, s => ProductionSpec.From(s, CatalogService.DieOuterDiameterMm));
         var bar = await db.Items.AsNoTracking().SingleAsync(i => i.Code == CatalogService.BarItemCode, cancellationToken);
 
         foreach (var lot in waiting)
         {
             if (!jobs.TryGetValue(lot.Id, out var job))
             {
-                var spec = specs[lot.SpecCode!];
-                var blankItem = CatalogService.BlankItemCode(spec.Code, lot.PartCode);
+                var spec = lot.ProductionOrderId is { } orderId ? orderSpecs[orderId] : liveSpecs[lot.SpecCode!];
+                var blankItem = CatalogService.BlankItemCode(spec.SpecCode, lot.PartCode);
                 var stock = await inventory.GetOrCreateBalanceAsync(blankItem, InventoryService.StoreStation, cancellationToken);
                 if (stock.Available >= lot.Quantity)
                 {
@@ -473,7 +505,7 @@ public sealed class ProductionService(
                     continue;
                 }
 
-                var blankLength = spec.BlankLengthOverrideFor(lot.PartCode) ?? spec.Rod!.BlankLengthFor(lot.PartCode);
+                var blankLength = spec.BlankLengthFor(lot.PartCode);
                 var perBar = CatalogService.PiecesPerBar(bar.LengthMm ?? CatalogService.DemoBarLengthMm, blankLength, CatalogService.DemoKerfMm);
                 var bars = (lot.Quantity + perBar - 1) / perBar;
                 job = CuttingJob.Plan(lot, blankItem, bar.Code, blankLength, perBar, bars, bars * perBar - lot.Quantity, now);
@@ -638,7 +670,7 @@ public sealed class ProductionService(
             {
                 if (step.IsInspection)
                 {
-                    Inspect(operation, steps, settings, now);
+                    await InspectAsync(operation, steps, settings, now, cancellationToken);
                 }
                 else if (step.IsCutting)
                 {
@@ -801,7 +833,8 @@ public sealed class ProductionService(
     /// 原本的框盡量留給合格的料；沒有合格的就留給第一種要反工的料；全部報廢時整框標記為報廢。
     /// 缺的自動補做（使用者 2026-10-10）：報廢幾支，當下就在原料倉補投同樣數量的同一種零件，重走整條製程。
     /// </summary>
-    private void Inspect(OperationExecution operation, IReadOnlyList<ProcessStep> steps, ProductionSettings settings, DateTimeOffset now)
+    private async Task InspectAsync(
+        OperationExecution operation, IReadOnlyList<ProcessStep> steps, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var lot = operation.Lot;
         var station = operation.StationCode;
@@ -869,8 +902,13 @@ public sealed class ProductionService(
             var cutting = steps.FirstOrDefault(s => s.IsCutting);
             var first = steps.FirstOrDefault(s => !s.IsCutting);
             var needsMaterial = lot.SpecCode is not null && cutting is not null;
+            // 有工單的料：在主工單上註記報廢，另開一張補做工單（使用者 2026-10-22），補做的框屬於補做工單。
+            var makeupOrder = lot.ProductionOrderId is { } orderId
+                ? await OpenMakeupOrderAsync(orderId, lot, scrapped, now, cancellationToken)
+                : null;
             var makeup = MaterialLot.ReceiveMakeup(
-                lot, scrapped, settings.SourceStationCode, needsMaterial ? cutting!.Sequence : first?.Sequence, now, awaitingMaterial: needsMaterial);
+                lot, scrapped, settings.SourceStationCode, needsMaterial ? cutting!.Sequence : first?.Sequence, now,
+                awaitingMaterial: needsMaterial, productionOrderId: makeupOrder?.Id);
             db.Lots.Add(makeup);
             db.InventoryMovements.Add(InventoryMovement.Record(makeup, from: null, "MakeupReceived", now));
             if (!needsMaterial)
@@ -917,6 +955,49 @@ public sealed class ProductionService(
 
         logger.LogInformation("Lot {LotNumber} inspected at {Station}: {Passed} passed, {Reworked} to rework, {Scrapped} scrapped.",
             lot.LotNumber, station, passed, defective - scrapped, scrapped);
+    }
+
+    /// <summary>
+    /// 報廢了 <paramref name="scrapped"/> 支：在主工單註記，另開一張補做工單（號碼是主工單號碼加 -R 與第幾張）。
+    /// 補做工單裡又報廢時，一樣記在主工單、再開一張，連回主工單（使用者 2026-10-22）。
+    /// 補做工單的規格沿用主工單開立時存下的那一份；BOM 用那個零件目前的版本。
+    /// </summary>
+    private async Task<ProductionOrder> OpenMakeupOrderAsync(
+        Guid orderId, MaterialLot lot, int scrapped, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var source = await db.ProductionOrders.SingleAsync(o => o.Id == orderId, cancellationToken);
+        var main = source.ParentId is { } parentId ? await db.ProductionOrders.SingleAsync(o => o.Id == parentId, cancellationToken) : source;
+
+        // 同一輪可能已經替同一張主工單開過補做工單（還沒存檔），一起算進編號。
+        var saved = await db.ProductionOrders.CountAsync(o => o.ParentId == main.Id, cancellationToken);
+        var pending = db.ChangeTracker.Entries<ProductionOrder>().Count(e => e.State == EntityState.Added && e.Entity.ParentId == main.Id);
+        var partItem = CatalogService.PartItemCode(main.Spec.SpecCode, lot.PartCode);
+        var bomVersion = await db.BomVersions.Where(b => b.ItemCode == partItem).MaxAsync(b => (int?)b.Version, cancellationToken) ?? 1;
+
+        var makeup = ProductionOrder.OpenMakeup(main, saved + pending + 1, lot.PartCode, partItem, scrapped, bomVersion, now);
+        db.ProductionOrders.Add(makeup);
+        db.ScrapRecords.Add(ScrapRecord.Create(main, source, makeup, lot, scrapped, now));
+        logger.LogInformation("Work order {Main}: {Scrapped} piece(s) of {Part} scrapped in {Lot}; make-up order {Makeup} opened.",
+            main.Number, scrapped, lot.PartCode, lot.LotNumber, makeup.Number);
+        return makeup;
+    }
+
+    /// <summary>
+    /// 每件加工時間：粗加工與精加工如果工單的規格有覆寫（例如六角的精加工 90 秒），用工單開立時存下的值；
+    /// 沒有覆寫的、或沒有工單的框，用製程設定的現值。
+    /// </summary>
+    private async Task<double> SecondsPerPieceAsync(ProcessStep step, MaterialLot lot, CancellationToken cancellationToken)
+    {
+        var isRough = step.StationCode == CatalogService.RoughStationCode;
+        if (lot.ProductionOrderId is not { } orderId || !(isRough || step.StationCode == CatalogService.FinishStationCode))
+        {
+            return step.SecondsPerPiece;
+        }
+
+        var spec = await db.ProductionOrders.AsNoTracking().Where(o => o.Id == orderId)
+            .Select(o => new { o.Spec.RoughSecondsPerPiece, o.Spec.FinishSecondsPerPiece })
+            .SingleAsync(cancellationToken);
+        return (isRough ? spec.RoughSecondsPerPiece : spec.FinishSecondsPerPiece) ?? step.SecondsPerPiece;
     }
 
     /// <summary>
@@ -1140,12 +1221,13 @@ public sealed class ProductionService(
             var changeover = step.UsesTool && last is not null && !SameSetup(operation)
                 ? settings.ChangeoverSeconds / settings.SpeedOf(step)
                 : 0;
+            var secondsPerPiece = await SecondsPerPieceAsync(step, operation.Lot, cancellationToken);
             // 品管與包裝是人工逐支作業，沒有機台取放的時間。
-            operation.Start(step.SecondsPerPiece, step.IsManual ? 0 : settings.PieceHandlingSeconds, changeover, now);
+            operation.Start(secondsPerPiece, step.IsManual ? 0 : settings.PieceHandlingSeconds, changeover, now);
             operation.Lot.StartProcessing(now);
             started = true;
             logger.LogInformation("Lot {LotNumber} started step {Step} at {Station}: {Quantity} piece(s), {Seconds}s each, changeover {Changeover:0.#}s.",
-                operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, operation.Quantity, step.SecondsPerPiece, changeover);
+                operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, operation.Quantity, secondsPerPiece, changeover);
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -1317,7 +1399,7 @@ public sealed class ProductionService(
         return total <= 0 ? 1 : Math.Clamp((now - started).TotalSeconds / total, 0, 1);
     }
 
-    private static void ValidateQuantity(int quantity, int max, string field)
+    internal static void ValidateQuantity(int quantity, int max, string field)
     {
         if (quantity < 1 || quantity > max)
         {

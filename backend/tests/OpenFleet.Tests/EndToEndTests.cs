@@ -156,6 +156,12 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             (await _http.GetFromJsonAsync<ShippingSummaryDto>("/api/shipping", JsonDefaults.Options)) is { WaitingBoxes: 3, WaitingPieces: 60, ReadyBoxes: 3 },
             LongTimeout);
 
+        // 面板的「建立批次」是一張客戶訂單（一行整組、一張主工單）：三種零件都包裝完成，訂單就完成了。
+        var order = Assert.Single((await _http.GetFromJsonAsync<List<SalesOrderDto>>("/api/sales-orders", JsonDefaults.Options))!);
+        Assert.Equal(SalesOrderStatus.Completed, order.Status);
+        Assert.Equal(lot.BatchNumber, order.Lines.Single().ProductionOrders.Single().Number);
+        Assert.All(order.Lines.Single().Parts, p => Assert.Equal((20, 20, 0), (p.Ordered, p.Finished, p.InProgress)));
+
         var trace = await GetTraceAsync(lot.Id);
         Assert.Equal((LotStatus.Boxed, "packing"), (trace.Lot.Status, trace.Lot.StationCode));
         Assert.Equal(

@@ -494,6 +494,9 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<Guid?>("ProductionOrderId")
+                        .HasColumnType("uuid");
+
                     b.Property<int>("Quantity")
                         .HasColumnType("integer");
 
@@ -535,6 +538,8 @@ namespace OpenFleet.Api.Data.Migrations
 
                     b.HasIndex("LotNumber")
                         .IsUnique();
+
+                    b.HasIndex("ProductionOrderId");
 
                     b.HasIndex("VehicleId");
 
@@ -711,6 +716,64 @@ namespace OpenFleet.Api.Data.Migrations
                             t.HasCheckConstraint("CK_ProcessSteps_TestSpeed", "\"TestSpeed\" >= 1");
 
                             t.HasCheckConstraint("CK_ProcessSteps_ToolLife", "NOT \"UsesTool\" OR \"ToolLifePieces\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.ProductionOrder", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("BomVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ItemCode")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Number")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid?>("ParentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PartCode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("SalesOrderLineId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ItemCode");
+
+                    b.HasIndex("Number")
+                        .IsUnique();
+
+                    b.HasIndex("ParentId");
+
+                    b.HasIndex("SalesOrderLineId");
+
+                    b.ToTable("ProductionOrders", t =>
+                        {
+                            t.HasCheckConstraint("CK_ProductionOrders_Parent", "(\"Kind\" = 'Main') = (\"ParentId\" IS NULL)");
+
+                            t.HasCheckConstraint("CK_ProductionOrders_Quantity", "\"Quantity\" > 0");
                         });
                 });
 
@@ -971,6 +1034,128 @@ namespace OpenFleet.Api.Data.Migrations
                     b.HasKey("Code");
 
                     b.ToTable("RouteNodes");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.SalesOrder", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Customer")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateOnly?>("DueDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("Number")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("RequestKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Number")
+                        .IsUnique();
+
+                    b.HasIndex("RequestKey")
+                        .IsUnique()
+                        .HasFilter("\"RequestKey\" IS NOT NULL");
+
+                    b.ToTable("SalesOrders");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.SalesOrderLine", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ItemCode")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<int>("LineNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("SalesOrderId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ItemCode");
+
+                    b.HasIndex("SalesOrderId", "LineNumber")
+                        .IsUnique();
+
+                    b.ToTable("SalesOrderLines", t =>
+                        {
+                            t.HasCheckConstraint("CK_SalesOrderLines_Quantity", "\"Quantity\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.ScrapRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("InspectionRound")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("LotId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("LotNumber")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("MainOrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("MakeupOrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PartCode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("SourceOrderId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MainOrderId");
+
+                    b.HasIndex("MakeupOrderId");
+
+                    b.HasIndex("SourceOrderId");
+
+                    b.HasIndex("LotId", "InspectionRound")
+                        .IsUnique();
+
+                    b.ToTable("ScrapRecords", t =>
+                        {
+                            t.HasCheckConstraint("CK_ScrapRecords_Quantity", "\"Quantity\" > 0");
+                        });
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.Shipment", b =>
@@ -1531,6 +1716,11 @@ namespace OpenFleet.Api.Data.Migrations
 
             modelBuilder.Entity("OpenFleet.Api.Data.MaterialLot", b =>
                 {
+                    b.HasOne("OpenFleet.Api.Data.ProductionOrder", null)
+                        .WithMany()
+                        .HasForeignKey("ProductionOrderId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("OpenFleet.Api.Data.Station", null)
                         .WithMany()
                         .HasForeignKey("StationCode")
@@ -1568,6 +1758,76 @@ namespace OpenFleet.Api.Data.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.ProductionOrder", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.Item", null)
+                        .WithMany()
+                        .HasForeignKey("ItemCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.ProductionOrder", null)
+                        .WithMany()
+                        .HasForeignKey("ParentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("OpenFleet.Api.Data.SalesOrderLine", null)
+                        .WithMany()
+                        .HasForeignKey("SalesOrderLineId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.OwnsOne("OpenFleet.Api.Data.ProductionSpec", "Spec", b1 =>
+                        {
+                            b1.Property<Guid>("ProductionOrderId")
+                                .HasColumnType("uuid");
+
+                            b1.Property<int>("DieBlankLengthMm")
+                                .HasColumnType("integer");
+
+                            b1.Property<int>("DieOuterDiameterMm")
+                                .HasColumnType("integer");
+
+                            b1.Property<double?>("FinishSecondsPerPiece")
+                                .HasColumnType("double precision");
+
+                            b1.Property<int>("LowerBlankLengthMm")
+                                .HasColumnType("integer");
+
+                            b1.Property<int>("PiecesPerBin")
+                                .HasColumnType("integer");
+
+                            b1.Property<int>("RodDiameterMm")
+                                .HasColumnType("integer");
+
+                            b1.Property<double?>("RoughSecondsPerPiece")
+                                .HasColumnType("double precision");
+
+                            b1.Property<string>("SpecCode")
+                                .IsRequired()
+                                .HasMaxLength(32)
+                                .HasColumnType("character varying(32)");
+
+                            b1.Property<string>("SpecName")
+                                .IsRequired()
+                                .HasMaxLength(64)
+                                .HasColumnType("character varying(64)");
+
+                            b1.Property<int>("UpperBlankLengthMm")
+                                .HasColumnType("integer");
+
+                            b1.HasKey("ProductionOrderId");
+
+                            b1.ToTable("ProductionOrders");
+
+                            b1.WithOwner()
+                                .HasForeignKey("ProductionOrderId");
+                        });
+
+                    b.Navigation("Spec")
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.PunchSpec", b =>
                 {
                     b.HasOne("OpenFleet.Api.Data.RodSize", "Rod")
@@ -1600,6 +1860,48 @@ namespace OpenFleet.Api.Data.Migrations
                         .WithMany()
                         .HasForeignKey("ToCode")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.SalesOrderLine", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.Item", null)
+                        .WithMany()
+                        .HasForeignKey("ItemCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.SalesOrder", null)
+                        .WithMany("Lines")
+                        .HasForeignKey("SalesOrderId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.ScrapRecord", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.MaterialLot", null)
+                        .WithMany()
+                        .HasForeignKey("LotId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.ProductionOrder", null)
+                        .WithMany()
+                        .HasForeignKey("MainOrderId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.ProductionOrder", null)
+                        .WithMany()
+                        .HasForeignKey("MakeupOrderId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.ProductionOrder", null)
+                        .WithMany()
+                        .HasForeignKey("SourceOrderId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
 
@@ -1717,6 +2019,11 @@ namespace OpenFleet.Api.Data.Migrations
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.BomVersion", b =>
+                {
+                    b.Navigation("Lines");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.SalesOrder", b =>
                 {
                     b.Navigation("Lines");
                 });

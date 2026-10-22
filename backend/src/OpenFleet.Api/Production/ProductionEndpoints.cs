@@ -105,17 +105,18 @@ public static class ProductionEndpoints
                 SimulatedSeconds = d.SimulatedSeconds,
             }).ToListAsync(ct));
 
-        // 建立一個批次；回應是它分成的每一框。
-        api.MapPost("/lots", async (CreateLotRequest? request, ProductionService production, CancellationToken ct) =>
+        // 面板的「建立批次」：改成下一張客戶訂單（客戶是「面板下單」），每一行明細開一張主工單；回應是建立的每一框。
+        api.MapPost("/lots", async (CreateLotRequest? request, Orders.OrderService orders, CancellationToken ct) =>
         {
-            var bins = await production.CreateBatchAsync(request?.Quantity, request?.RodDiameterMm, request?.PartCodes, request?.SpecCode, ct);
+            var bins = await orders.QuickOrderAsync(request?.Quantity, request?.RodDiameterMm, request?.PartCodes, request?.SpecCode, ct);
             return Results.Created("/api/lots", bins.Select(ToDto).ToList());
         });
 
-        // 示範用：清掉所有批次與搬運資料（含刀具配送）並把刀具計數歸零，庫存與採購回到初始值（設定、站點、車輛、規格保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
+        // 示範用：清掉所有訂單、工單、批次與搬運資料（含刀具配送）並把刀具計數歸零，庫存與採購回到初始值（設定、站點、車輛、規格保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
         api.MapPost("/demo/reset", async (OpenFleetDbContext db, ILoggerFactory loggers, CancellationToken ct) =>
         {
-            await db.Database.ExecuteSqlRawAsync("""TRUNCATE "Lots", "TransportTasks", "OutboxMessages", "InboxMessages" CASCADE""", ct);
+            await db.Database.ExecuteSqlRawAsync(
+                """TRUNCATE "Lots", "TransportTasks", "OutboxMessages", "InboxMessages", "ScrapRecords", "ProductionOrders", "SalesOrderLines", "SalesOrders" CASCADE""", ct);
             // 刀具計數與換刀紀錄也歸零，機台回到剛換好刀的狀態。
             await db.Database.ExecuteSqlRawAsync(
                 """TRUNCATE "ToolChanges", "BatchRuns"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
@@ -133,7 +134,7 @@ public static class ProductionEndpoints
         return app;
     }
 
-    private static LotDto ToDto(MaterialLot lot) => new()
+    internal static LotDto ToDto(MaterialLot lot) => new()
     {
         Id = lot.Id,
         LotNumber = lot.LotNumber,

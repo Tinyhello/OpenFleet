@@ -36,8 +36,9 @@ public sealed partial class CatalogService(OpenFleetDbContext db, TimeProvider t
     public const int DemoBarLengthMm = 1500;
     public const int DemoKerfMm = 3;
 
-    private const string RoughStation = "rough";
-    private const string FinishStation = "fine";
+    /// <summary>沖頭規格可以覆寫這兩站的每件加工時間。</summary>
+    public const string RoughStationCode = "rough";
+    public const string FinishStationCode = "fine";
 
     public static string PartItemCode(string specCode, string partCode) => $"{specCode}-{ProductParts.Letter(partCode)}";
     public static string BlankItemCode(string specCode, string partCode) => $"{PartItemCode(specCode, partCode)}-BLK";
@@ -328,9 +329,9 @@ public sealed partial class CatalogService(OpenFleetDbContext db, TimeProvider t
     private async Task<(double Rough, double Finish)> StepDefaultsAsync(CancellationToken cancellationToken)
     {
         var steps = await db.ProcessSteps.AsNoTracking()
-            .Where(s => s.StationCode == RoughStation || s.StationCode == FinishStation)
+            .Where(s => s.StationCode == RoughStationCode || s.StationCode == FinishStationCode)
             .ToDictionaryAsync(s => s.StationCode, s => s.SecondsPerPiece, cancellationToken);
-        return (steps.GetValueOrDefault(RoughStation), steps.GetValueOrDefault(FinishStation));
+        return (steps.GetValueOrDefault(RoughStationCode), steps.GetValueOrDefault(FinishStationCode));
     }
 
     private static void ValidateBlankLength(int? value, string field)
