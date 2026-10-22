@@ -3,7 +3,7 @@ using OpenFleet.Contracts;
 namespace OpenFleet.Api.Fleet;
 
 /// <summary>
-/// 對應 "Fleet" 設定區段。以下預設值是 P1 示範用的暫定值，不是已確認的業務規則（見 document/任務規劃.md 決策紀錄）。
+/// 對應 "Fleet" 設定區段。以下預設值是 P1 示範用的暫定值，不是已確認的業務規則。
 /// </summary>
 public sealed class FleetOptions
 {
