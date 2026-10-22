@@ -61,17 +61,17 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
-    public async Task Batch_of_sets_makes_every_part_and_dies_always_go_thirty_to_a_bin()
+    public async Task Batch_of_sets_makes_every_part_in_set_order_and_dies_follow_the_set_bin_size()
     {
         await using var scope = _database.NewScope();
 
-        // 50 組、桿徑 24 mm：上沖與下沖一框 45 支（45、5），中模一框 30 個（30、20）。
+        // 50 組、桿徑 24 mm：依上沖、中模、下沖的順序，三種都是一框 45 支（45、5）；中模跟同組的上下沖配套（使用者 2026-10-22）。
         var bins = await scope.Production.CreateBatchAsync(50, 24, null, default);
         Assert.Equal(
             new[]
             {
-                ("upper-punch", "U01", 45), ("upper-punch", "U02", 5), ("lower-punch", "L01", 45), ("lower-punch", "L02", 5),
-                ("die", "D01", 30), ("die", "D02", 20),
+                ("upper-punch", "U01", 45), ("upper-punch", "U02", 5), ("die", "D01", 45), ("die", "D02", 5),
+                ("lower-punch", "L01", 45), ("lower-punch", "L02", 5),
             },
             bins.Select(b => (b.PartCode, b.LotNumber[(b.BatchNumber.Length + 1)..], b.Quantity)));
         Assert.Single(bins.Select(b => b.BatchNumber).Distinct());

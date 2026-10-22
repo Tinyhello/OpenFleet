@@ -29,6 +29,10 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<TaskEvent> TaskEvents => Set<TaskEvent>();
     public DbSet<VehicleWait> VehicleWaits => Set<VehicleWait>();
     public DbSet<MachineDelay> MachineDelays => Set<MachineDelay>();
+    public DbSet<RodSize> RodSizes => Set<RodSize>();
+    public DbSet<PunchSpec> PunchSpecs => Set<PunchSpec>();
+    public DbSet<Item> Items => Set<Item>();
+    public DbSet<BomVersion> BomVersions => Set<BomVersion>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
@@ -45,10 +49,70 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         configuration.Properties<ShortageReason>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<TaskResolution>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<ProcessStepKind>().HaveConversion<string>().HaveMaxLength(32);
+        configuration.Properties<ItemKind>().HaveConversion<string>().HaveMaxLength(32);
     }
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        model.Entity<RodSize>(e =>
+        {
+            e.HasKey(r => r.DiameterMm);
+            e.Property(r => r.DiameterMm).ValueGeneratedNever();
+            e.ToTable(t =>
+            {
+                t.HasCheckConstraint("CK_RodSizes_PiecesPerBin", "\"PiecesPerBin\" > 0");
+                t.HasCheckConstraint("CK_RodSizes_BlankLength",
+                    "\"UpperBlankLengthMm\" > 0 AND \"DieBlankLengthMm\" > 0 AND \"LowerBlankLengthMm\" > 0");
+            });
+        });
+
+        model.Entity<PunchSpec>(e =>
+        {
+            e.HasKey(s => s.Code);
+            e.Property(s => s.Code).HasMaxLength(32);
+            e.Property(s => s.Name).HasMaxLength(64);
+            e.Property(s => s.Shape).HasMaxLength(64);
+            e.HasOne(s => s.Rod).WithMany().HasForeignKey(s => s.RodDiameterMm).OnDelete(DeleteBehavior.Restrict);
+            // 覆寫值可以留空（沿用），有填就必須是正數。
+            e.ToTable(t => t.HasCheckConstraint("CK_PunchSpecs_Overrides",
+                "(\"UpperBlankLengthMm\" IS NULL OR \"UpperBlankLengthMm\" > 0) AND " +
+                "(\"DieBlankLengthMm\" IS NULL OR \"DieBlankLengthMm\" > 0) AND " +
+                "(\"LowerBlankLengthMm\" IS NULL OR \"LowerBlankLengthMm\" > 0) AND " +
+                "(\"RoughSecondsPerPiece\" IS NULL OR \"RoughSecondsPerPiece\" > 0) AND " +
+                "(\"FinishSecondsPerPiece\" IS NULL OR \"FinishSecondsPerPiece\" > 0)"));
+        });
+
+        model.Entity<Item>(e =>
+        {
+            e.HasKey(i => i.Code);
+            e.Property(i => i.Code).HasMaxLength(48);
+            e.Property(i => i.Name).HasMaxLength(96);
+            e.Property(i => i.PunchSpecCode).HasMaxLength(32);
+            e.Property(i => i.PartCode).HasMaxLength(32);
+            e.HasIndex(i => new { i.Kind, i.PunchSpecCode });
+            e.HasOne<PunchSpec>().WithMany().HasForeignKey(i => i.PunchSpecCode).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        model.Entity<BomVersion>(e =>
+        {
+            e.Property(b => b.Id).ValueGeneratedNever();
+            e.Property(b => b.ItemCode).HasMaxLength(48);
+            // 同一個品項的版本號不重複；兩個請求同時發新版時由資料庫擋下其中一個。
+            e.HasIndex(b => new { b.ItemCode, b.Version }).IsUnique();
+            e.HasOne<Item>().WithMany().HasForeignKey(b => b.ItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.HasMany(b => b.Lines).WithOne().HasForeignKey(l => l.BomVersionId).OnDelete(DeleteBehavior.Cascade);
+            e.ToTable(t => t.HasCheckConstraint("CK_BomVersions_Version", "\"Version\" > 0"));
+        });
+
+        model.Entity<BomLine>(e =>
+        {
+            e.Property(l => l.Id).ValueGeneratedNever();
+            e.Property(l => l.ChildItemCode).HasMaxLength(48);
+            e.HasIndex(l => new { l.BomVersionId, l.ChildItemCode }).IsUnique();
+            e.HasOne<Item>().WithMany().HasForeignKey(l => l.ChildItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.ToTable(t => t.HasCheckConstraint("CK_BomLines_Quantity", "\"Quantity\" > 0"));
+        });
+
         model.Entity<Station>(e =>
         {
             e.HasKey(s => s.Code);

@@ -1,3 +1,4 @@
+using OpenFleet.Api.Catalog;
 using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
@@ -32,6 +33,7 @@ builder.Services.AddSingleton(sp => new TrafficController(
 // 用到 DbContext 的服務也必須是 Scoped（Singleton 不能依賴 Scoped）。
 builder.Services.AddSingleton<IDefectSource, RandomDefectSource>();
 builder.Services.AddScoped<ProductionService>();
+builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<VehicleShortageService>();
 builder.Services.AddScoped<TransportService>();
 builder.Services.AddScoped<VehicleEventProcessor>();
@@ -60,6 +62,7 @@ app.MapGet("/health", (IMqttPublisher mqtt) => Results.Ok(new
 
 app.MapVehicleEndpoints();
 app.MapProductionEndpoints();
+app.MapCatalogEndpoints();
 app.MapTransportEndpoints();
 
 app.Run();

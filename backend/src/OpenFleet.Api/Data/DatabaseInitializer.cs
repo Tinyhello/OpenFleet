@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using OpenFleet.Api.Catalog;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Contracts;
@@ -72,6 +73,25 @@ public static class DatabaseInitializer
 
     /// <summary>貨車每小時來一次、測試模式 60 倍（1 分鐘一班）：Claude 挑的示範值，待使用者確認。</summary>
     private const double DemoTruckIntervalSeconds = 3600;
+
+    /// <summary>
+    /// 桿徑：一框 45／30 支是使用者確認的數值；各零件的備料長度是示範值（使用者還沒有實際數字），
+    /// 讓一根 1.5 m 的圓棒切出十幾支（使用者 2026-10-22：一根原棒可以切十幾個）。
+    /// </summary>
+    private static readonly RodSize[] DemoRodSizes =
+    [
+        new() { DiameterMm = 30, PiecesPerBin = 30, UpperBlankLengthMm = 110, DieBlankLengthMm = 90, LowerBlankLengthMm = 95 },
+        new() { DiameterMm = 24, PiecesPerBin = 45, UpperBlankLengthMm = 100, DieBlankLengthMm = 85, LowerBlankLengthMm = 88 },
+    ];
+
+    /// <summary>示範的沖頭規格。名稱、形狀與覆寫值都是 Claude 編的示範資料，用來展示「沿用」與「覆寫」。</summary>
+    private static readonly PunchSpec[] DemoSpecs =
+    [
+        new() { Code = "P30-RD12", Name = "圓形 12", Shape = "圓形", RodDiameterMm = 30 },
+        new() { Code = "P30-HX10", Name = "六角 10", Shape = "六角形", RodDiameterMm = 30, FinishSecondsPerPiece = 90 },
+        new() { Code = "P24-SQ08", Name = "方形 8", Shape = "方形", RodDiameterMm = 24 },
+        new() { Code = "P24-SK01", Name = "鍵形 K1", Shape = "特殊形狀", RodDiameterMm = 24, UpperBlankLengthMm = 115, FinishSecondsPerPiece = 120 },
+    ];
 
     public static async Task InitializeDatabaseAsync(this WebApplication app)
     {
@@ -189,6 +209,8 @@ public static class DatabaseInitializer
             db.TruckSchedules.Add(TruckSchedule.Create(interval));
         }
 
+        await SeedCatalogAsync(db);
+
         var vehicles = await db.Vehicles.ToDictionaryAsync(v => v.Id);
         foreach (var (id, type) in fleet.VehicleTypes)
         {
@@ -203,5 +225,43 @@ public static class DatabaseInitializer
         }
 
         await db.SaveChangesAsync();
+    }
+    /// <summary>補上缺少的桿徑、圓棒與示範規格；已經有的不動（之後可能被改過）。</summary>
+    private static async Task SeedCatalogAsync(OpenFleetDbContext db)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var rods = await db.RodSizes.Select(r => r.DiameterMm).ToListAsync();
+        db.RodSizes.AddRange(DemoRodSizes.Where(r => !rods.Contains(r.DiameterMm)).Select(r => new RodSize
+        {
+            DiameterMm = r.DiameterMm,
+            PiecesPerBin = r.PiecesPerBin,
+            UpperBlankLengthMm = r.UpperBlankLengthMm,
+            DieBlankLengthMm = r.DieBlankLengthMm,
+            LowerBlankLengthMm = r.LowerBlankLengthMm,
+        }));
+
+        if (!await db.Items.AnyAsync(i => i.Code == CatalogService.BarItemCode))
+        {
+            db.Items.Add(new Item
+            {
+                Code = CatalogService.BarItemCode, Kind = ItemKind.Bar, Name = "Φ40 圓棒",
+                DiameterMm = CatalogService.BarDiameterMm, LengthMm = CatalogService.DemoBarLengthMm,
+            });
+        }
+
+        var specs = await db.PunchSpecs.Select(s => s.Code).ToListAsync();
+        foreach (var demo in DemoSpecs.Where(d => !specs.Contains(d.Code)))
+        {
+            var spec = new PunchSpec
+            {
+                Code = demo.Code, Name = demo.Name, Shape = demo.Shape, RodDiameterMm = demo.RodDiameterMm,
+                UpperBlankLengthMm = demo.UpperBlankLengthMm, DieBlankLengthMm = demo.DieBlankLengthMm, LowerBlankLengthMm = demo.LowerBlankLengthMm,
+                RoughSecondsPerPiece = demo.RoughSecondsPerPiece, FinishSecondsPerPiece = demo.FinishSecondsPerPiece, CreatedAt = now,
+            };
+            var (items, boms) = CatalogService.BuildSpecRecords(spec, now);
+            db.PunchSpecs.Add(spec);
+            db.Items.AddRange(items);
+            db.BomVersions.AddRange(boms);
+        }
     }
 }

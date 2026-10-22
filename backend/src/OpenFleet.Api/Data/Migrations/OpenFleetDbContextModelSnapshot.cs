@@ -133,6 +133,65 @@ namespace OpenFleet.Api.Data.Migrations
                     b.ToTable("BatchRuns");
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.BomLine", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BomVersionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ChildItemCode")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ChildItemCode");
+
+                    b.HasIndex("BomVersionId", "ChildItemCode")
+                        .IsUnique();
+
+                    b.ToTable("BomLine", t =>
+                        {
+                            t.HasCheckConstraint("CK_BomLines_Quantity", "\"Quantity\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.BomVersion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ItemCode")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<int>("Version")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ItemCode", "Version")
+                        .IsUnique();
+
+                    b.ToTable("BomVersions", t =>
+                        {
+                            t.HasCheckConstraint("CK_BomVersions_Version", "\"Version\" > 0");
+                        });
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.InboxMessage", b =>
                 {
                     b.Property<string>("ProducerId")
@@ -236,6 +295,45 @@ namespace OpenFleet.Api.Data.Migrations
                     b.HasIndex("LotId", "Id");
 
                     b.ToTable("InventoryMovements");
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.Item", b =>
+                {
+                    b.Property<string>("Code")
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<int?>("DiameterMm")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int?>("LengthMm")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(96)
+                        .HasColumnType("character varying(96)");
+
+                    b.Property<string>("PartCode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("PunchSpecCode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Code");
+
+                    b.HasIndex("PunchSpecCode");
+
+                    b.HasIndex("Kind", "PunchSpecCode");
+
+                    b.ToTable("Items");
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.MachineDelay", b =>
@@ -617,6 +715,79 @@ namespace OpenFleet.Api.Data.Migrations
                     b.ToTable("ProductionSettings", t =>
                         {
                             t.HasCheckConstraint("CK_ProductionSettings_Singleton", "\"Id\" = 1");
+                        });
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.PunchSpec", b =>
+                {
+                    b.Property<string>("Code")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("DieBlankLengthMm")
+                        .HasColumnType("integer");
+
+                    b.Property<double?>("FinishSecondsPerPiece")
+                        .HasColumnType("double precision");
+
+                    b.Property<int?>("LowerBlankLengthMm")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int>("RodDiameterMm")
+                        .HasColumnType("integer");
+
+                    b.Property<double?>("RoughSecondsPerPiece")
+                        .HasColumnType("double precision");
+
+                    b.Property<string>("Shape")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int?>("UpperBlankLengthMm")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Code");
+
+                    b.HasIndex("RodDiameterMm");
+
+                    b.ToTable("PunchSpecs", t =>
+                        {
+                            t.HasCheckConstraint("CK_PunchSpecs_Overrides", "(\"UpperBlankLengthMm\" IS NULL OR \"UpperBlankLengthMm\" > 0) AND (\"DieBlankLengthMm\" IS NULL OR \"DieBlankLengthMm\" > 0) AND (\"LowerBlankLengthMm\" IS NULL OR \"LowerBlankLengthMm\" > 0) AND (\"RoughSecondsPerPiece\" IS NULL OR \"RoughSecondsPerPiece\" > 0) AND (\"FinishSecondsPerPiece\" IS NULL OR \"FinishSecondsPerPiece\" > 0)");
+                        });
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.RodSize", b =>
+                {
+                    b.Property<int>("DiameterMm")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("DieBlankLengthMm")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("LowerBlankLengthMm")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PiecesPerBin")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("UpperBlankLengthMm")
+                        .HasColumnType("integer");
+
+                    b.HasKey("DiameterMm");
+
+                    b.ToTable("RodSizes", t =>
+                        {
+                            t.HasCheckConstraint("CK_RodSizes_BlankLength", "\"UpperBlankLengthMm\" > 0 AND \"DieBlankLengthMm\" > 0 AND \"LowerBlankLengthMm\" > 0");
+
+                            t.HasCheckConstraint("CK_RodSizes_PiecesPerBin", "\"PiecesPerBin\" > 0");
                         });
                 });
 
@@ -1005,6 +1176,30 @@ namespace OpenFleet.Api.Data.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.BomLine", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.BomVersion", null)
+                        .WithMany("Lines")
+                        .HasForeignKey("BomVersionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.Item", null)
+                        .WithMany()
+                        .HasForeignKey("ChildItemCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.BomVersion", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.Item", null)
+                        .WithMany()
+                        .HasForeignKey("ItemCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.InspectionResult", b =>
                 {
                     b.HasOne("OpenFleet.Api.Data.MaterialLot", null)
@@ -1021,6 +1216,14 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasForeignKey("LotId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.Item", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.PunchSpec", null)
+                        .WithMany()
+                        .HasForeignKey("PunchSpecCode")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.MachineDelay", b =>
@@ -1075,6 +1278,17 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasForeignKey("StationCode")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.PunchSpec", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.RodSize", "Rod")
+                        .WithMany()
+                        .HasForeignKey("RodDiameterMm")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Rod");
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.RouteEdge", b =>
@@ -1164,6 +1378,11 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasForeignKey("TaskId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.BomVersion", b =>
+                {
+                    b.Navigation("Lines");
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.TransportTask", b =>

@@ -71,11 +71,11 @@ public sealed class ProcessStep
     public string? StageName { get; set; }
 
     /// <summary>
-    /// 某種零件、某個桿徑在這道整爐工序的一爐上限。混裝時每一框占「支數 ÷ 這個值」。
-    /// 中模不是桿狀，比照 30 mm（使用者 2026-10-10 同意先這樣設）。
+    /// 某個桿徑在這道整爐工序的一爐上限。混裝時每一框占「支數 ÷ 這個值」。
+    /// 中模跟同組的下沖相同（使用者 2026-10-22）。
     /// </summary>
-    public int BatchCapacityFor(string partCode, int rodDiameterMm) =>
-        partCode != ProductParts.Die && rodDiameterMm == 24 && BatchMaxPiecesRod24 > 0 ? BatchMaxPiecesRod24 : BatchMaxPieces;
+    public int BatchCapacityFor(int rodDiameterMm) =>
+        rodDiameterMm == 24 && BatchMaxPiecesRod24 > 0 ? BatchMaxPiecesRod24 : BatchMaxPieces;
 
     /// <summary>
     /// 測試模式下這一站的專用倍率（使用者 2026-10-10：取消整體的時間加速，改成測試模式下每一站各自的倍率）。

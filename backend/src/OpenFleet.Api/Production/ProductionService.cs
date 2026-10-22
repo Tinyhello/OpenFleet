@@ -19,7 +19,7 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 整爐（淬火、回火、電鍍）：站內累積到下限才開爐，不同批次可以混在一起，時間到整爐一起放行。
 /// 品管（逐件工序的一種）：逐支檢驗，整框檢完後在品管站分框，合格的往下走、可反工的送回去重做、其餘報廢。
 /// 包裝（逐件工序的一種）：逐支包裝，同批次同一種零件的框全部包完才併成一箱送去出貨站；貨車定時來，把整批到齊的箱子載走。
-/// 一個批次是若干組，每一組是上沖、下沖、中模各一（<see cref="ProductParts"/>）；三種零件各自分框、走同一條製程。
+/// 一個批次是若干組，每一組是上沖、中模、下沖各一（<see cref="ProductParts"/>）；三種零件各自分框、走同一條製程。
 /// 品管報廢的料會自動從原料倉補投同樣數量，補齊之後整批才裝箱。
 /// 測試模式開啟時，每一站依自己的專用倍率加快（<see cref="ProductionSettings.SpeedOf"/>）。
 /// </summary>
@@ -61,11 +61,10 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
     public const int DefaultRodDiameter = 30;
 
     /// <summary>
-    /// 一框可以裝幾支，由桿徑決定（使用者 2026-10-10：一框 30 或 45 支、依桿徑，桿徑有 24 與 30 mm）。
-    /// 「細的 24 mm 裝 45 支、粗的 30 mm 裝 30 支」是 Claude 的推定，待使用者確認。
-    /// 中模不是桿狀，一框 30 個（使用者 2026-10-10 同意先這樣設）。
+    /// 一框可以裝幾支，由桿徑決定：24 mm 一框 45 支、30 mm 一框 30 支（使用者 2026-10-10 確認）。
+    /// 中模外徑是 38 mm，但和同組的上下沖配套，一框支數相同（使用者 2026-10-22）。
     /// </summary>
-    public static int BinCapacity(string partCode, int rodDiameterMm) => partCode != ProductParts.Die && rodDiameterMm == 24 ? 45 : 30;
+    public static int BinCapacity(int rodDiameterMm) => rodDiameterMm == 24 ? 45 : 30;
 
     public async Task<ProductionSettingsDto> GetSettingsAsync(CancellationToken cancellationToken)
     {
@@ -266,7 +265,7 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
 
         foreach (var part in parts)
         {
-            var capacity = BinCapacity(part, diameter);
+            var capacity = BinCapacity(diameter);
             var binCount = (total + capacity - 1) / capacity;
             for (var index = 1; index <= binCount; index++)
             {
@@ -750,7 +749,7 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
             var used = 0d;
             foreach (var operation in waiting)
             {
-                var share = (double)operation.Quantity / step.BatchCapacityFor(operation.Lot.PartCode, operation.Lot.RodDiameterMm);
+                var share = (double)operation.Quantity / step.BatchCapacityFor(operation.Lot.RodDiameterMm);
                 if (used + share <= 1 + 1e-9)
                 {
                     load.Add(operation);
@@ -871,7 +870,7 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                 ?? waiting[0];
 
             // 機床換線（使用者 2026-10-10）：24 mm 與 30 mm 的工控程式不同，桿徑和上一框不同就要先換；
-            // 上沖、下沖、中模之間切換也要換線。
+            // 上沖、中模、下沖之間切換也要換線。
             // 「機床」以有刀具的工序判斷（粗加工、精加工）；拋光不換線。這一站的第一框不用換。
             var step = steps.Single(s => s.Sequence == operation.StepSequence);
             var changeover = step.UsesTool && last is not null && !SameSetup(operation)

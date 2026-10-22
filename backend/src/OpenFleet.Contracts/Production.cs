@@ -88,8 +88,8 @@ namespace OpenFleet.Contracts
     }
 
     /// <summary>
-    /// 一組產品（一套沖模）包含的三種零件。建立批次時每一種各做同樣的數量，各自分框、各自走完整條製程，
-    /// 包裝後各裝一箱；同批次的箱子在出貨站到齊後才由貨車載走。
+    /// 一組產品（一套沖模）包含的三種零件：一支上沖、一支中模、一支下沖（使用者 2026-10-22 確認的順序）。
+    /// 建立批次時每一種各做同樣的數量，各自分框、各自走完整條製程，包裝後各裝一箱；同批次的箱子在出貨站到齊後才由貨車載走。
     /// </summary>
     public static class ProductParts
     {
@@ -98,7 +98,7 @@ namespace OpenFleet.Contracts
         public const string Die = "die";
 
         /// <summary>一組裡的每一種零件，依這個順序建立與顯示。</summary>
-        public static readonly string[] All = { UpperPunch, LowerPunch, Die };
+        public static readonly string[] All = { UpperPunch, Die, LowerPunch };
 
         public static string Name(string partCode)
         {
@@ -111,7 +111,7 @@ namespace OpenFleet.Contracts
             }
         }
 
-        /// <summary>框號裡代表零件的字母（U、L、D）。</summary>
+        /// <summary>框號裡代表零件的字母（U、D、L）。</summary>
         public static string Letter(string partCode)
         {
             switch (partCode)
