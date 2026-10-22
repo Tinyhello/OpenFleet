@@ -30,3 +30,6 @@ Thumbs.db
 # Blender（unity/Openfleet/Blender）
 __pycache__/
 *.blend1
+
+# 本機規劃文件，不進版控
+/document/任務規劃.md
