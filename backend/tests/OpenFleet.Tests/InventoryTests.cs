@@ -18,7 +18,7 @@ public sealed class InventoryTests(PostgresFixture postgres) : IAsyncLifetime
     private const string Bar = "BAR-D40";
     private TestDatabase _database = null!;
 
-    public async Task InitializeAsync() => _database = await TestDatabase.CreateAsync(postgres);
+    public async Task InitializeAsync() => _database = await TestDatabase.CreateAsync(postgres, plentyOfBlanks: false);
 
     public Task DisposeAsync() => Task.CompletedTask;
 

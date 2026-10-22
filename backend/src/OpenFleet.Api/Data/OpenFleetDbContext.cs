@@ -37,6 +37,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<StockReservation> StockReservations => Set<StockReservation>();
     public DbSet<StockMovement> StockMovements => Set<StockMovement>();
     public DbSet<PurchaseOrder> PurchaseOrders => Set<PurchaseOrder>();
+    public DbSet<CuttingJob> CuttingJobs => Set<CuttingJob>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
@@ -171,6 +172,23 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.ToTable(t => t.HasCheckConstraint("CK_PurchaseOrders_Quantity", "\"Quantity\" > 0"));
         });
 
+        model.Entity<CuttingJob>(e =>
+        {
+            e.Property(j => j.Id).ValueGeneratedNever();
+            e.Property(j => j.LotNumber).HasMaxLength(64);
+            e.Property(j => j.BlankItemCode).HasMaxLength(48);
+            e.Property(j => j.BarItemCode).HasMaxLength(48);
+            e.Ignore(j => j.IsReady);
+            e.Ignore(j => j.BarsMissing);
+            // 一框最多一筆切料。
+            e.HasIndex(j => j.LotId).IsUnique();
+            e.HasOne<MaterialLot>().WithOne().HasForeignKey<CuttingJob>(j => j.LotId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<Item>().WithMany().HasForeignKey(j => j.BlankItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Item>().WithMany().HasForeignKey(j => j.BarItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.ToTable(t => t.HasCheckConstraint("CK_CuttingJobs_Quantities",
+                "\"Bars\" >= 0 AND \"BarsReserved\" >= 0 AND \"BarsReserved\" <= \"Bars\" AND \"PiecesPerBar\" > 0 AND \"ExtraBlanks\" >= 0"));
+        });
+
         model.Entity<Station>(e =>
         {
             e.HasKey(s => s.Code);
@@ -251,6 +269,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(l => l.BatchNumber).HasMaxLength(32);
             e.HasIndex(l => l.BatchNumber);
             e.Property(l => l.PartCode).HasMaxLength(32);
+            e.Property(l => l.SpecCode).HasMaxLength(32);
             e.Property(l => l.StationCode).HasMaxLength(32);
             e.Property(l => l.VehicleId).HasMaxLength(32);
             e.Property(l => l.Version).IsRowVersion();

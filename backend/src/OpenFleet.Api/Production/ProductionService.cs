@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
+using OpenFleet.Api.Catalog;
 using OpenFleet.Api.Data;
+using OpenFleet.Api.Inventory;
 using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Production;
@@ -23,7 +25,8 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 品管報廢的料會自動從原料倉補投同樣數量，補齊之後整批才裝箱。
 /// 測試模式開啟時，每一站依自己的專用倍率加快（<see cref="ProductionSettings.SpeedOf"/>）。
 /// </summary>
-public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defects, TimeProvider time, ILogger<ProductionService> logger)
+public sealed class ProductionService(
+    OpenFleetDbContext db, InventoryService inventory, IDefectSource defects, TimeProvider time, ILogger<ProductionService> logger)
 {
     public const double MaxSecondsPerPiece = 600;
     public const double MaxPieceHandlingSeconds = 60;
@@ -55,6 +58,9 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
         (DefectReason.Plating, "plating", "RP"),
         (DefectReason.Dimension, null, string.Empty),
     ];
+
+    /// <summary>沒有指定規格時用的示範規格（每個桿徑一個沒有覆寫的規格）。</summary>
+    public static readonly IReadOnlyDictionary<int, string> DefaultSpecs = new Dictionary<int, string> { [30] = "P30-RD12", [24] = "P24-SQ08" };
 
     /// <summary>目前支援的桿徑（mm）。</summary>
     public static readonly int[] RodDiameters = [24, 30];
@@ -102,6 +108,7 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                 UsesTool = s.UsesTool,
                 IsInspection = s.IsInspection,
                 IsPacking = s.IsPacking,
+                IsCutting = s.IsCutting,
                 ToolLifePieces = s.ToolLifePieces,
                 BatchMinPieces = s.BatchMinPieces,
                 BatchMaxPieces = s.BatchMaxPieces,
@@ -234,22 +241,49 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
 
     /// <summary>
     /// 模擬收料：在原料倉建立一個批次，<paramref name="quantity"/> 是組數；一組裡的每一種零件各做這麼多
-    /// （<paramref name="partCodes"/> 可以指定只做其中幾種）。每一種零件各自依料框容量分成好幾框，
-    /// 每一框各建立一趟送往第一道工序的搬運任務。
-    /// 所有的框、位置異動、搬運任務在同一次 SaveChanges（同一筆交易）寫入。回傳這個批次的每一框。
+    /// （<paramref name="partCodes"/> 可以指定只做其中幾種）。每一種零件各自依料框容量分成好幾框。
+    /// 有規格時先用原料倉現成的備料（直接送第一道加工），不夠的從圓棒切（先送切料站）：
+    /// 圓棒依框的順序保留，保留不到的框先在原料倉等料，到貨後才送去切（使用者 2026-10-22：不等料，有多少先做多少）。
+    /// 所有的框、庫存異動、搬運任務在同一筆交易寫入；庫存被別人同時改動時整個重來。回傳這個批次的每一框。
     /// </summary>
+    public Task<List<MaterialLot>> CreateBatchAsync(
+        int? quantity, int? rodDiameterMm, IReadOnlyList<string>? partCodes, CancellationToken cancellationToken) =>
+        CreateBatchAsync(quantity, rodDiameterMm, partCodes, null, cancellationToken);
+
     public async Task<List<MaterialLot>> CreateBatchAsync(
-        int? quantity, int? rodDiameterMm, IReadOnlyList<string>? partCodes, CancellationToken cancellationToken)
+        int? quantity, int? rodDiameterMm, IReadOnlyList<string>? partCodes, string? specCode, CancellationToken cancellationToken)
     {
         var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
-        var first = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).FirstOrDefaultAsync(cancellationToken);
+        var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
+        var cutting = steps.FirstOrDefault(s => s.IsCutting);
+        var first = steps.FirstOrDefault(s => !s.IsCutting);
 
         var total = quantity ?? settings.LotQuantity;
         ValidateQuantity(total, MaxBatchQuantity, "quantity");
-        var diameter = rodDiameterMm ?? DefaultRodDiameter;
-        if (!RodDiameters.Contains(diameter))
+
+        PunchSpec? spec;
+        int diameter;
+        if (specCode is not null)
         {
-            throw new RequestValidationException("rodDiameterMm", $"Rod diameter must be one of {string.Join(", ", RodDiameters)} mm.");
+            spec = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).SingleOrDefaultAsync(s => s.Code == specCode, cancellationToken)
+                ?? throw new RequestValidationException("specCode", $"Punch spec {specCode} does not exist.");
+            if (rodDiameterMm is { } rod && rod != spec.RodDiameterMm)
+            {
+                throw new RequestValidationException("rodDiameterMm", $"Punch spec {spec.Code} is for {spec.RodDiameterMm} mm rods.");
+            }
+
+            diameter = spec.RodDiameterMm;
+        }
+        else
+        {
+            diameter = rodDiameterMm ?? DefaultRodDiameter;
+            if (!RodDiameters.Contains(diameter))
+            {
+                throw new RequestValidationException("rodDiameterMm", $"Rod diameter must be one of {string.Join(", ", RodDiameters)} mm.");
+            }
+
+            var defaultCode = DefaultSpecs[diameter];
+            spec = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).SingleOrDefaultAsync(s => s.Code == defaultCode, cancellationToken);
         }
 
         // 依一組的固定順序建立，不照輸入的順序；重複的只算一次。
@@ -259,32 +293,243 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
             throw new RequestValidationException("partCodes", $"Part codes must be one or more of {string.Join(", ", ProductParts.All)}.");
         }
 
-        var now = time.GetUtcNow();
-        var batchNumber = $"B-{now:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}";
-        var bins = new List<MaterialLot>();
+        var batchNumber = $"B-{time.GetUtcNow():yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}";
+        var bar = spec is null || cutting is null
+            ? null
+            : await db.Items.AsNoTracking().SingleOrDefaultAsync(i => i.Code == CatalogService.BarItemCode, cancellationToken);
 
-        foreach (var part in parts)
+        var bins = await inventory.RunAsync(async () =>
         {
-            var capacity = BinCapacity(diameter);
-            var binCount = (total + capacity - 1) / capacity;
-            for (var index = 1; index <= binCount; index++)
+            var now = time.GetUtcNow();
+            var bins = new List<MaterialLot>();
+            foreach (var part in parts)
             {
-                // 前面的框裝滿，最後一框裝剩下的。
-                var pieces = index < binCount ? capacity : total - capacity * (binCount - 1);
-                var bin = MaterialLot.Receive(
-                    part, pieces, settings.SourceStationCode, first?.Sequence, batchNumber, index, binCount, diameter, now);
-                bins.Add(bin);
-                db.Lots.Add(bin);
-                db.InventoryMovements.Add(InventoryMovement.Record(bin, from: null, "Received", now));
-                db.TransportTasks.Add(TransportTask.Create(
-                    bin, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+                var capacity = BinCapacity(diameter);
+                if (spec is null || cutting is null || bar is null)
+                {
+                    // 沒有規格（或沒有切料站）：料直接從原料倉送第一道工序。
+                    var sizes = SplitIntoBins(total, capacity);
+                    for (var i = 0; i < sizes.Count; i++)
+                    {
+                        bins.Add(ReceiveBin(part, sizes[i], first, batchNumber, i + 1, sizes.Count, diameter, null, settings, now));
+                    }
+
+                    continue;
+                }
+
+                bins.AddRange(await ReceivePartAsync(spec, part, total, capacity, cutting, first, bar, batchNumber, settings, now, cancellationToken));
+            }
+
+            return bins;
+        }, cancellationToken);
+
+        logger.LogInformation(
+            "Batch {BatchNumber} received at {Station}: {Quantity} set(s) of {Parts} ({Spec}, rod {Diameter} mm) in {Bins} bin(s), {Waiting} waiting for bars.",
+            batchNumber, settings.SourceStationCode, total, string.Join("+", parts), spec?.Code ?? "no spec", diameter, bins.Count,
+            bins.Count(b => b.Status == LotStatus.AwaitingMaterial));
+        return bins;
+    }
+
+    /// <summary>
+    /// 一種零件：先保留並領用現成的備料（裝成直接送第一道加工的框），不夠的從圓棒切。
+    /// 整根切完、一根只切一種長度（使用者 2026-10-22）：圓棒根數＝要切的支數 ÷ 一根切幾支（無條件進位），多出來的切完入庫。
+    /// 圓棒依累計支數分到各框（第 k 框用到第 ⌈累計支數 ÷ 一根切幾支⌉ 根為止），多出來的算在最後一框。
+    /// </summary>
+    private async Task<List<MaterialLot>> ReceivePartAsync(
+        PunchSpec spec, string part, int total, int capacity, ProcessStep cutting, ProcessStep? first, Item bar,
+        string batchNumber, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var blankItem = CatalogService.BlankItemCode(spec.Code, part);
+        var blankLength = spec.BlankLengthOverrideFor(part) ?? spec.Rod!.BlankLengthFor(part);
+        var reference = $"{batchNumber}-{ProductParts.Letter(part)}";
+
+        var fromStock = 0;
+        if (await inventory.ReserveAsync(blankItem, InventoryService.StoreStation, total, reference, cancellationToken) is { } blanks)
+        {
+            fromStock = blanks.Quantity;
+            await inventory.ConsumeAsync(blanks, fromStock, cancellationToken);
+        }
+
+        var toCut = total - fromStock;
+        var stockBins = SplitIntoBins(fromStock, capacity);
+        var cutBins = SplitIntoBins(toCut, capacity);
+        var binCount = stockBins.Count + cutBins.Count;
+        var lots = new List<MaterialLot>();
+        var index = 0;
+        foreach (var size in stockBins)
+        {
+            lots.Add(ReceiveBin(part, size, first, batchNumber, ++index, binCount, spec.RodDiameterMm, spec.Code, settings, now));
+        }
+
+        if (toCut == 0)
+        {
+            return lots;
+        }
+
+        var perBar = CatalogService.PiecesPerBar(bar.LengthMm ?? CatalogService.DemoBarLengthMm, blankLength, CatalogService.DemoKerfMm);
+        var totalBars = (toCut + perBar - 1) / perBar;
+        var cumulative = 0;
+        var barsSoFar = 0;
+        for (var i = 0; i < cutBins.Count; i++)
+        {
+            cumulative += cutBins[i];
+            var barsThrough = (cumulative + perBar - 1) / perBar;
+            var extra = i == cutBins.Count - 1 ? totalBars * perBar - toCut : 0;
+            var lot = MaterialLot.Receive(part, cutBins[i], settings.SourceStationCode, cutting.Sequence, batchNumber, ++index, binCount,
+                spec.RodDiameterMm, now, spec.Code, awaitingMaterial: true);
+            db.Lots.Add(lot);
+            db.InventoryMovements.Add(InventoryMovement.Record(lot, from: null, "Received", now));
+            var job = CuttingJob.Plan(lot, blankItem, bar.Code, blankLength, perBar, barsThrough - barsSoFar, extra, now);
+            db.CuttingJobs.Add(job);
+            barsSoFar = barsThrough;
+            await ReserveBarsAsync(lot, job, cutting, settings, now, cancellationToken);
+            lots.Add(lot);
+        }
+
+        return lots;
+    }
+
+    private MaterialLot ReceiveBin(
+        string part, int size, ProcessStep? first, string batchNumber, int index, int binCount, int diameter, string? specCode,
+        ProductionSettings settings, DateTimeOffset now)
+    {
+        var bin = MaterialLot.Receive(part, size, settings.SourceStationCode, first?.Sequence, batchNumber, index, binCount, diameter, now, specCode);
+        db.Lots.Add(bin);
+        db.InventoryMovements.Add(InventoryMovement.Record(bin, from: null, "Received", now));
+        db.TransportTasks.Add(TransportTask.Create(
+            bin, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+        return bin;
+    }
+
+    /// <summary>替一框保留還缺的圓棒；保留到夠了，這一框就從等料改成送去切料。</summary>
+    private async Task ReserveBarsAsync(
+        MaterialLot lot, CuttingJob job, ProcessStep cutting, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (job.BarsMissing > 0
+            && await inventory.ReserveAsync(job.BarItemCode, InventoryService.StoreStation, job.BarsMissing, lot.LotNumber, cancellationToken) is { } reserved)
+        {
+            job.AddReserved(reserved.Quantity);
+        }
+
+        if (job.IsReady)
+        {
+            lot.MaterialArrived(cutting.Sequence, now);
+            db.TransportTasks.Add(TransportTask.Create(lot, settings.SourceStationCode, cutting.StationCode, TransportTaskKind.Replenishment, now));
+        }
+    }
+
+    /// <summary>前面的框裝滿，最後一框裝剩下的。</summary>
+    private static List<int> SplitIntoBins(int total, int capacity)
+    {
+        var sizes = new List<int>();
+        for (var left = total; left > 0; left -= capacity)
+        {
+            sizes.Add(Math.Min(capacity, left));
+        }
+
+        return sizes;
+    }
+
+    /// <summary>
+    /// 等料的框（圓棒不夠，或補做的料還沒分配）依建立順序再試一次：
+    /// 補做的框先看現成的備料夠不夠整框，夠就直接送第一道加工；不夠就排切料、保留圓棒。
+    /// 保留到夠了就送去切料。採購單收貨或盤點補進圓棒後，下一輪就會接上。
+    /// 和其他寫入庫存的請求同時改到同一列時，這一輪放棄，下一輪重來。
+    /// </summary>
+    private async Task<bool> AllocateWaitingMaterialAsync(
+        IReadOnlyList<ProcessStep> steps, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var cutting = steps.FirstOrDefault(s => s.IsCutting);
+        if (cutting is null || !await db.Lots.AnyAsync(l => l.Status == LotStatus.AwaitingMaterial, cancellationToken))
+        {
+            return false;
+        }
+
+        var waiting = await db.Lots.Where(l => l.Status == LotStatus.AwaitingMaterial)
+            .OrderBy(l => l.CreatedAt).ThenBy(l => l.LotNumber)
+            .ToListAsync(cancellationToken);
+        var first = steps.FirstOrDefault(s => !s.IsCutting);
+        var lotIds = waiting.Select(l => l.Id).ToList();
+        var jobs = await db.CuttingJobs.Where(j => lotIds.Contains(j.LotId)).ToDictionaryAsync(j => j.LotId, cancellationToken);
+        var specCodes = waiting.Select(l => l.SpecCode).OfType<string>().Distinct().ToList();
+        var specs = await db.PunchSpecs.AsNoTracking().Include(s => s.Rod).Where(s => specCodes.Contains(s.Code))
+            .ToDictionaryAsync(s => s.Code, cancellationToken);
+        var bar = await db.Items.AsNoTracking().SingleAsync(i => i.Code == CatalogService.BarItemCode, cancellationToken);
+
+        foreach (var lot in waiting)
+        {
+            if (!jobs.TryGetValue(lot.Id, out var job))
+            {
+                var spec = specs[lot.SpecCode!];
+                var blankItem = CatalogService.BlankItemCode(spec.Code, lot.PartCode);
+                var stock = await inventory.GetOrCreateBalanceAsync(blankItem, InventoryService.StoreStation, cancellationToken);
+                if (stock.Available >= lot.Quantity)
+                {
+                    var blanks = (await inventory.ReserveAsync(blankItem, InventoryService.StoreStation, lot.Quantity, lot.LotNumber, cancellationToken))!;
+                    await inventory.ConsumeAsync(blanks, lot.Quantity, cancellationToken);
+                    lot.MaterialArrived(first!.Sequence, now);
+                    db.TransportTasks.Add(TransportTask.Create(lot, settings.SourceStationCode, first.StationCode, TransportTaskKind.Replenishment, now));
+                    logger.LogInformation("Lot {LotNumber}: {Quantity} blank(s) taken from stock.", lot.LotNumber, lot.Quantity);
+                    continue;
+                }
+
+                var blankLength = spec.BlankLengthOverrideFor(lot.PartCode) ?? spec.Rod!.BlankLengthFor(lot.PartCode);
+                var perBar = CatalogService.PiecesPerBar(bar.LengthMm ?? CatalogService.DemoBarLengthMm, blankLength, CatalogService.DemoKerfMm);
+                var bars = (lot.Quantity + perBar - 1) / perBar;
+                job = CuttingJob.Plan(lot, blankItem, bar.Code, blankLength, perBar, bars, bars * perBar - lot.Quantity, now);
+                db.CuttingJobs.Add(job);
+            }
+
+            await ReserveBarsAsync(lot, job, cutting, settings, now, cancellationToken);
+            if (lot.Status == LotStatus.AwaitingTransport)
+            {
+                logger.LogInformation("Lot {LotNumber}: {Bars} bar(s) reserved; transport to cutting requested.", lot.LotNumber, job.Bars);
             }
         }
 
-        await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Batch {BatchNumber} received at {Station}: {Quantity} set(s) of {Parts} (rod {Diameter} mm) in {Bins} bin(s).",
-            batchNumber, settings.SourceStationCode, total, string.Join("+", parts), diameter, bins.Count);
-        return bins;
+        if (!db.ChangeTracker.HasChanges())
+        {
+            return false;
+        }
+
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogInformation("Material allocation conflicted with another stock update; retrying next cycle.");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 切完一框：領用這一框保留的圓棒，多出來的備料放回原料倉（Claude 選的存放位置，待使用者確認）。
+    /// 多出來的備料直接算入庫，沒有另外的搬運。
+    /// </summary>
+    private async Task FinishCuttingAsync(OperationExecution operation, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var lot = operation.Lot;
+        var job = await db.CuttingJobs.SingleAsync(j => j.LotId == lot.Id, cancellationToken);
+        var reservations = await db.StockReservations
+            .Where(r => r.Reference == lot.LotNumber && r.ItemCode == job.BarItemCode && r.Remaining > 0)
+            .ToListAsync(cancellationToken);
+        foreach (var reservation in reservations)
+        {
+            await inventory.ConsumeAsync(reservation, reservation.Remaining, cancellationToken);
+        }
+
+        if (job.ExtraBlanks > 0)
+        {
+            await inventory.AddStockAsync(
+                job.BlankItemCode, InventoryService.StoreStation, job.ExtraBlanks, StockMovementReason.Production, lot.LotNumber, cancellationToken);
+        }
+
+        job.Complete(now);
+        logger.LogInformation("Lot {LotNumber} cut: {Bars} bar(s) used, {Pieces} piece(s) cut, {Extra} extra blank(s) into stock.",
+            lot.LotNumber, job.Bars, job.PiecesToCut, job.ExtraBlanks);
     }
 
     /// <summary>一框剛卸到某站：還有工序就建立一筆排隊中的加工紀錄。由搬運完成事件在同一筆交易內呼叫。</summary>
@@ -323,6 +568,7 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
         var now = time.GetUtcNow();
         var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
         var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
+        var allocated = await AllocateWaitingMaterialAsync(steps, settings, now, cancellationToken);
         var tools = await db.StationTools.ToDictionaryAsync(t => t.StationCode, cancellationToken);
         var running = await db.Operations.Include(o => o.Lot)
             .Where(o => o.Status == OperationStatus.Running)
@@ -394,6 +640,11 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                 {
                     Inspect(operation, steps, settings, now);
                 }
+                else if (step.IsCutting)
+                {
+                    await FinishCuttingAsync(operation, now, cancellationToken);
+                    Release(operation, steps, settings, now);
+                }
                 else if (step.IsPacking)
                 {
                     // 包完的框留在包裝站，等同批次到齊（BoxPackedBatchesAsync）。
@@ -434,7 +685,7 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
         changed |= await BoxPackedBatchesAsync(settings, now, cancellationToken);
         changed |= await AdvanceTruckAsync(settings, now, cancellationToken);
         var started = await StartQueuedOperationsAsync(steps, tools, settings, now, cancellationToken);
-        return await StartBatchRunsAsync(steps, settings, now, cancellationToken) || started || changed;
+        return await StartBatchRunsAsync(steps, settings, now, cancellationToken) || started || changed || allocated;
     }
 
     /// <summary>
@@ -614,12 +865,19 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
                 OccurredAt = now,
             });
 
-            var first = steps.FirstOrDefault();
-            var makeup = MaterialLot.ReceiveMakeup(lot, scrapped, settings.SourceStationCode, first?.Sequence, now);
+            // 有規格的料：補做也要有實際的備料或圓棒，先在原料倉等料，下一輪由備料分配決定從哪一站開始。
+            var cutting = steps.FirstOrDefault(s => s.IsCutting);
+            var first = steps.FirstOrDefault(s => !s.IsCutting);
+            var needsMaterial = lot.SpecCode is not null && cutting is not null;
+            var makeup = MaterialLot.ReceiveMakeup(
+                lot, scrapped, settings.SourceStationCode, needsMaterial ? cutting!.Sequence : first?.Sequence, now, awaitingMaterial: needsMaterial);
             db.Lots.Add(makeup);
             db.InventoryMovements.Add(InventoryMovement.Record(makeup, from: null, "MakeupReceived", now));
-            db.TransportTasks.Add(TransportTask.Create(
-                makeup, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+            if (!needsMaterial)
+            {
+                db.TransportTasks.Add(TransportTask.Create(
+                    makeup, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+            }
             logger.LogInformation("Lot {LotNumber}: {Scrapped} piece(s) scrapped; make-up lot {Makeup} received at {Station}.",
                 lot.LotNumber, scrapped, makeup.LotNumber, settings.SourceStationCode);
         }
@@ -873,6 +1131,12 @@ public sealed class ProductionService(OpenFleetDbContext db, IDefectSource defec
             // 上沖、中模、下沖之間切換也要換線。
             // 「機床」以有刀具的工序判斷（粗加工、精加工）；拋光不換線。這一站的第一框不用換。
             var step = steps.Single(s => s.Sequence == operation.StepSequence);
+            if (step.IsCutting && await db.CuttingJobs.AsNoTracking().SingleOrDefaultAsync(j => j.LotId == operation.LotId, cancellationToken) is { } job)
+            {
+                // 切料站切的是整根圓棒：最後一框連多出來的一起切。
+                operation.Quantity = job.PiecesToCut;
+            }
+
             var changeover = step.UsesTool && last is not null && !SameSetup(operation)
                 ? settings.ChangeoverSeconds / settings.SpeedOf(step)
                 : 0;

@@ -4,6 +4,7 @@ namespace OpenFleet.Unity.Editor
 {
     internal enum StationKind
     {
+        Cutting,
         RawMaterialStore,
         RoughMachining,
         FineMachining,
@@ -48,22 +49,23 @@ namespace OpenFleet.Unity.Editor
     /// 站點數量與位置不是已確認的業務規則；P2 起站點應由後端資料提供，Unity 只負責畫出來。
     ///
     /// 走道的車道位置必須與後端的路網相同（見 OuterLane／InnerLane）。
-    /// 下排（靠南牆）由左到右依製程順序：原料倉、粗加工、精加工、淬火、回火、電鍍；
+    /// 下排（靠南牆）由左到右依製程順序：切料、原料倉、粗加工、精加工、淬火、回火、電鍍；
+    /// 切料站在原料倉左邊，廠房因此往西加寬 8 m（使用者 2026-10-22 選的），場地中心不在原點。
     /// 上排（靠北牆）由右到左：拋光、雜物倉庫、品管、包裝、成品倉、出貨。成品倉與雜物倉庫只是場景，沒有後端站點（見 Storages）。
     /// 西牆中間是工廠大門，進料與出貨共用（使用者 2026-10-12）。
     /// 刀具庫在走道內側的島區中央，交接點接在內圈車道下邊；位置必須和後端 DemoRoadNetwork 的 IslandHandoffZ 一致。
     /// </summary>
     internal static class FactoryLayout
     {
-        /// <summary>牆貼著上下兩排站點的後方。</summary>
-        public static readonly Vector2 FloorSize = new Vector2(52f, 30.4f);
+        /// <summary>地面（公尺，X／Z）。牆貼著上下兩排站點的後方；西側比東側多 8 m 放切料站。</summary>
+        public static readonly Rect Floor = Rect.MinMaxRect(-34f, -15.2f, 26f, 15.2f);
 
         /// <summary>
-        /// 環狀走道有內外兩條車道（都不限方向）。數值是各車道中心線到場地中心的距離，
+        /// 環狀走道有內外兩條車道（都不限方向）。數值是各車道中心線圍成的矩形，
         /// 必須與後端路網的節點座標相同（backend/src/OpenFleet.Api/Traffic/RoadNetwork.cs 的 DemoRoadNetwork）。
         /// </summary>
-        public static readonly Vector2 OuterLane = new Vector2(22f, 7f);
-        public static readonly Vector2 InnerLane = new Vector2(20.2f, 5.2f);
+        public static readonly Rect OuterLane = Rect.MinMaxRect(-30f, -7f, 22f, 7f);
+        public static readonly Rect InnerLane = Rect.MinMaxRect(-28.2f, -5.2f, 20.2f, 5.2f);
 
         /// <summary>車道中心線到鋪面邊緣的距離。</summary>
         public const float LaneEdge = 1.2f;
@@ -78,6 +80,7 @@ namespace OpenFleet.Unity.Editor
 
         public static readonly StationSpec[] Stations =
         {
+            new StationSpec("cutting", StationKind.Cutting, "切料", "Cutting", new Vector2(-28f, -12.8f), false),
             new StationSpec("raw-store", StationKind.RawMaterialStore, "原料倉", "Raw Material", new Vector2(-20f, -12.8f), false),
             new StationSpec("rough", StationKind.RoughMachining, "粗加工", "Rough Machining", new Vector2(-12f, -12.8f), false),
             new StationSpec("fine", StationKind.FineMachining, "精加工", "Fine Machining", new Vector2(-4f, -12.8f), false),

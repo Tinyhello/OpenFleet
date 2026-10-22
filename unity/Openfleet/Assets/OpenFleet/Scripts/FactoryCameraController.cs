@@ -9,10 +9,14 @@ namespace OpenFleet.Unity
     /// </summary>
     public sealed class FactoryCameraController : MonoBehaviour
     {
-        [SerializeField] private Vector3 target = new Vector3(0f, 0f, -1.5f);
+        /// <summary>預設視角：場地中心稍微偏南。廠房往西加寬放切料站後，中心在 X = -4（Editor 建場景時也用這兩個值）。</summary>
+        public static readonly Vector3 DefaultTarget = new Vector3(-4f, 0f, -1.5f);
+        public const float DefaultDistance = 56f;
+
+        [SerializeField] private Vector3 target = DefaultTarget;
         [SerializeField] private float yaw;
         [SerializeField] private float pitch = 50f;
-        [SerializeField] private float distance = 50f;
+        [SerializeField] private float distance = DefaultDistance;
         [SerializeField] private float minDistance = 5f;
         [SerializeField] private float maxDistance = 80f;
         [SerializeField] private float rotateSpeed = 0.25f;

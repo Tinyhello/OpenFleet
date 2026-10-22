@@ -192,6 +192,68 @@ namespace OpenFleet.Api.Data.Migrations
                         });
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.CuttingJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BarItemCode")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<int>("Bars")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("BarsReserved")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("BlankItemCode")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("character varying(48)");
+
+                    b.Property<int>("BlankLengthMm")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("ExtraBlanks")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("LotId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("LotNumber")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int>("PiecesPerBar")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PiecesToCut")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BarItemCode");
+
+                    b.HasIndex("BlankItemCode");
+
+                    b.HasIndex("LotId")
+                        .IsUnique();
+
+                    b.ToTable("CuttingJobs", t =>
+                        {
+                            t.HasCheckConstraint("CK_CuttingJobs_Quantities", "\"Bars\" >= 0 AND \"BarsReserved\" >= 0 AND \"BarsReserved\" <= \"Bars\" AND \"PiecesPerBar\" > 0 AND \"ExtraBlanks\" >= 0");
+                        });
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.InboxMessage", b =>
                 {
                     b.Property<string>("ProducerId")
@@ -441,6 +503,10 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<int>("RodDiameterMm")
                         .HasColumnType("integer");
 
+                    b.Property<string>("SpecCode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("StationCode")
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
@@ -596,6 +662,9 @@ namespace OpenFleet.Api.Data.Migrations
 
                     b.Property<double>("BatchSeconds")
                         .HasColumnType("double precision");
+
+                    b.Property<bool>("IsCutting")
+                        .HasColumnType("boolean");
 
                     b.Property<bool>("IsInspection")
                         .HasColumnType("boolean");
@@ -1395,6 +1464,27 @@ namespace OpenFleet.Api.Data.Migrations
                         .WithMany()
                         .HasForeignKey("ItemCode")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("OpenFleet.Api.Data.CuttingJob", b =>
+                {
+                    b.HasOne("OpenFleet.Api.Data.Item", null)
+                        .WithMany()
+                        .HasForeignKey("BarItemCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.Item", null)
+                        .WithMany()
+                        .HasForeignKey("BlankItemCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("OpenFleet.Api.Data.MaterialLot", null)
+                        .WithOne()
+                        .HasForeignKey("OpenFleet.Api.Data.CuttingJob", "LotId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

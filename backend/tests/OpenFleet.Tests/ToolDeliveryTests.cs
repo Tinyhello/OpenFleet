@@ -20,7 +20,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         {
             s.ToolDeliveryEnabled = true;
             s.ToolRequestThresholdPieces = 4;
-            s.Steps[0].ToolLifePieces = 10;
+            s.Steps[1].ToolLifePieces = 10;
         });
 
         // 一批送到粗加工並開始加工。
@@ -114,7 +114,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(10, (await RoughAsync()).Machining!.PiecesCompleted);
         var summary = await SummaryAsync(Online("agv-a"), Online("agv-s"));
         Assert.Equal((6d, 6d, MachineDelayCause.WaitingForTool, ShortageReason.VehiclesBusy),
-            (summary.Steps[0].DelaySeconds, summary.Steps[0].WaitingForToolSeconds, summary.Steps[0].CurrentCause, summary.Steps[0].CurrentReason));
+            (summary.Steps[1].DelaySeconds, summary.Steps[1].WaitingForToolSeconds, summary.Steps[1].CurrentCause, summary.Steps[1].CurrentReason));
 
         // 小型車有空了：派出的那一刻缺車結束。車還在路上時機台仍然停著，但那是配送時間，不算缺車。
         await _database.ReleaseAsync("agv-s");
@@ -122,7 +122,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         await AdvanceAsync(4);
         Assert.Equal(0, await DispatchAsync(Online("agv-a"), Online("agv-s")));
         summary = await SummaryAsync(Online("agv-a"), Online("agv-s"));
-        Assert.Equal((6d, null), (summary.Steps[0].WaitingForToolSeconds, summary.Steps[0].CurrentCause));
+        Assert.Equal((6d, null), (summary.Steps[1].WaitingForToolSeconds, summary.Steps[1].CurrentCause));
         Assert.True((await RoughAsync()).Tool!.WaitingForTool);
 
         // 新刀送到才開始換刀（20 秒），換完從頭計時下一件。
@@ -152,7 +152,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(new[] { VehicleType.Small }, summary.OfflineVehicleTypes);
         Assert.Equal((1, 0), (summary.OfflineWaitingTasks, summary.WaitingTasks));
         Assert.Equal((0d, 5d, MachineDelayCause.WaitingForTool, ShortageReason.FleetOffline),
-            (summary.Steps[0].DelaySeconds, summary.Steps[0].OfflineSeconds, summary.Steps[0].CurrentCause, summary.Steps[0].CurrentReason));
+            (summary.Steps[1].DelaySeconds, summary.Steps[1].OfflineSeconds, summary.Steps[1].CurrentCause, summary.Steps[1].CurrentReason));
     }
 
     [Fact]

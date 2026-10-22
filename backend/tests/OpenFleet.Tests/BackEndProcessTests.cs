@@ -307,7 +307,7 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         await ConfigureAsync(settings =>
         {
             settings.TestMode = true;
-            settings.Steps[0].TestSpeed = 10;
+            settings.Steps[1].TestSpeed = 10;
         });
         await AdvanceAsync(0);
         Assert.Equal("B-B", await RunningBatchAsync("rough"));

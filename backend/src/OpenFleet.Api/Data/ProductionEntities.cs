@@ -47,6 +47,12 @@ public sealed class ProcessStep
     /// </summary>
     public bool IsPacking { get; set; }
 
+    /// <summary>
+    /// 這道逐件工序是切料（使用者 2026-10-22：要有切料站，整根圓棒切完、多出來的備料入庫；切一支約 5 分鐘）。
+    /// 從圓棒切的框才經過這一站；用現成備料的框直接從下一道工序開始。
+    /// </summary>
+    public bool IsCutting { get; set; }
+
     /// <summary>人工作業的工序（品管、包裝）沒有機台取放一件的時間。</summary>
     public bool IsManual => IsInspection || IsPacking;
 
@@ -366,6 +372,9 @@ public sealed class MaterialLot
 
     /// <summary>桿徑（mm），決定一框裝幾支。</summary>
     public int RodDiameterMm { get; private set; }
+
+    /// <summary>沖頭規格代碼（決定備料長度）；P5 以前建立的框沒有，也不經過切料。</summary>
+    public string? SpecCode { get; private set; }
     public string PartCode { get; private set; } = string.Empty;
     public int Quantity { get; private set; }
     public LotStatus Status { get; private set; }
@@ -393,12 +402,18 @@ public sealed class MaterialLot
     /// <summary>位置代碼，用在 <see cref="InventoryMovement"/>。</summary>
     public string Location => VehicleId is not null ? LocationCode.Vehicle(VehicleId) : LocationCode.Station(StationCode!);
 
+    /// <summary>
+    /// 在原料倉建立一框。<paramref name="awaitingMaterial"/> 為 true 時先等料（要切的圓棒還不夠），
+    /// 料到了才由 <see cref="MaterialArrived"/> 改成等待搬運。
+    /// </summary>
     public static MaterialLot Receive(
         string partCode, int quantity, string stationCode, int? firstStep,
-        string batchNumber, int binIndex, int binCount, int rodDiameterMm, DateTimeOffset now)
+        string batchNumber, int binIndex, int binCount, int rodDiameterMm, DateTimeOffset now,
+        string? specCode = null, bool awaitingMaterial = false)
     {
         return new MaterialLot
         {
+            SpecCode = specCode,
             Id = Guid.NewGuid(),
             LotNumber = $"{batchNumber}-{ProductParts.Letter(partCode)}{binIndex:00}",
             BatchNumber = batchNumber,
@@ -407,12 +422,23 @@ public sealed class MaterialLot
             RodDiameterMm = rodDiameterMm,
             PartCode = partCode,
             Quantity = quantity,
-            Status = LotStatus.AwaitingTransport,
+            Status = awaitingMaterial ? LotStatus.AwaitingMaterial : LotStatus.AwaitingTransport,
             StationCode = stationCode,
             CurrentStepSequence = firstStep,
             CreatedAt = now,
             UpdatedAt = now,
         };
+    }
+
+    /// <summary>
+    /// 等料的框拿到料了：從 <paramref name="step"/> 開始（要切的從切料、用現成備料的從第一道加工），改成等待搬運。
+    /// </summary>
+    public void MaterialArrived(int step, DateTimeOffset now)
+    {
+        Require(LotStatus.AwaitingMaterial, nameof(MaterialArrived));
+        CurrentStepSequence = step;
+        Status = LotStatus.AwaitingTransport;
+        UpdatedAt = now;
     }
 
     public void LoadOnto(string vehicleId, DateTimeOffset now)
@@ -512,6 +538,7 @@ public sealed class MaterialLot
         BinIndex = source.BinIndex,
         BinCount = source.BinCount,
         RodDiameterMm = source.RodDiameterMm,
+        SpecCode = source.SpecCode,
         PartCode = source.PartCode,
         Quantity = quantity,
         Status = LotStatus.AwaitingTransport,
@@ -525,8 +552,10 @@ public sealed class MaterialLot
     /// <summary>
     /// 品管報廢了 <paramref name="quantity"/> 支：在原料倉補投同樣數量的同一種零件，重走整條製程。
     /// 批次編號相同，所以這個批次要等補做的料包裝完才裝箱；框號是原本的框號加上 -M 與第幾次檢驗。
+    /// 有規格的框先等料（<paramref name="awaitingMaterial"/>）：補做也要有實際的備料或圓棒，由備料分配決定從哪一站開始。
     /// </summary>
-    public static MaterialLot ReceiveMakeup(MaterialLot source, int quantity, string stationCode, int? firstStep, DateTimeOffset now) => new()
+    public static MaterialLot ReceiveMakeup(
+        MaterialLot source, int quantity, string stationCode, int? firstStep, DateTimeOffset now, bool awaitingMaterial = false) => new()
     {
         Id = Guid.NewGuid(),
         LotNumber = $"{source.LotNumber}-M{source.ReworkCount + 1}",
@@ -534,9 +563,10 @@ public sealed class MaterialLot
         BinIndex = source.BinIndex,
         BinCount = source.BinCount,
         RodDiameterMm = source.RodDiameterMm,
+        SpecCode = source.SpecCode,
         PartCode = source.PartCode,
         Quantity = quantity,
-        Status = LotStatus.AwaitingTransport,
+        Status = awaitingMaterial ? LotStatus.AwaitingMaterial : LotStatus.AwaitingTransport,
         StationCode = stationCode,
         CurrentStepSequence = firstStep,
         IsMakeup = true,
@@ -576,6 +606,7 @@ public sealed class MaterialLot
             BinIndex = 1,
             BinCount = 1,
             RodDiameterMm = first.RodDiameterMm,
+            SpecCode = first.SpecCode,
             PartCode = first.PartCode,
             Quantity = packed.Sum(l => l.Quantity),
             Status = LotStatus.AwaitingTransport,

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Time.Testing;
 using Npgsql;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
+using OpenFleet.Api.Inventory;
 using OpenFleet.Api.Production;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Api.Transport;
@@ -68,12 +69,31 @@ public sealed class TestDatabase
         DispatchVehicleIds = ["agv-a", "agv-b", "agv-c", "agv-s"],
     };
 
-    public static async Task<TestDatabase> CreateAsync(PostgresFixture postgres)
+    /// <summary>
+    /// <paramref name="plentyOfBlanks"/>：每種備料都放很多現成的，建立批次時不會經過切料站（P5 以前的測試看的是後面的工序）。
+    /// 測試切料與庫存的測試傳 false，用示範的初始庫存。
+    /// </summary>
+    public static async Task<TestDatabase> CreateAsync(PostgresFixture postgres, bool plentyOfBlanks = true)
     {
         var database = new TestDatabase(postgres.NewConnectionString());
         await using var db = database.NewContext();
         await db.Database.MigrateAsync();
         await DatabaseInitializer.SeedAsync(db, database.Fleet);
+        if (plentyOfBlanks)
+        {
+            var inventory = new InventoryService(db, database.Time, NullLogger<InventoryService>.Instance);
+            var blanks = await db.Items.Where(i => i.Kind == ItemKind.Blank).Select(i => i.Code).ToListAsync();
+            await inventory.RunAsync(async () =>
+            {
+                foreach (var blank in blanks)
+                {
+                    await inventory.AddStockAsync(blank, InventoryService.StoreStation, 100_000, StockMovementReason.Adjustment, "test", default);
+                }
+
+                return 0;
+            }, default);
+        }
+
         return database;
     }
 
@@ -145,7 +165,8 @@ public sealed class TestDatabase
     public Scope NewScope()
     {
         var db = NewContext();
-        var production = new ProductionService(db, Defects, Time, NullLogger<ProductionService>.Instance);
+        var inventory = new InventoryService(db, Time, NullLogger<InventoryService>.Instance);
+        var production = new ProductionService(db, inventory, Defects, Time, NullLogger<ProductionService>.Instance);
         var shortage = new VehicleShortageService(db, Time, NullLogger<VehicleShortageService>.Instance);
         var transport = new TransportService(db, production, shortage, Network, Options.Create(Fleet),
             Options.Create(new MqttSettings { ProducerId = "backend", FactoryId = "demo" }), Time, NullLogger<TransportService>.Instance);

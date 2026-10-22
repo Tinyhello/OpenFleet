@@ -108,7 +108,7 @@ public static class ProductionEndpoints
         // 建立一個批次；回應是它分成的每一框。
         api.MapPost("/lots", async (CreateLotRequest? request, ProductionService production, CancellationToken ct) =>
         {
-            var bins = await production.CreateBatchAsync(request?.Quantity, request?.RodDiameterMm, request?.PartCodes, ct);
+            var bins = await production.CreateBatchAsync(request?.Quantity, request?.RodDiameterMm, request?.PartCodes, request?.SpecCode, ct);
             return Results.Created("/api/lots", bins.Select(ToDto).ToList());
         });
 
@@ -141,6 +141,7 @@ public static class ProductionEndpoints
         BinIndex = lot.BinIndex,
         BinCount = lot.BinCount,
         RodDiameterMm = lot.RodDiameterMm,
+        SpecCode = lot.SpecCode,
         PartCode = lot.PartCode,
         Quantity = lot.Quantity,
         Status = lot.Status,

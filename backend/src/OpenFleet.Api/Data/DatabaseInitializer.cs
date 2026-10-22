@@ -15,13 +15,15 @@ public static class DatabaseInitializer
 {
     /// <summary>
     /// 暫定佈局的交接點（與 Unity 的 FactoryLayout 相同：站點中心往走道方向 3.4 m）。
-    /// 下排由左到右是原料倉到電鍍（淬火與回火相鄰），上排由右到左是拋光、（雜物倉庫）、品管、包裝、（成品倉）、出貨，
+    /// 下排由左到右是切料、原料倉到電鍍（淬火與回火相鄰；切料站在原料倉左邊，使用者 2026-10-22 選擇把廠房往西加寬），
+    /// 上排由右到左是拋光、（雜物倉庫）、品管、包裝、（成品倉）、出貨，
     /// 括號裡的兩個只是場景、不是站點；
     /// 刀具庫在走道內側的島區中央（使用者 2026-10-12 指定的相鄰關係；實際座標是 Claude 排的）。
     /// 待加工料容量 30 件是已確認的數值；倉庫與暫存點（淬火站入口）的容量規則還沒定，所以留空。
     /// </summary>
     private static readonly Station[] DemoStations =
     [
+        new() { Code = "cutting", Name = "切料", HandoffX = -28, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
         new() { Code = "raw-store", Name = "原料倉", HandoffX = -20, HandoffZ = -DemoRoadNetwork.HandoffZ },
         new() { Code = "rough", Name = "粗加工", HandoffX = -12, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
         new() { Code = "fine", Name = "精加工", HandoffX = -4, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
@@ -47,6 +49,9 @@ public static class DatabaseInitializer
     /// </summary>
     private static readonly ProcessStep[] DemoSteps =
     [
+        // 切料：使用者 2026-10-22 要有切料站、切一支約 5 分鐘。排在第 0 道，只有從圓棒切的框會經過；
+        // 測試倍率 80 比照車床，是 Claude 挑的。待加工與完工容量 30 也比照車床。
+        new() { Sequence = 0, StationCode = "cutting", Kind = ProcessStepKind.Piece, SecondsPerPiece = 300, IsCutting = true, TestSpeed = 80 },
         new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = 80 },
         new() { Sequence = 2, StationCode = "fine", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, UsesTool = true, ToolLifePieces = 250, TestSpeed = 80 },
         new()
@@ -162,6 +167,7 @@ public static class DatabaseInitializer
             UsesTool = demo.UsesTool,
             IsInspection = demo.IsInspection,
             IsPacking = demo.IsPacking,
+            IsCutting = demo.IsCutting,
             ToolLifePieces = demo.ToolLifePieces,
             BatchMinPieces = demo.BatchMinPieces,
             BatchMaxPieces = demo.BatchMaxPieces,

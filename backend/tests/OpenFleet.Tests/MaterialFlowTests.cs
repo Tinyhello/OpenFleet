@@ -300,7 +300,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     public async Task Machine_pauses_for_a_tool_change_when_the_tool_reaches_its_life()
     {
         // 刀具壽命 10 件、換刀 20 秒：30 件的批次會在第 10、20 件之後各停 20 秒，做完第 30 件時再換一次。
-        await ConfigureAsync(s => s.Steps[0].ToolLifePieces = 10);
+        await ConfigureAsync(s => s.Steps[1].ToolLifePieces = 10);
         var lot = await CreateLotAsync();
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
@@ -347,7 +347,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     public async Task Catching_up_after_downtime_gives_the_same_result_as_ticking_continuously()
     {
         // 後端停機一段時間後一次補算：每一件與每次換刀的時間點都由資料庫裡的時間推算，結果和持續執行相同。
-        await ConfigureAsync(s => s.Steps[0].ToolLifePieces = 10);
+        await ConfigureAsync(s => s.Steps[1].ToolLifePieces = 10);
         await CreateLotAsync();
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
@@ -366,7 +366,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     [Fact]
     public async Task Test_mode_speeds_up_machining_and_tool_changes_at_the_station_by_its_own_factor()
     {
-        await ConfigureAsync(s => s.Steps[0].ToolLifePieces = 10);
+        await ConfigureAsync(s => s.Steps[1].ToolLifePieces = 10);
         await CreateLotAsync();
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
@@ -377,7 +377,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(2, (await StationAsync("rough")).Machining!.PiecesCompleted);
 
         // 專用倍率設好但測試模式沒開：沒有作用。
-        await ConfigureAsync(s => s.Steps[0].TestSpeed = 10);
+        await ConfigureAsync(s => s.Steps[1].TestSpeed = 10);
         await AdvanceOperationsAsync();
         Assert.Equal(2, (await StationAsync("rough")).Machining!.PiecesCompleted);
 
@@ -532,10 +532,12 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await using (var seeded = (await TestDatabase.CreateAsync(postgres)).NewScope())
         {
             var defaults = await seeded.Production.GetSettingsAsync(default);
-            Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish", "qc", "packing" }, defaults.Steps.Select(step => step.StationCode));
+            Assert.Equal(new[] { "cutting", "rough", "fine", "heat", "temper", "plating", "polish", "qc", "packing" }, defaults.Steps.Select(step => step.StationCode));
+            // 切料每支 5 分鐘（使用者 2026-10-22）。
+            Assert.Equal((300d, true), (defaults.Steps[0].SecondsPerPiece, defaults.Steps[0].IsCutting));
             // 逐件工序：粗加工、精加工、拋光，以及品管（逐支檢驗 60 秒）、包裝（逐支 60 秒）。
             Assert.Equal(new[] { (30d, 500, false, false), (60d, 250, false, false), (20d, 0, false, false), (60d, 0, true, false), (60d, 0, false, true) },
-                defaults.Steps.Where(step => step.Kind == ProcessStepKind.Piece)
+                defaults.Steps.Where(step => step.Kind == ProcessStepKind.Piece && !step.IsCutting)
                     .Select(step => (step.SecondsPerPiece, step.ToolLifePieces, step.IsInspection, step.IsPacking)));
             // 淬火 4 小時、回火 8 小時，各 150～300 支；電鍍 1 小時，有料就開，一爐 30 mm 40 支／24 mm 56 支。
             Assert.Equal(new[] { (150, 300, 0, 14400d), (150, 300, 0, 28800d), (1, 40, 56, 3600d) },
@@ -545,9 +547,9 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
             Assert.Equal(("shipping", 3600d, 60d), (defaults.BufferStationCode, defaults.TruckIntervalSeconds, defaults.TestTruckSpeed));
             // 品管：不良率 10%，同一支最多反工 1 次。
             Assert.Equal((0.1, 1), (defaults.DefectRate, defaults.MaxReworkCount));
-            // 測試模式預設關閉；各站的專用倍率：粗加工與精加工 20、淬火與回火 250、電鍍 60、拋光 10、品管 20、包裝 20；AGV 交接 40、空車 2。
+            // 測試模式預設關閉；各站的專用倍率：切料 80、粗加工與精加工 80、淬火與回火 250、電鍍 60、拋光 10、品管 20、包裝 20；AGV 交接 40、空車 2。
             Assert.False(defaults.TestMode);
-            Assert.Equal(new[] { 80d, 80d, 250d, 250d, 60d, 10d, 20d, 20d }, defaults.Steps.Select(step => step.TestSpeed));
+            Assert.Equal(new[] { 80d, 80d, 80d, 250d, 250d, 60d, 10d, 20d, 20d }, defaults.Steps.Select(step => step.TestSpeed));
             Assert.Equal((600d, 40d, 2d), (defaults.ChangeoverSeconds, defaults.TestHandoverSpeed, defaults.TestEmptyVehicleSpeed));
             Assert.Equal((5d, 30d, 90d, 50, true),
                 (defaults.PieceHandlingSeconds, defaults.AgvHandoverSeconds, defaults.ToolChangeSeconds, defaults.ToolRequestThresholdPieces, defaults.ToolDeliveryEnabled));
@@ -561,24 +563,24 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         settings.PieceHandlingSeconds = 1.5;
         settings.AgvHandoverSeconds = 12;
         settings.ToolChangeSeconds = 45;
-        settings.Steps[0].SecondsPerPiece = 4;
-        settings.Steps[0].ToolLifePieces = 100;
+        settings.Steps[1].SecondsPerPiece = 4;
+        settings.Steps[1].ToolLifePieces = 100;
         var updated = await scope.Production.UpdateSettingsAsync(settings, default);
         Assert.Equal((12, 1.5, 12d, 45d), (updated.LotQuantity, updated.PieceHandlingSeconds, updated.AgvHandoverSeconds, updated.ToolChangeSeconds));
-        Assert.Equal(new[] { (4d, 100), (2d, 250) }, updated.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
+        Assert.Equal(new[] { (2d, 0), (4d, 100), (2d, 250) }, updated.Steps.Select(step => (step.SecondsPerPiece, step.ToolLifePieces)));
         Assert.Equal(12, ((await scope.Production.CreateBatchAsync(null, null, [ProductParts.UpperPunch], default)).Single()).Quantity);
 
         // 一個批次最多 300 支。
         await Invalid(s => s.LotQuantity = 301);
-        await Invalid(s => s.Steps[1].SecondsPerPiece = 0);
-        await Invalid(s => s.Steps[1].TestSpeed = 0.5);
-        await Invalid(s => s.Steps[1].TestSpeed = 1001);
+        await Invalid(s => s.Steps[2].SecondsPerPiece = 0);
+        await Invalid(s => s.Steps[2].TestSpeed = 0.5);
+        await Invalid(s => s.Steps[2].TestSpeed = 1001);
         await Invalid(s => s.ChangeoverSeconds = -1);
         await Invalid(s => s.TestHandoverSpeed = 0);
         await Invalid(s => s.TestEmptyVehicleSpeed = 6);
         await Invalid(s => s.DefectRate = 1.5);
         await Invalid(s => s.MaxReworkCount = 4);
-        await Invalid(s => s.Steps[1].ToolLifePieces = 0);
+        await Invalid(s => s.Steps[2].ToolLifePieces = 0);
         await Invalid(s => s.PieceHandlingSeconds = -1);
         await Invalid(s => s.AgvHandoverSeconds = -1);
         await Invalid(s => s.ToolRequestThresholdPieces = -1);

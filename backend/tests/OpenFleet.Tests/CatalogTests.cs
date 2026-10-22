@@ -17,7 +17,7 @@ public sealed class CatalogTests(PostgresFixture postgres) : IAsyncLifetime
 {
     private TestDatabase _database = null!;
 
-    public async Task InitializeAsync() => _database = await TestDatabase.CreateAsync(postgres);
+    public async Task InitializeAsync() => _database = await TestDatabase.CreateAsync(postgres, plentyOfBlanks: false);
 
     public Task DisposeAsync() => Task.CompletedTask;
 

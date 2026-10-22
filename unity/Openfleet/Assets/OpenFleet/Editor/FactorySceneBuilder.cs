@@ -106,26 +106,28 @@ namespace OpenFleet.Unity.Editor
 
             // 與 FactoryCameraController 的預設值一致，讓 Editor 裡看到的畫面和執行時相同。
             var rotation = Quaternion.Euler(50f, 0f, 0f);
-            go.transform.SetPositionAndRotation(new Vector3(0f, 0f, -1.5f) - rotation * Vector3.forward * 50f, rotation);
+            go.transform.SetPositionAndRotation(
+                FactoryCameraController.DefaultTarget - rotation * Vector3.forward * FactoryCameraController.DefaultDistance, rotation);
             return go.AddComponent<FactoryCameraController>();
         }
 
         private static void BuildEnvironment(Transform env)
         {
-            var size = FactoryLayout.FloorSize;
-            Box(env, "Floor", new Vector3(0f, -0.05f, 0f), new Vector3(size.x, 0.1f, size.y), Palette.Floor);
+            var floor = FactoryLayout.Floor;
+            Box(env, "Floor", new Vector3(floor.center.x, -0.05f, floor.center.y), new Vector3(floor.width, 0.1f, floor.height), Palette.Floor);
 
             // 牆與柱子。西牆中間是工廠大門，進料與出貨共用。
-            var halfX = size.x / 2f + WallThickness / 2f;
-            Wall(env, "Wall N", true, size.y / 2f, -halfX, halfX);
-            Wall(env, "Wall S", true, -size.y / 2f, -halfX, halfX);
-            Wall(env, "Wall E", false, size.x / 2f, -size.y / 2f, size.y / 2f);
-            BuildMainGate(WallWithDoor(env, "Wall W", false, -size.x / 2f, -size.y / 2f, size.y / 2f, FactoryLayout.GateZ, FactoryLayout.GateWidth));
+            var wallFrom = floor.xMin - WallThickness / 2f;
+            var wallTo = floor.xMax + WallThickness / 2f;
+            Wall(env, "Wall N", true, floor.yMax, wallFrom, wallTo);
+            Wall(env, "Wall S", true, floor.yMin, wallFrom, wallTo);
+            Wall(env, "Wall E", false, floor.xMax, floor.yMin, floor.yMax);
+            BuildMainGate(WallWithDoor(env, "Wall W", false, floor.xMin, floor.yMin, floor.yMax, FactoryLayout.GateZ, FactoryLayout.GateWidth));
 
             // 柱子排在站與站之間，不擋在站點前面。
-            for (var x = -size.x / 2f + 2f; x <= size.x / 2f + 0.01f; x += 8f)
+            for (var x = floor.xMin + 2f; x <= floor.xMax + 0.01f; x += 8f)
             {
-                foreach (var z in new[] { -size.y / 2f, size.y / 2f })
+                foreach (var z in new[] { floor.yMin, floor.yMax })
                 {
                     Box(env, "Pillar", new Vector3(x, 2f, z), new Vector3(0.5f, 4f, 0.5f), Palette.Pillar);
                 }
@@ -133,20 +135,32 @@ namespace OpenFleet.Unity.Editor
 
             // 環狀走道：兩條車道共用一片鋪面，外緣與內緣是黃線，兩條車道之間是白色分隔線。
             // 沒有畫方向箭頭：車道不限方向，由後端的路段預約決定誰先走。
-            var outer = FactoryLayout.OuterLane + new Vector2(FactoryLayout.LaneEdge, FactoryLayout.LaneEdge);
-            var inner = FactoryLayout.InnerLane - new Vector2(FactoryLayout.InnerLaneEdge, FactoryLayout.InnerLaneEdge);
-            var mid = (outer + inner) / 2f;
-            var width = outer - inner;
+            var outer = Grow(FactoryLayout.OuterLane, FactoryLayout.LaneEdge);
+            var inner = Grow(FactoryLayout.InnerLane, -FactoryLayout.InnerLaneEdge);
             var aisle = Group(env, "Aisle", Vector3.zero);
-            Box(aisle, "South", new Vector3(0f, 0.005f, -mid.y), new Vector3(outer.x * 2f, 0.01f, width.y), Palette.Aisle);
-            Box(aisle, "North", new Vector3(0f, 0.005f, mid.y), new Vector3(outer.x * 2f, 0.01f, width.y), Palette.Aisle);
-            Box(aisle, "West", new Vector3(-mid.x, 0.005f, 0f), new Vector3(width.x, 0.01f, inner.y * 2f), Palette.Aisle);
-            Box(aisle, "East", new Vector3(mid.x, 0.005f, 0f), new Vector3(width.x, 0.01f, inner.y * 2f), Palette.Aisle);
+            AisleStrip(aisle, "South", outer.xMin, outer.xMax, outer.yMin, inner.yMin);
+            AisleStrip(aisle, "North", outer.xMin, outer.xMax, inner.yMax, outer.yMax);
+            AisleStrip(aisle, "West", outer.xMin, inner.xMin, inner.yMin, inner.yMax);
+            AisleStrip(aisle, "East", inner.xMax, outer.xMax, inner.yMin, inner.yMax);
 
-            FloorFrame(aisle, "Outer Line", Vector3.zero, outer * 2f, 0.1f, Palette.LaneLine);
-            FloorFrame(aisle, "Inner Line", Vector3.zero, inner * 2f, 0.1f, Palette.LaneLine);
-            var divider = (FactoryLayout.OuterLane + FactoryLayout.InnerLane) / 2f;
-            FloorFrame(aisle, "Lane Divider", Vector3.zero, divider * 2f, 0.05f, Palette.ZoneLine);
+            FloorFrame(aisle, "Outer Line", Center(outer), outer.size, 0.1f, Palette.LaneLine);
+            FloorFrame(aisle, "Inner Line", Center(inner), inner.size, 0.1f, Palette.LaneLine);
+            var lanes = (Outer: FactoryLayout.OuterLane, Inner: FactoryLayout.InnerLane);
+            var divider = Rect.MinMaxRect(
+                (lanes.Outer.xMin + lanes.Inner.xMin) / 2f, (lanes.Outer.yMin + lanes.Inner.yMin) / 2f,
+                (lanes.Outer.xMax + lanes.Inner.xMax) / 2f, (lanes.Outer.yMax + lanes.Inner.yMax) / 2f);
+            FloorFrame(aisle, "Lane Divider", Center(divider), divider.size, 0.05f, Palette.ZoneLine);
+        }
+
+        /// <summary>矩形往外擴 <paramref name="by"/>（負數往內縮）。</summary>
+        private static Rect Grow(Rect rect, float by) => Rect.MinMaxRect(rect.xMin - by, rect.yMin - by, rect.xMax + by, rect.yMax + by);
+
+        private static Vector3 Center(Rect rect) => new Vector3(rect.center.x, 0f, rect.center.y);
+
+        /// <summary>走道鋪面的一段：X 從 <paramref name="x0"/> 到 <paramref name="x1"/>、Z 從 <paramref name="z0"/> 到 <paramref name="z1"/>。</summary>
+        private static void AisleStrip(Transform aisle, string name, float x0, float x1, float z0, float z1)
+        {
+            Box(aisle, name, new Vector3((x0 + x1) / 2f, 0.005f, (z0 + z1) / 2f), new Vector3(x1 - x0, 0.01f, z1 - z0), Palette.Aisle);
         }
 
         /// <summary>

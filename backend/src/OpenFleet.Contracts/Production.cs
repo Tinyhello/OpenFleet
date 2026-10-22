@@ -34,6 +34,9 @@ namespace OpenFleet.Contracts
 
         /// <summary>出貨箱已經被貨車載走。</summary>
         Shipped,
+
+        /// <summary>在原料倉等料：要切的圓棒還不夠，到貨後才會送去切料（使用者 2026-10-22：缺的部分到貨後再切）。</summary>
+        AwaitingMaterial,
     }
 
     /// <summary>品管檢出的不良原因。原因決定怎麼處理：表面與鍍層可以反工，尺寸不良只能報廢。</summary>
@@ -182,6 +185,9 @@ namespace OpenFleet.Contracts
         /// <summary>唯讀：這道逐件工序是包裝（逐支包裝，沒有機台取放時間；整批到齊後併成一箱）。PUT 時忽略。</summary>
         public bool IsPacking { get; set; }
 
+        /// <summary>唯讀：這道逐件工序是切料（整根圓棒切成備料，多出來的入庫）。PUT 時忽略。</summary>
+        public bool IsCutting { get; set; }
+
         /// <summary>有刀具的逐件工序：刀具壽命，加工這麼多件後要換刀。</summary>
         public int ToolLifePieces { get; set; }
 
@@ -291,8 +297,11 @@ namespace OpenFleet.Contracts
         /// <summary>只做其中幾種零件（<see cref="ProductParts"/> 的代碼）；省略時三種都做。</summary>
         public List<string>? PartCodes { get; set; }
 
-        /// <summary>桿徑（mm）：24 或 30，決定一框裝幾支；省略時為 30。</summary>
+        /// <summary>桿徑（mm）：24 或 30，決定一框裝幾支；省略時為 30（有指定規格時用規格的桿徑）。</summary>
         public int? RodDiameterMm { get; set; }
+
+        /// <summary>沖頭規格代碼，決定備料長度；省略時用該桿徑的示範規格（Φ30：P30-RD12、Φ24：P24-SQ08）。</summary>
+        public string? SpecCode { get; set; }
     }
 
     /// <summary>一框物料。同一個批次的每一框有相同的 BatchNumber，各自搬運、各自加工。</summary>
@@ -310,6 +319,9 @@ namespace OpenFleet.Contracts
 
         /// <summary>桿徑（mm）。</summary>
         public int RodDiameterMm { get; set; }
+
+        /// <summary>沖頭規格代碼；P5 以前建立的框沒有。</summary>
+        public string? SpecCode { get; set; }
         public string PartCode { get; set; } = string.Empty;
         public int Quantity { get; set; }
         public LotStatus Status { get; set; }

@@ -38,9 +38,9 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         var summary = await SummaryAsync(Busy);
         Assert.Equal((1, 1, 10d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
         Assert.Equal((10d, MachineDelayCause.WaitingForMaterial, ShortageReason.VehiclesBusy),
-            (summary.Steps[0].DelaySeconds, summary.Steps[0].CurrentCause, summary.Steps[0].CurrentReason));
-        Assert.Equal((0d, null), (summary.Steps[1].DelaySeconds, summary.Steps[1].CurrentCause));
-        Assert.Equal((0, 0d), (summary.OfflineWaitCount, summary.Steps[0].OfflineSeconds));
+            (summary.Steps[1].DelaySeconds, summary.Steps[1].CurrentCause, summary.Steps[1].CurrentReason));
+        Assert.Equal((0d, null), (summary.Steps[2].DelaySeconds, summary.Steps[2].CurrentCause));
+        Assert.Equal((0, 0d), (summary.OfflineWaitCount, summary.Steps[1].OfflineSeconds));
 
         // 再等 2 秒；派出車的那一刻等待與耽誤都結束，之後的行駛時間不算。
         _database.Time.Advance(TimeSpan.FromSeconds(2));
@@ -50,8 +50,8 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
 
         summary = await SummaryAsync(Busy);
         Assert.Equal((0, 1, 12d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
-        Assert.Equal((12d, 12d, 0d, null), (summary.Steps[0].DelaySeconds, summary.Steps[0].WaitingForMaterialSeconds,
-            summary.Steps[0].OutputNotRemovedSeconds, summary.Steps[0].CurrentCause));
+        Assert.Equal((12d, 12d, 0d, null), (summary.Steps[1].DelaySeconds, summary.Steps[1].WaitingForMaterialSeconds,
+            summary.Steps[1].OutputNotRemovedSeconds, summary.Steps[1].CurrentCause));
 
         await using var scope = _database.NewScope();
         var wait = await scope.Db.VehicleWaits.SingleAsync();
@@ -72,7 +72,7 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal(new[] { VehicleType.Large, VehicleType.Small }, summary.OfflineVehicleTypes);
         Assert.Equal((1, 1, 10d), (summary.OfflineWaitingTasks, summary.OfflineWaitCount, summary.OfflineWaitSeconds));
         Assert.Equal((0, 0, 0d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
-        Assert.Equal((0d, 10d, ShortageReason.FleetOffline), (summary.Steps[0].DelaySeconds, summary.Steps[0].OfflineSeconds, summary.Steps[0].CurrentReason));
+        Assert.Equal((0d, 10d, ShortageReason.FleetOffline), (summary.Steps[1].DelaySeconds, summary.Steps[1].OfflineSeconds, summary.Steps[1].CurrentReason));
         Assert.Equal(ShortageReason.FleetOffline, (await StationAsync("rough")).ShortageReason);
 
         // 有一台回到線上但在忙：事故結束，從這一刻起才算缺車。兩段時間各算各的。
@@ -84,7 +84,7 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Empty(summary.OfflineVehicleTypes);
         Assert.Equal((0, 1, 10d), (summary.OfflineWaitingTasks, summary.OfflineWaitCount, summary.OfflineWaitSeconds));
         Assert.Equal((1, 1, 5d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
-        Assert.Equal((5d, 10d, ShortageReason.VehiclesBusy), (summary.Steps[0].DelaySeconds, summary.Steps[0].OfflineSeconds, summary.Steps[0].CurrentReason));
+        Assert.Equal((5d, 10d, ShortageReason.VehiclesBusy), (summary.Steps[1].DelaySeconds, summary.Steps[1].OfflineSeconds, summary.Steps[1].CurrentReason));
     }
 
     [Fact]
@@ -138,14 +138,14 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
 
         // 粗加工：成品沒被搬走。精加工：等不到料。兩台機台各算一次。
         var summary = await SummaryAsync(Busy);
-        Assert.Equal((8d, MachineDelayCause.OutputNotRemoved), (summary.Steps[0].OutputNotRemovedSeconds, summary.Steps[0].CurrentCause));
-        Assert.Equal((8d, MachineDelayCause.WaitingForMaterial), (summary.Steps[1].WaitingForMaterialSeconds, summary.Steps[1].CurrentCause));
+        Assert.Equal((8d, MachineDelayCause.OutputNotRemoved), (summary.Steps[1].OutputNotRemovedSeconds, summary.Steps[1].CurrentCause));
+        Assert.Equal((8d, MachineDelayCause.WaitingForMaterial), (summary.Steps[2].WaitingForMaterialSeconds, summary.Steps[2].CurrentCause));
         Assert.Equal(MachineDelayCause.OutputNotRemoved, (await StationAsync("rough")).ShortageCause);
 
         // 派出車之後兩邊都結束。
         Assert.Equal(1, await DispatchAsync(Busy, Online("agv-a")));
         summary = await SummaryAsync(Busy);
-        Assert.Equal((0, 8d, 8d), (summary.WaitingTasks, summary.Steps[0].DelaySeconds, summary.Steps[1].DelaySeconds));
+        Assert.Equal((0, 8d, 8d), (summary.WaitingTasks, summary.Steps[1].DelaySeconds, summary.Steps[2].DelaySeconds));
         Assert.All(summary.Steps, step => Assert.Null(step.CurrentCause));
         Assert.Null((await StationAsync("rough")).ShortageCause);
     }
@@ -162,7 +162,7 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal(0, await DispatchAsync(Busy));
 
         var summary = await SummaryAsync(Busy);
-        Assert.Equal((2, 10d, 5d), (summary.WaitingTasks, summary.WaitSeconds, summary.Steps[0].DelaySeconds));
+        Assert.Equal((2, 10d, 5d), (summary.WaitingTasks, summary.WaitSeconds, summary.Steps[1].DelaySeconds));
     }
 
     [Fact]
