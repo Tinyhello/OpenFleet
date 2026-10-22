@@ -51,6 +51,7 @@ public static class ProductionEndpoints
                     {
                         StepSequence = o.StepSequence,
                         StationCode = o.StationCode,
+                        MachineCode = o.MachineCode,
                         Status = o.Status,
                         Quantity = o.Quantity,
                         PiecesCompleted = o.PiecesCompleted,
@@ -96,6 +97,7 @@ public static class ProductionEndpoints
             await db.MachineDelays.AsNoTracking().OrderByDescending(d => d.Id).Take(100).Select(d => new MachineDelayDto
             {
                 StationCode = d.StationCode,
+                MachineCode = d.MachineCode,
                 StepSequence = d.StepSequence,
                 Cause = d.Cause,
                 Reason = d.Reason,
@@ -119,7 +121,7 @@ public static class ProductionEndpoints
                 """TRUNCATE "Lots", "TransportTasks", "OutboxMessages", "InboxMessages", "ScrapRecords", "ProductionOrders", "SalesOrderLines", "SalesOrders" CASCADE""", ct);
             // 刀具計數與換刀紀錄也歸零，機台回到剛換好刀的狀態。
             await db.Database.ExecuteSqlRawAsync(
-                """TRUNCATE "ToolChanges", "BatchRuns"; UPDATE "StationTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
+                """TRUNCATE "ToolChanges", "BatchRuns"; UPDATE "MachineTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
             // 貨車從頭倒數。
             await db.Database.ExecuteSqlRawAsync(
                 """UPDATE "TruckSchedules" SET "RemainingSeconds" = (SELECT "TruckIntervalSeconds" FROM "ProductionSettings"), "AccruedAt" = NULL, "LastArrivedAt" = NULL""", ct);

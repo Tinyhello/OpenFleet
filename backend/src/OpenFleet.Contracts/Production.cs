@@ -364,6 +364,9 @@ namespace OpenFleet.Contracts
     {
         public int StepSequence { get; set; }
         public string StationCode { get; set; } = string.Empty;
+
+        /// <summary>逐件工序：在哪一台機台加工（開始加工時才決定）；整爐工序與還在排隊的為 null。</summary>
+        public string? MachineCode { get; set; }
         public OperationStatus Status { get; set; }
         public int Quantity { get; set; }
         public int PiecesCompleted { get; set; }
@@ -516,13 +519,35 @@ namespace OpenFleet.Contracts
         public int OutboundQuantity { get; set; }
         public int? OutboundCapacity { get; set; }
 
-        /// <summary>沒有在加工時為 null。</summary>
-        public MachiningStatusDto? Machining { get; set; }
+        /// <summary>
+        /// 逐件工序的站：這一站的機台，依編號排列（粗加工、精加工各兩台車床，其他站一台）；
+        /// 加工進度、刀具與缺車停機都是每台各自的。整爐工序與倉庫是空的。
+        /// </summary>
+        public List<MachineStatusDto> Machines { get; set; } = new List<MachineStatusDto>();
 
         /// <summary>整爐工序的站才有；其他站為 null。</summary>
         public BatchStatusDto? Batch { get; set; }
 
-        /// <summary>不是加工站時為 null。</summary>
+        /// <summary>出貨站才有：下一班貨車的倒數；其他站為 null。</summary>
+        public TruckStatusDto? Truck { get; set; }
+    }
+
+    /// <summary>一台機台（人工作業的站是一個工位）目前的狀態。</summary>
+    public sealed class MachineStatusDto
+    {
+        /// <summary>機台代碼，例如 rough-1。</summary>
+        public string Code { get; set; } = string.Empty;
+
+        /// <summary>例如「粗加工 1 號機」；一站只有一台時是站名。</summary>
+        public string Name { get; set; } = string.Empty;
+
+        /// <summary>這一站的第幾台，從 1 起。</summary>
+        public int Number { get; set; }
+
+        /// <summary>沒有在加工時為 null。</summary>
+        public MachiningStatusDto? Machining { get; set; }
+
+        /// <summary>沒有刀具的工序（拋光、品管、包裝、切料）為 null。</summary>
         public ToolStatusDto? Tool { get; set; }
 
         /// <summary>機台目前因為叫不到車而停下來的原因；沒有時為 null。</summary>
@@ -530,9 +555,6 @@ namespace OpenFleet.Contracts
 
         /// <summary>叫不到車是因為車都在忙（缺車）還是全部離線（重大事故）；沒有時為 null。</summary>
         public ShortageReason? ShortageReason { get; set; }
-
-        /// <summary>出貨站才有：下一班貨車的倒數；其他站為 null。</summary>
-        public TruckStatusDto? Truck { get; set; }
     }
 
     /// <summary>出貨站的貨車：每隔固定時間來一次，把站上的出貨箱載走。</summary>
@@ -640,6 +662,9 @@ namespace OpenFleet.Contracts
     public sealed class MachineDelayDto
     {
         public string StationCode { get; set; } = string.Empty;
+
+        /// <summary>停下來的是哪一台機台。</summary>
+        public string MachineCode { get; set; } = string.Empty;
         public int StepSequence { get; set; }
         public MachineDelayCause Cause { get; set; }
         public ShortageReason Reason { get; set; }

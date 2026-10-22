@@ -7,7 +7,7 @@ namespace OpenFleet.Unity.Editor
     /// 各站點模型。區域座標：+Z 朝走道（交接點那側），占地約 X ±2.8、Z −2 ~ +2。
     /// 設備本體是 Blender 模型（Blender/Models/Station_*.blend，一種站一個檔）；
     /// 地面框線、執行時會切換的料箱、文字標籤在這裡產生。
-    /// 模型只表示「這裡是哪種站」，不代表機台數量或實際設備規格。
+    /// 粗加工、精加工站畫出兩台車床，和後端的機台數相同；其他站的模型只表示「這裡是哪種站」，不代表實際設備規格。
     /// </summary>
     internal static class StationModels
     {
@@ -37,10 +37,16 @@ namespace OpenFleet.Unity.Editor
             FloorFrame(root, "Staging", new Vector3(0f, 0f, 1.3f), new Vector2(4.8f, 1.3f), 0.06f, Palette.ZoneLine);
         }
 
-        /// <summary>CNC 車床加上機邊備料台、成品台。粗加工與精加工共用模型，只換強調色。</summary>
+        /// <summary>
+        /// 兩台小型 CNC 車床加上兩台共用的機邊備料台、成品台（使用者 2026-10-22：粗加工、精加工各兩台車床）。
+        /// 粗加工與精加工共用模型，只換強調色。機台編號和後端的機台編號相同：-X 那台是 1 號機。
+        /// </summary>
         private static void Lathe(Transform root, Material accent)
         {
-            Model(root, "Station_CncLathe", Vector3.zero, 0f, (Palette.RoughAccent, accent));
+            Model(root, "Station_CncLathePair", Vector3.zero, 0f, (Palette.RoughAccent, accent));
+            // 編號緊貼在車床頂上：從上方的攝影機看會落在車床上，不會和前方台子的「備料」「成品」疊在一起。
+            Label(root, "1號機", new Vector3(-1.2f, 2.12f, -0.55f), 0.04f, Color.white);
+            Label(root, "2號機", new Vector3(1.2f, 2.12f, -0.55f), 0.04f, Color.white);
 
             // 備料區（待加工）與成品區（已加工、等待搬走）：台子在模型裡，台上的料箱只在有料時顯示（StationAnchor 切換）。
             // 容量與數量在後端，畫面上用進度條表示，沒有逐件的動畫。

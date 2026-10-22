@@ -44,6 +44,9 @@ public sealed class TransportTask
     public MaterialLot? Lot { get; private set; }
     public string FromStationCode { get; private set; } = string.Empty;
     public string ToStationCode { get; private set; } = string.Empty;
+
+    /// <summary>送刀具的任務：新刀是給這一站的哪一台機台（同一站的兩台車床各有自己的刀）；物料搬運是 null。</summary>
+    public string? MachineCode { get; private set; }
     public int Quantity { get; private set; }
     public TransportTaskKind Kind { get; private set; }
     public TransportTaskStatus Status { get; private set; }
@@ -80,14 +83,15 @@ public sealed class TransportTask
         return task;
     }
 
-    /// <summary>把一把新刀從刀具庫送到機邊。</summary>
-    public static TransportTask CreateToolDelivery(string from, string to, DateTimeOffset now)
+    /// <summary>把一把新刀從刀具庫送到機邊：送到 <paramref name="to"/> 這一站，給 <paramref name="machineCode"/> 這台機台。</summary>
+    public static TransportTask CreateToolDelivery(string from, string to, string machineCode, DateTimeOffset now)
     {
         var task = new TransportTask
         {
             Id = Guid.NewGuid(),
             FromStationCode = from,
             ToStationCode = to,
+            MachineCode = machineCode,
             Quantity = 1,
             Kind = TransportTaskKind.ToolDelivery,
             Status = TransportTaskStatus.Pending,

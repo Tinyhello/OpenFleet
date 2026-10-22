@@ -37,7 +37,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
         // 逐支包裝，每支 2 秒，沒有機台取放的時間。
         await AdvanceAsync(4);
         var packing = await StationAsync("packing");
-        Assert.Equal((true, 2, 3), (packing.IsPacking, packing.Machining!.PiecesCompleted, packing.Machining.Quantity));
+        Assert.Equal((true, 2, 3), (packing.IsPacking, packing.Machine().Machining!.PiecesCompleted, packing.Machine().Machining!.Quantity));
 
         // 第一框包完：留在包裝站等第二框，還沒有箱子、也沒有搬運。接著開始第二框。
         await AdvanceAsync(2);

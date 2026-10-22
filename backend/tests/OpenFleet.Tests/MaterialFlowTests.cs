@@ -62,6 +62,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     {
         await CreateLotAsync();
         await CreateLotAsync();
+        await CreateLotAsync();
 
         await using (var scope = _database.NewScope())
         {
@@ -71,11 +72,11 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
             Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-s"), offline], default));
         }
 
-        // 目的站（粗加工）容量 30：第一批占滿後，第二批即使有空車也要等待。
+        // 目的站（粗加工）兩台車床、容量 60：前兩批占滿後，第三批即使有空車也要等待。
         await using (var scope = _database.NewScope())
         {
-            Assert.Equal(1, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b")], default));
-            Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b")], default));
+            Assert.Equal(2, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b"), Online("agv-c")], default));
+            Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b"), Online("agv-c")], default));
             Assert.Equal(1, await scope.Db.TransportTasks.CountAsync(t => t.Status == TransportTaskStatus.Pending));
         }
     }
@@ -318,8 +319,8 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         _database.Time.Advance(TimeSpan.FromSeconds(25));
         await AdvanceOperationsAsync();
         var rough = await StationAsync("rough");
-        Assert.Equal((18, 12, 12, 30), (rough.InboundQuantity, rough.OutboundQuantity, rough.Machining!.PiecesCompleted, rough.Machining.Quantity));
-        Assert.Equal((12, 500, false), (rough.Tool!.PiecesUsed, rough.Tool.LifePieces, rough.Tool.Changing));
+        Assert.Equal((18, 12, 12, 30), (rough.InboundQuantity, rough.OutboundQuantity, rough.Machine().Machining!.PiecesCompleted, rough.Machine().Machining!.Quantity));
+        Assert.Equal((12, 500, false), (rough.Machine().Tool!.PiecesUsed, rough.Machine().Tool!.LifePieces, rough.Machine().Tool!.Changing));
         Assert.Equal(LotStatus.Processing, (await StateAsync(lot.Id)).Lot);
 
         // 第 60 秒做完最後一件：整批放行，建立下一趟搬運。
@@ -336,7 +337,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(("rough", "fine", TransportTaskKind.WipTransfer), (next.FromStationCode, next.ToStationCode, next.Kind));
 
         rough = await StationAsync("rough");
-        Assert.Equal((0, 30, null), (rough.InboundQuantity, rough.OutboundQuantity, rough.Machining));
+        Assert.Equal((0, 30, null), (rough.InboundQuantity, rough.OutboundQuantity, rough.Machine().Machining));
     }
 
     [Fact]
@@ -352,14 +353,14 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         _database.Time.Advance(TimeSpan.FromSeconds(30));
         await AdvanceOperationsAsync();
         var rough = await StationAsync("rough");
-        Assert.Equal(10, rough.Machining!.PiecesCompleted);
-        Assert.Equal((true, 0.5), (rough.Tool!.Changing, rough.Tool.ChangeProgress));
+        Assert.Equal(10, rough.Machine().Machining!.PiecesCompleted);
+        Assert.Equal((true, 0.5), (rough.Machine().Tool!.Changing, rough.Machine().Tool!.ChangeProgress));
 
         // 換刀結束後從頭計時下一件：第 40 秒換好，第 42 秒做完第 11 件，計數從 1 開始。
         _database.Time.Advance(TimeSpan.FromSeconds(12));
         await AdvanceOperationsAsync();
         rough = await StationAsync("rough");
-        Assert.Equal((11, false, 1), (rough.Machining!.PiecesCompleted, rough.Tool!.Changing, rough.Tool.PiecesUsed));
+        Assert.Equal((11, false, 1), (rough.Machine().Machining!.PiecesCompleted, rough.Machine().Tool!.Changing, rough.Machine().Tool!.PiecesUsed));
 
         // 加工 60 秒＋兩次換刀 40 秒＝第 100 秒完成。
         _database.Time.Advance(TimeSpan.FromSeconds(57));
@@ -373,7 +374,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         {
             Assert.Equal(startedAt.AddSeconds(100), (await scope.Db.Operations.SingleAsync()).CompletedAt);
             Assert.Equal(2, await scope.Db.ToolChanges.CountAsync());
-            Assert.True((await scope.Db.StationTools.SingleAsync(t => t.StationCode == "rough")).IsChanging);
+            Assert.True((await scope.Db.MachineTools.SingleAsync(t => t.MachineCode == "rough-1")).IsChanging);
         }
 
         // 機台閒置時換刀照樣會結束，並留下第三筆紀錄。
@@ -382,7 +383,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await using (var scope = _database.NewScope())
         {
             Assert.Equal(new[] { 10, 10, 10 }, await scope.Db.ToolChanges.OrderBy(c => c.Id).Select(c => c.PiecesUsed).ToListAsync());
-            Assert.Equal((0, false), ((await StationAsync("rough")).Tool!.PiecesUsed, (await StationAsync("rough")).Tool!.Changing));
+            Assert.Equal((0, false), ((await StationAsync("rough")).Machine().Tool!.PiecesUsed, (await StationAsync("rough")).Machine().Tool!.Changing));
         }
     }
 
@@ -417,69 +418,74 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         // 測試模式關閉 5 秒：每件 2 秒，做完 2 件，第 3 件做到一半。
         _database.Time.Advance(TimeSpan.FromSeconds(5));
         await AdvanceOperationsAsync();
-        Assert.Equal(2, (await StationAsync("rough")).Machining!.PiecesCompleted);
+        Assert.Equal(2, (await StationAsync("rough")).Machine().Machining!.PiecesCompleted);
 
         // 專用倍率設好但測試模式沒開：沒有作用。
         await ConfigureAsync(s => s.Steps[1].TestSpeed = 10);
         await AdvanceOperationsAsync();
-        Assert.Equal(2, (await StationAsync("rough")).Machining!.PiecesCompleted);
+        Assert.Equal(2, (await StationAsync("rough")).Machine().Machining!.PiecesCompleted);
 
         // 開啟測試模式（粗加工 10 倍）：進行中的那一件從切換的時間重新計時（不會把之前的 5 秒也用 10 倍計算），之後每件 0.2 秒。
         await ConfigureAsync(s => s.TestMode = true);
         _database.Time.Advance(TimeSpan.FromSeconds(1));
         await AdvanceOperationsAsync();
-        Assert.Equal(7, (await StationAsync("rough")).Machining!.PiecesCompleted);
+        Assert.Equal(7, (await StationAsync("rough")).Machine().Machining!.PiecesCompleted);
 
         // 再 0.6 秒做到第 10 件，開始換刀；換刀 20 秒在這一站的 10 倍下是 2 秒。
         _database.Time.Advance(TimeSpan.FromSeconds(1.6));
         await AdvanceOperationsAsync();
         var rough = await StationAsync("rough");
-        Assert.Equal((10, true, 0.5), (rough.Machining!.PiecesCompleted, rough.Tool!.Changing, rough.Tool.ChangeProgress));
+        Assert.Equal((10, true, 0.5), (rough.Machine().Machining!.PiecesCompleted, rough.Machine().Tool!.Changing, rough.Machine().Tool!.ChangeProgress));
 
         _database.Time.Advance(TimeSpan.FromSeconds(1.2));
         await AdvanceOperationsAsync();
         rough = await StationAsync("rough");
-        Assert.Equal((11, false), (rough.Machining!.PiecesCompleted, rough.Tool!.Changing));
+        Assert.Equal((11, false), (rough.Machine().Machining!.PiecesCompleted, rough.Machine().Tool!.Changing));
     }
 
     [Fact]
-    public async Task Machine_does_not_start_the_next_lot_until_the_finished_one_is_picked_up()
+    public async Task Each_lathe_waits_until_its_own_finished_lot_is_picked_up()
     {
-        // 兩個 15 件的批次：第一批加工中時，備料區還放得下第二批。
-        await ConfigureAsync(s => s.LotQuantity = 15);
+        // 粗加工兩台車床：第一批 10 件、第二批 15 件各在一台上做；第三批送到時兩台都在忙，在共用的備料區排隊。
+        await ConfigureAsync(s => s.LotQuantity = 10);
         await CreateLotAsync();
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
-
+        await ConfigureAsync(s => s.LotQuantity = 15);
         await CreateLotAsync();
         await DeliverAsync("agv-b");
         await AdvanceOperationsAsync();
+        await CreateLotAsync();
+        await DeliverAsync("agv-c");
+        await AdvanceOperationsAsync();
+        var rough = await StationAsync("rough");
+        Assert.Equal((10, 15), (rough.Machine(1).Machining!.Quantity, rough.Machine(2).Machining!.Quantity));
         await using (var scope = _database.NewScope())
         {
-            Assert.Equal(1, await scope.Db.Operations.CountAsync(o => o.Status == OperationStatus.Running));
             Assert.Equal(1, await scope.Db.Operations.CountAsync(o => o.Status == OperationStatus.Queued));
         }
 
-        // 第一批完成但還沒被搬走：第二批不能開始。
-        _database.Time.Advance(TimeSpan.FromSeconds(30));
+        // 第 20 秒第一批做完、還沒被搬走：1 號機不接第三批（機邊的成品台只放一框）；2 號機還在做第二批。
+        _database.Time.Advance(TimeSpan.FromSeconds(21));
         await AdvanceOperationsAsync();
-        await using (var scope = _database.NewScope())
-        {
-            Assert.Equal(0, await scope.Db.Operations.CountAsync(o => o.Status == OperationStatus.Running));
-        }
+        rough = await StationAsync("rough");
+        Assert.Null(rough.Machine(1).Machining);
+        Assert.Equal(15, rough.Machine(2).Machining!.Quantity);
 
-        var rough = await StationAsync("rough");
-        Assert.Equal((15, 15), (rough.InboundQuantity, rough.OutboundQuantity));
-
-        // 第一批取走後，第二批開始加工。
+        // 第一批取走後，1 號機接第三批。
         var pickup = await DispatchAsync(Online("agv-a"));
         await ApplyAsync(pickup, VehicleEventType.Accepted);
         await ApplyAsync(pickup, VehicleEventType.Loaded);
         await AdvanceOperationsAsync();
-        await using (var scope = _database.NewScope())
-        {
-            Assert.Equal(1, await scope.Db.Operations.CountAsync(o => o.Status == OperationStatus.Running));
-        }
+        rough = await StationAsync("rough");
+        Assert.Equal((15, 15), (rough.Machine(1).Machining!.Quantity, rough.Machine(2).Machining!.Quantity));
+
+        // 第二批做完、沒被搬走：只卡住 2 號機，1 號機照常做。
+        _database.Time.Advance(TimeSpan.FromSeconds(10));
+        await AdvanceOperationsAsync();
+        rough = await StationAsync("rough");
+        Assert.Null(rough.Machine(2).Machining);
+        Assert.NotNull(rough.Machine(1).Machining);
     }
 
     [Fact]
@@ -489,27 +495,30 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
         await CreateLotAsync();
+        await DeliverAsync("agv-b");
+        await AdvanceOperationsAsync();
+        await CreateLotAsync();
 
-        // 加工到一半：備料區還有 20 件，再送 30 件會超過容量 30，所以任務等待。
+        // 兩台都加工到一半：備料區還有 20＋20 件，再送 30 件會超過兩台的容量 60，所以任務等待。
         _database.Time.Advance(TimeSpan.FromSeconds(20));
         await AdvanceOperationsAsync();
         await using (var scope = _database.NewScope())
         {
             Assert.Equal(0, await scope.Db.TransportTasks.CountAsync(t => t.Status == TransportTaskStatus.Assigned));
-            Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-b")], default));
+            Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-c")], default));
         }
 
-        // 整批做完後備料區空了，第二批可以送來；成品區的第一批也要搬走，所以兩台車各接一趟。
+        // 兩台都做完後備料區空了，第三批可以送來；兩台做完的框也要搬走，所以三台車各接一趟。
         _database.Time.Advance(TimeSpan.FromSeconds(40));
         await AdvanceOperationsAsync();
         await using (var scope = _database.NewScope())
         {
-            Assert.Equal(2, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b")], default));
+            Assert.Equal(3, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b"), Online("agv-c")], default));
             var routes = await scope.Db.TransportTasks
                 .Where(t => t.Status == TransportTaskStatus.Assigned)
                 .Select(t => t.FromStationCode + ">" + t.ToStationCode)
                 .ToListAsync();
-            Assert.Equal(new[] { "raw-store>rough", "rough>fine" }, routes.Order());
+            Assert.Equal(new[] { "raw-store>rough", "rough>fine", "rough>fine" }, routes.Order());
         }
     }
 
@@ -563,8 +572,8 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(2, await scope.Db.Operations.CountAsync(o => o.Status == OperationStatus.Completed));
 
         // 兩站的刀具各累計 30 件；暫存點顯示已暫存的件數。
-        Assert.Equal(30, (await StationAsync("rough")).Tool!.PiecesUsed);
-        Assert.Equal(30, (await StationAsync("fine")).Tool!.PiecesUsed);
+        Assert.Equal(30, (await StationAsync("rough")).Machine().Tool!.PiecesUsed);
+        Assert.Equal(30, (await StationAsync("fine")).Machine().Tool!.PiecesUsed);
         Assert.Equal((30, false), ((await StationAsync("heat")).InboundQuantity, (await StationAsync("heat")).IsMachine));
     }
 

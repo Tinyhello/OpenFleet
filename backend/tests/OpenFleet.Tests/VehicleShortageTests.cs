@@ -73,7 +73,7 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal((1, 1, 10d), (summary.OfflineWaitingTasks, summary.OfflineWaitCount, summary.OfflineWaitSeconds));
         Assert.Equal((0, 0, 0d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
         Assert.Equal((0d, 10d, ShortageReason.FleetOffline), (summary.Steps[1].DelaySeconds, summary.Steps[1].OfflineSeconds, summary.Steps[1].CurrentReason));
-        Assert.Equal(ShortageReason.FleetOffline, (await StationAsync("rough")).ShortageReason);
+        Assert.Equal(ShortageReason.FleetOffline, (await StationAsync("rough")).Machine().ShortageReason);
 
         // 有一台回到線上但在忙：事故結束，從這一刻起才算缺車。兩段時間各算各的。
         Assert.Equal(0, await DispatchAsync(Busy));
@@ -90,10 +90,13 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
     [Fact]
     public async Task Machine_that_is_still_working_is_not_delayed()
     {
-        // 第一批在粗加工加工中；第二批叫不到車，但機台沒有停下來，所以只有任務在等，沒有耽誤。
+        // 粗加工兩台車床都在加工；第三批叫不到車，但機台沒有停下來，所以只有任務在等，沒有耽誤。
         await ConfigureAsync(s => s.LotQuantity = 15);
         await CreateLotAsync();
         await DeliverAsync("agv-a");
+        await AdvanceOperationsAsync();
+        await CreateLotAsync();
+        await DeliverAsync("agv-b");
         await AdvanceOperationsAsync();
         await CreateLotAsync();
 
@@ -109,8 +112,11 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         await using (var scope = _database.NewScope())
         {
             await scope.Db.Operations.ExecuteDeleteAsync();
-            var tool = await scope.Db.StationTools.SingleAsync(t => t.StationCode == "rough");
-            tool.StartChange(_database.Time.GetUtcNow(), 60);
+            foreach (var tool in await scope.Db.MachineTools.Where(t => t.MachineCode.StartsWith("rough-")).ToListAsync())
+            {
+                tool.StartChange(_database.Time.GetUtcNow(), 60);
+            }
+
             await scope.Db.SaveChangesAsync();
         }
 
@@ -120,40 +126,74 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
     }
 
     [Fact]
-    public async Task Finished_lot_that_cannot_be_removed_delays_its_machine_and_starves_the_next_one()
+    public async Task Idle_lathe_waits_for_material_while_the_other_lathe_keeps_working()
     {
-        // 兩批都送到粗加工：第一批做完（30 秒）卻叫不到車搬走，第二批無法開始。
+        // 第一批在粗加工 1 號機；第二批叫不到車：2 號機沒有東西可做，算它等料，1 號機不算。
         await ConfigureAsync(s => s.LotQuantity = 15);
         await CreateLotAsync();
         await DeliverAsync("agv-a");
         await AdvanceOperationsAsync();
         await CreateLotAsync();
+
+        Assert.Equal(0, await DispatchAsync(Busy));
+        _database.Time.Advance(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, await DispatchAsync(Busy));
+
+        var summary = await SummaryAsync(Busy);
+        Assert.Equal((10d, 10d, MachineDelayCause.WaitingForMaterial), (summary.Steps[1].DelaySeconds, summary.Steps[1].WaitingForMaterialSeconds, summary.Steps[1].CurrentCause));
+        var rough = await StationAsync("rough");
+        Assert.Equal((null, MachineDelayCause.WaitingForMaterial), (rough.Machine(1).ShortageCause, rough.Machine(2).ShortageCause));
+        await using var scope = _database.NewScope();
+        Assert.Equal("rough-2", (await scope.Db.MachineDelays.SingleAsync()).MachineCode);
+    }
+
+    [Fact]
+    public async Task Finished_lot_that_cannot_be_removed_delays_its_machine_and_starves_the_next_one()
+    {
+        // 三批送到粗加工：第一批 10 件在 1 號機、第二批 15 件在 2 號機，第三批排隊。
+        // 兩台都做完（30 秒）卻叫不到車搬走，第三批無法開始。
+        await ConfigureAsync(s => s.LotQuantity = 10);
+        await CreateLotAsync();
+        await DeliverAsync("agv-a");
+        await AdvanceOperationsAsync();
+        await ConfigureAsync(s => s.LotQuantity = 15);
+        await CreateLotAsync();
         await DeliverAsync("agv-b");
-        _database.Time.Advance(TimeSpan.FromSeconds(30));
+        await AdvanceOperationsAsync();
+        await CreateLotAsync();
+        await DeliverAsync("agv-a");
+        // 分兩次推進，1 號機的框先做完，搬運任務比較早建立。
+        _database.Time.Advance(TimeSpan.FromSeconds(21));
+        await AdvanceOperationsAsync();
+        _database.Time.Advance(TimeSpan.FromSeconds(10));
         await AdvanceOperationsAsync();
 
         Assert.Equal(0, await DispatchAsync(Busy));
         _database.Time.Advance(TimeSpan.FromSeconds(8));
         Assert.Equal(0, await DispatchAsync(Busy));
 
-        // 粗加工：成品沒被搬走。精加工：等不到料。兩台機台各算一次。
+        // 粗加工：兩台都被做完的框卡住，但排隊的只有一框，所以只算一台「成品沒被搬走」（先做完的 1 號機）。
+        // 精加工：兩框都送不過去，兩台都等不到料，各算一次。
         var summary = await SummaryAsync(Busy);
         Assert.Equal((8d, MachineDelayCause.OutputNotRemoved), (summary.Steps[1].OutputNotRemovedSeconds, summary.Steps[1].CurrentCause));
-        Assert.Equal((8d, MachineDelayCause.WaitingForMaterial), (summary.Steps[2].WaitingForMaterialSeconds, summary.Steps[2].CurrentCause));
-        Assert.Equal(MachineDelayCause.OutputNotRemoved, (await StationAsync("rough")).ShortageCause);
+        Assert.Equal((16d, MachineDelayCause.WaitingForMaterial), (summary.Steps[2].WaitingForMaterialSeconds, summary.Steps[2].CurrentCause));
+        var rough = await StationAsync("rough");
+        Assert.Equal((MachineDelayCause.OutputNotRemoved, null), (rough.Machine(1).ShortageCause, rough.Machine(2).ShortageCause));
 
-        // 派出車之後兩邊都結束。
-        Assert.Equal(1, await DispatchAsync(Busy, Online("agv-a")));
+        // 兩台車都派出去之後全部結束。
+        Assert.Equal(2, await DispatchAsync(Busy, Online("agv-a"), Online("agv-b")));
         summary = await SummaryAsync(Busy);
-        Assert.Equal((0, 8d, 8d), (summary.WaitingTasks, summary.Steps[1].DelaySeconds, summary.Steps[2].DelaySeconds));
+        Assert.Equal((0, 8d, 16d), (summary.WaitingTasks, summary.Steps[1].DelaySeconds, summary.Steps[2].DelaySeconds));
         Assert.All(summary.Steps, step => Assert.Null(step.CurrentCause));
-        Assert.Null((await StationAsync("rough")).ShortageCause);
+        Assert.All((await StationAsync("rough")).Machines, machine => Assert.Null(machine.ShortageCause));
     }
 
     [Fact]
-    public async Task Two_tasks_waiting_for_the_same_machine_count_its_stopped_time_once()
+    public async Task Tasks_waiting_for_the_same_machines_count_each_machine_once()
     {
+        // 三批要送粗加工、都叫不到車：任務各等 5 秒，但粗加工只有兩台，耽誤的是 2 台 × 5 秒，不是 3 × 5 秒。
         await ConfigureAsync(s => s.LotQuantity = 15);
+        await CreateLotAsync();
         await CreateLotAsync();
         await CreateLotAsync();
 
@@ -162,15 +202,18 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal(0, await DispatchAsync(Busy));
 
         var summary = await SummaryAsync(Busy);
-        Assert.Equal((2, 10d, 5d), (summary.WaitingTasks, summary.WaitSeconds, summary.Steps[1].DelaySeconds));
+        Assert.Equal((3, 15d, 10d), (summary.WaitingTasks, summary.WaitSeconds, summary.Steps[1].DelaySeconds));
     }
 
     [Fact]
     public async Task Task_that_waits_for_room_at_the_destination_is_not_a_vehicle_shortage()
     {
-        // 粗加工的備料區被第一批占滿：第二批等的是容量，不是車。
+        // 粗加工兩台的備料區被前兩批占滿：第三批等的是容量，不是車。
         await CreateLotAsync();
         await DeliverAsync("agv-a");
+        await AdvanceOperationsAsync();
+        await CreateLotAsync();
+        await DeliverAsync("agv-b");
         await AdvanceOperationsAsync();
         await CreateLotAsync();
 

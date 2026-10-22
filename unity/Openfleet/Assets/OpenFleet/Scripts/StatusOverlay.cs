@@ -10,7 +10,7 @@ namespace OpenFleet.Unity
 {
     /// <summary>
     /// 畫在場景物件上方的進度條（UI Toolkit，螢幕座標，每個 frame 跟著攝影機重新定位）：
-    /// 機台的備料區、成品區、加工進度與可收合的刀具進度；整爐工序（淬火、回火、電鍍）的集料與這一爐的進度；車輛與站點交接的進度。
+    /// 機台的備料區、成品區、每台機台的加工進度與可收合的刀具進度；整爐工序（淬火、回火、電鍍）的集料與這一爐的進度；車輛與站點交接的進度。
     /// 站點狀態以 HTTP 輪詢取得，車輛狀態來自 FleetView 已經收到的 MQTT 更新；這裡不保存也不推算任何業務狀態。
     /// 由 PresentationController 在執行時建立；場景物件（站點、車輛）與顏色都向它取得。
     /// </summary>
@@ -412,7 +412,8 @@ namespace OpenFleet.Unity
         }
 
         /// <summary>
-        /// 一個站點的進度條。加工站：備料、成品、加工，另有可收合的刀具列（預設收合，主要看加工進度）。
+        /// 一個站點的進度條。逐件工序的站：備料、成品（同一站的機台共用），每台機台一列加工進度，
+        /// 另有可收合的刀具列（每台一列，預設收合，主要看加工進度）。整爐工序：集料、完成、這一爐。
         /// 其他站點只在有料時顯示一行件數。
         /// </summary>
         private sealed class StationWidget
@@ -421,8 +422,11 @@ namespace OpenFleet.Unity
 
             private readonly BarRow _inbound = new BarRow("備料", Colors.Inbound, TrackWidth);
             private readonly BarRow _outbound = new BarRow("成品", Colors.Outbound, TrackWidth);
-            private readonly BarRow _machining = new BarRow("加工", Colors.Machining, TrackWidth);
-            private readonly BarRow _tool = new BarRow("刀具", Colors.Tool, TrackWidth);
+            private readonly BarRow _furnace = new BarRow("爐內", Colors.Machining, TrackWidth);
+            private readonly VisualElement _machineRows = new VisualElement { pickingMode = PickingMode.Ignore };
+            private readonly VisualElement _toolRows = new VisualElement { pickingMode = PickingMode.Ignore };
+            private readonly List<BarRow> _machines = new List<BarRow>();
+            private readonly List<BarRow> _tools = new List<BarRow>();
             private readonly Button _toolToggle;
             private readonly Label _summary = new Label { pickingMode = PickingMode.Ignore };
             private bool _toolExpanded;
@@ -439,7 +443,8 @@ namespace OpenFleet.Unity
                 Root.Add(_summary);
                 Root.Add(_inbound.Root);
                 Root.Add(_outbound.Root);
-                Root.Add(_machining.Root);
+                Root.Add(_furnace.Root);
+                Root.Add(_machineRows);
 
                 // 只有這顆按鈕會攔截滑鼠，其餘部分讓滑鼠穿透到場景。
                 _toolToggle = new Button(ToggleTool);
@@ -450,8 +455,8 @@ namespace OpenFleet.Unity
                 _toolToggle.style.paddingTop = _toolToggle.style.paddingBottom = 0;
                 _toolToggle.style.color = Colors.InputText;
                 Root.Add(_toolToggle);
-                Root.Add(_tool.Root);
-                ShowToolRow();
+                Root.Add(_toolRows);
+                ShowToolRows();
             }
 
             public VisualElement Root { get; }
@@ -464,9 +469,11 @@ namespace OpenFleet.Unity
             public void Show(StationStatusDto status)
             {
                 _isMachine = status.IsMachine;
+                var isFurnace = _isMachine && status.Batch != null;
                 _inbound.SetVisible(_isMachine);
                 _outbound.SetVisible(_isMachine);
-                _machining.SetVisible(_isMachine);
+                _furnace.SetVisible(isFurnace);
+                _machineRows.style.display = _isMachine && !isFurnace ? DisplayStyle.Flex : DisplayStyle.None;
                 _summary.style.display = _isMachine ? DisplayStyle.None : DisplayStyle.Flex;
 
                 if (!_isMachine)
@@ -477,7 +484,7 @@ namespace OpenFleet.Unity
                         // 出貨站：等貨車的支數與下一班貨車的倒數，沒有箱子時也顯示。
                         _summary.text = $"待出貨 {status.InboundQuantity} 支\n貨車 {Remaining(status.Truck.RemainingSeconds)}";
                         HasContent = true;
-                        ShowToolRow();
+                        ShowToolRows();
                         return;
                     }
 
@@ -485,78 +492,132 @@ namespace OpenFleet.Unity
                     var total = status.InboundQuantity + status.OutboundQuantity;
                     _summary.text = status.OutboundQuantity > 0 ? $"待搬運 {status.OutboundQuantity} 件" : $"暫存 {status.InboundQuantity} 件";
                     HasContent = total > 0;
-                    ShowToolRow();
+                    ShowToolRows();
                     return;
                 }
 
                 HasContent = true;
-                _hasTool = status.Tool != null;
-                if (status.Batch != null)
+                if (isFurnace)
                 {
+                    _hasTool = false;
                     ShowBatch(status);
-                    ShowToolRow();
+                    ShowToolRows();
                     return;
                 }
 
                 _inbound.Set("備料", Ratio(status.InboundQuantity, status.InboundCapacity), Count(status.InboundQuantity, status.InboundCapacity));
                 _outbound.Set("成品", Ratio(status.OutboundQuantity, status.OutboundCapacity), Count(status.OutboundQuantity, status.OutboundCapacity));
 
-                var tool = status.Tool;
-                var changing = tool != null && tool.Changing;
-                if (changing)
+                // 一站一台時第一欄寫狀態（加工、換線、缺車…）；兩台以上時第一欄寫機台編號，狀態寫在右邊。
+                var machines = status.Machines;
+                var several = machines.Count > 1;
+                Resize(_machines, _machineRows, machines.Count, Colors.Machining);
+                for (var i = 0; i < machines.Count; i++)
+                {
+                    ShowMachine(_machines[i], machines[i], status, several);
+                }
+
+                var spares = new List<string>();
+                var toolCount = 0;
+                foreach (var machine in machines)
+                {
+                    if (machine.Tool == null)
+                    {
+                        continue;
+                    }
+
+                    Resize(_tools, _toolRows, toolCount + 1, Colors.Tool);
+                    var tool = machine.Tool;
+                    _tools[toolCount++].Set(several ? $"{machine.Number}號" : "刀具", Ratio(tool.PiecesUsed, tool.LifePieces), $"{tool.PiecesUsed}/{tool.LifePieces}");
+                    // 備用的新刀狀態寫在按鈕上，不必展開也看得到。
+                    var prefix = several ? $"{machine.Number}號" : string.Empty;
+                    if (tool.Spare == ToolSpareStatus.Delivered)
+                    {
+                        spares.Add(prefix + "新刀已到");
+                    }
+                    else if (tool.Spare == ToolSpareStatus.Requested)
+                    {
+                        spares.Add(prefix + "新刀配送中");
+                    }
+                }
+
+                Resize(_tools, _toolRows, toolCount, Colors.Tool);
+                _hasTool = toolCount > 0;
+                _spare = spares.Count > 0 ? "　" + string.Join("、", spares) : string.Empty;
+                ShowToolRows();
+            }
+
+            /// <summary>
+            /// 一台機台的一列。<paramref name="several"/> 為 true 時第一欄是機台編號，狀態（換線、換刀、缺車…）寫在右邊的文字裡；
+            /// 顏色一樣依狀態區分。
+            /// </summary>
+            private static void ShowMachine(BarRow row, MachineStatusDto machine, StationStatusDto station, bool several)
+            {
+                var tool = machine.Tool;
+                var number = $"{machine.Number}號";
+                if (tool != null && tool.Changing)
                 {
                     // 換刀時機台暫停：主要的加工列直接顯示「換刀」，不必展開刀具列也看得到。
-                    _machining.Set("換刀", (float)tool.ChangeProgress, $"{Mathf.RoundToInt((float)tool.ChangeProgress * 100f)}%", Colors.ToolChange);
+                    var percent = $"{Mathf.RoundToInt((float)tool.ChangeProgress * 100f)}%";
+                    row.Set(several ? number : "換刀", (float)tool.ChangeProgress, several ? "換刀" + percent : percent, Colors.ToolChange);
                 }
-                else if (status.Machining != null)
+                else if (machine.Machining != null)
                 {
-                    var m = status.Machining;
+                    var m = machine.Machining;
                     if (m.ChangingOver)
                     {
-                        // 機床換線：這一框的桿徑和上一框不同，先換工控程式，還沒開始做。
-                        _machining.Set("換線", (float)m.ChangeoverProgress, $"{Mathf.RoundToInt((float)m.ChangeoverProgress * 100f)}%", Colors.ToolChange);
+                        // 機床換線：這一框的零件或桿徑和這台機台的上一框不同，先換工控程式，還沒開始做。
+                        var percent = $"{Mathf.RoundToInt((float)m.ChangeoverProgress * 100f)}%";
+                        row.Set(several ? number : "換線", (float)m.ChangeoverProgress, several ? "換線" + percent : percent, Colors.ToolChange);
                     }
                     else
                     {
                         // 品管站的進度是已檢驗的支數，包裝站是已包裝的支數。
-                        _machining.Set(WorkName(status), Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
+                        row.Set(several ? number : WorkName(station), Ratio(m.PiecesCompleted, m.Quantity), $"{m.PiecesCompleted}/{m.Quantity}", Colors.Machining);
                     }
                 }
-                else if (status.ShortageCause.HasValue)
+                else if (machine.ShortageCause.HasValue)
                 {
                     // 機台因為叫不到車而停著：整條填滿，和一般的待機區分開來。
                     // 車都在忙是缺車；車輛全部離線是重大事故，用不同的字與顏色。
-                    var offline = status.ShortageReason == ShortageReason.FleetOffline;
+                    var offline = machine.ShortageReason == ShortageReason.FleetOffline;
                     string waitingFor;
-                    switch (status.ShortageCause.Value)
+                    switch (machine.ShortageCause.Value)
                     {
                         case MachineDelayCause.WaitingForMaterial: waitingFor = "等料"; break;
                         case MachineDelayCause.WaitingForTool: waitingFor = "等刀"; break;
                         default: waitingFor = "待搬走"; break;
                     }
 
-                    _machining.Set(offline ? "離線" : "缺車", 1f, waitingFor, offline ? Colors.Incident : Colors.Shortage);
+                    var state = offline ? "離線" : "缺車";
+                    row.Set(several ? number : state, 1f, several ? state + waitingFor : waitingFor, offline ? Colors.Incident : Colors.Shortage);
                 }
                 else if (tool != null && tool.WaitingForTool)
                 {
                     // 刀具已到壽命、新刀已經在路上：停機等刀，但不是缺車。
-                    _machining.Set("等刀", 1f, "配送中", Colors.WaitingForTool);
+                    row.Set(several ? number : "等刀", 1f, several ? "等刀" : "配送中", Colors.WaitingForTool);
                 }
                 else
                 {
-                    _machining.Set(WorkName(status), 0f, "待機", Colors.Machining);
+                    row.Set(several ? number : WorkName(station), 0f, "待機", Colors.Machining);
                 }
+            }
 
-                if (tool != null)
+            /// <summary>讓 <paramref name="rows"/> 剛好有 <paramref name="count"/> 列，多的移除、少的補上。</summary>
+            private static void Resize(List<BarRow> rows, VisualElement container, int count, Color color)
+            {
+                while (rows.Count < count)
                 {
-                    _tool.Set("刀具", Ratio(tool.PiecesUsed, tool.LifePieces), $"{tool.PiecesUsed}/{tool.LifePieces}");
-                    // 備用的新刀狀態寫在按鈕上，不必展開也看得到。
-                    _spare = tool.Spare == ToolSpareStatus.Delivered ? "　新刀已到"
-                        : tool.Spare == ToolSpareStatus.Requested ? "　新刀配送中"
-                        : string.Empty;
+                    var row = new BarRow(string.Empty, color, TrackWidth);
+                    rows.Add(row);
+                    container.Add(row.Root);
                 }
 
-                ShowToolRow();
+                while (rows.Count > count)
+                {
+                    rows[rows.Count - 1].Root.RemoveFromHierarchy();
+                    rows.RemoveAt(rows.Count - 1);
+                }
             }
 
             /// <summary>
@@ -570,20 +631,20 @@ namespace OpenFleet.Unity
                 _outbound.Set("完成", status.OutboundQuantity > 0 ? 1f : 0f, status.OutboundQuantity.ToString());
                 if (batch.Running)
                 {
-                    _machining.Set(batch.StageName ?? "處理", (float)batch.StageProgress, Remaining(batch.RemainingSeconds), Colors.Machining);
+                    _furnace.Set(batch.StageName ?? "處理", (float)batch.StageProgress, Remaining(batch.RemainingSeconds), Colors.Machining);
                 }
                 else
                 {
-                    _machining.Set("爐內", 0f, "待機", Colors.Machining);
+                    _furnace.Set("爐內", 0f, "待機", Colors.Machining);
                 }
             }
 
-            /// <summary>剩餘時間（原本的工序時間，測試模式下走得比較快）：一小時以上顯示「時h分m」，不到一小時顯示「分m秒s」。</summary>
             private static string WorkName(StationStatusDto status)
             {
                 return status.IsInspection ? "檢驗" : status.IsPacking ? "包裝" : "加工";
             }
 
+            /// <summary>剩餘時間（原本的工序時間，測試模式下走得比較快）：一小時以上顯示「時h分m」，不到一小時顯示「分m秒s」。</summary>
             private static string Remaining(double seconds)
             {
                 var total = Mathf.Max(0, Mathf.CeilToInt((float)seconds));
@@ -593,16 +654,16 @@ namespace OpenFleet.Unity
             private void ToggleTool()
             {
                 _toolExpanded = !_toolExpanded;
-                ShowToolRow();
+                ShowToolRows();
             }
 
-            private void ShowToolRow()
+            private void ShowToolRows()
             {
-                // 沒有刀具的站（拋光、淬火／回火、電鍍）不顯示刀具列。
+                // 沒有刀具的站（拋光、品管、包裝、切料、整爐工序）不顯示刀具列。
                 var show = _isMachine && _hasTool;
                 _toolToggle.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
                 _toolToggle.text = (_toolExpanded ? "刀具 ▲" : "刀具 ▼") + _spare;
-                _tool.SetVisible(show && _toolExpanded);
+                _toolRows.style.display = show && _toolExpanded ? DisplayStyle.Flex : DisplayStyle.None;
             }
 
             private static float Ratio(int quantity, int? capacity)

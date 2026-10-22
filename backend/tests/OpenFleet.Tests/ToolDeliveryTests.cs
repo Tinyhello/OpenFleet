@@ -41,11 +41,11 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
     {
         // 做完 5 件還剩 5 件：還不用叫刀。
         await AdvanceAsync(10);
-        Assert.Equal(ToolSpareStatus.None, (await RoughAsync()).Tool!.Spare);
+        Assert.Equal(ToolSpareStatus.None, (await RoughAsync()).Machine().Tool!.Spare);
 
         // 做完 6 件剩 4 件：建立刀具配送任務（刀具庫 → 粗加工）。
         await AdvanceAsync(2);
-        Assert.Equal(ToolSpareStatus.Requested, (await RoughAsync()).Tool!.Spare);
+        Assert.Equal(ToolSpareStatus.Requested, (await RoughAsync()).Machine().Tool!.Spare);
         await using (var scope = _database.NewScope())
         {
             var task = await scope.Db.TransportTasks.SingleAsync(t => t.Kind == TransportTaskKind.ToolDelivery);
@@ -74,7 +74,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         // 配送完成只代表新刀在機邊：還沒換刀，機台照常加工。
         await _database.CompleteDeliveryAsync("agv-s");
         var rough = await RoughAsync();
-        Assert.Equal((ToolSpareStatus.Delivered, false, false), (rough.Tool!.Spare, rough.Tool.Changing, rough.Tool.WaitingForTool));
+        Assert.Equal((ToolSpareStatus.Delivered, false, false), (rough.Machine().Tool!.Spare, rough.Machine().Tool!.Changing, rough.Machine().Tool!.WaitingForTool));
         await using (var scope = _database.NewScope())
         {
             Assert.Equal(TransportTaskStatus.Completed, (await scope.Db.TransportTasks.SingleAsync(t => t.Kind == TransportTaskKind.ToolDelivery)).Status);
@@ -84,11 +84,11 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         // 第 10 件做完、新刀已在機邊：直接換刀。換完之後備用刀用掉了，換刀紀錄另外一筆。
         await AdvanceAsync(6);
         rough = await RoughAsync();
-        Assert.Equal((10, true, false), (rough.Machining!.PiecesCompleted, rough.Tool!.Changing, rough.Tool.WaitingForTool));
+        Assert.Equal((10, true, false), (rough.Machine().Machining!.PiecesCompleted, rough.Machine().Tool!.Changing, rough.Machine().Tool!.WaitingForTool));
 
         await AdvanceAsync(20);
         rough = await RoughAsync();
-        Assert.Equal((false, 0, ToolSpareStatus.None), (rough.Tool!.Changing, rough.Tool.PiecesUsed, rough.Tool.Spare));
+        Assert.Equal((false, 0, ToolSpareStatus.None), (rough.Machine().Tool!.Changing, rough.Machine().Tool!.PiecesUsed, rough.Machine().Tool!.Spare));
         await using (var scope = _database.NewScope())
         {
             Assert.Equal(10, (await scope.Db.ToolChanges.SingleAsync()).PiecesUsed);
@@ -105,13 +105,13 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         await AdvanceAsync(8);
         var rough = await RoughAsync();
         Assert.Equal((10, true, false, ToolSpareStatus.Requested),
-            (rough.Machining!.PiecesCompleted, rough.Tool!.WaitingForTool, rough.Tool.Changing, rough.Tool.Spare));
+            (rough.Machine().Machining!.PiecesCompleted, rough.Machine().Tool!.WaitingForTool, rough.Machine().Tool!.Changing, rough.Machine().Tool!.Spare));
 
         // 停機期間不會繼續加工；這段時間記為缺車造成的「等刀」。
         Assert.Equal(0, await DispatchAsync(Online("agv-a"), Online("agv-s")));
         await AdvanceAsync(6);
         Assert.Equal(0, await DispatchAsync(Online("agv-a"), Online("agv-s")));
-        Assert.Equal(10, (await RoughAsync()).Machining!.PiecesCompleted);
+        Assert.Equal(10, (await RoughAsync()).Machine().Machining!.PiecesCompleted);
         var summary = await SummaryAsync(Online("agv-a"), Online("agv-s"));
         Assert.Equal((6d, 6d, MachineDelayCause.WaitingForTool, ShortageReason.VehiclesBusy),
             (summary.Steps[1].DelaySeconds, summary.Steps[1].WaitingForToolSeconds, summary.Steps[1].CurrentCause, summary.Steps[1].CurrentReason));
@@ -123,18 +123,18 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(0, await DispatchAsync(Online("agv-a"), Online("agv-s")));
         summary = await SummaryAsync(Online("agv-a"), Online("agv-s"));
         Assert.Equal((6d, null), (summary.Steps[1].WaitingForToolSeconds, summary.Steps[1].CurrentCause));
-        Assert.True((await RoughAsync()).Tool!.WaitingForTool);
+        Assert.True((await RoughAsync()).Machine().Tool!.WaitingForTool);
 
         // 新刀送到才開始換刀（20 秒），換完從頭計時下一件。
         await _database.CompleteDeliveryAsync("agv-s");
         await AdvanceAsync(0);
         rough = await RoughAsync();
-        Assert.Equal((false, true, 0d), (rough.Tool!.WaitingForTool, rough.Tool.Changing, rough.Tool.ChangeProgress));
+        Assert.Equal((false, true, 0d), (rough.Machine().Tool!.WaitingForTool, rough.Machine().Tool!.Changing, rough.Machine().Tool!.ChangeProgress));
 
         await AdvanceAsync(20);
-        Assert.Equal((10, false), ((await RoughAsync()).Machining!.PiecesCompleted, (await RoughAsync()).Tool!.Changing));
+        Assert.Equal((10, false), ((await RoughAsync()).Machine().Machining!.PiecesCompleted, (await RoughAsync()).Machine().Tool!.Changing));
         await AdvanceAsync(2);
-        Assert.Equal(11, (await RoughAsync()).Machining!.PiecesCompleted);
+        Assert.Equal(11, (await RoughAsync()).Machine().Machining!.PiecesCompleted);
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         await AdvanceAsync(20);
 
         var rough = await RoughAsync();
-        Assert.Equal((true, false), (rough.Tool!.Changing, rough.Tool.WaitingForTool));
+        Assert.Equal((true, false), (rough.Machine().Tool!.Changing, rough.Machine().Tool!.WaitingForTool));
         await using var scope = _database.NewScope();
         Assert.Equal(0, await scope.Db.TransportTasks.CountAsync(t => t.Kind == TransportTaskKind.ToolDelivery));
     }

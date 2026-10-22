@@ -13,7 +13,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<ProcessStep> ProcessSteps => Set<ProcessStep>();
     public DbSet<ProductionSettings> ProductionSettings => Set<ProductionSettings>();
     public DbSet<BatchRun> BatchRuns => Set<BatchRun>();
-    public DbSet<StationTool> StationTools => Set<StationTool>();
+    public DbSet<Machine> Machines => Set<Machine>();
+    public DbSet<MachineTool> MachineTools => Set<MachineTool>();
     public DbSet<ToolChangeRecord> ToolChanges => Set<ToolChangeRecord>();
     public DbSet<MaterialLot> Lots => Set<MaterialLot>();
     public DbSet<InventoryMovement> InventoryMovements => Set<InventoryMovement>();
@@ -342,22 +343,37 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.HasIndex(r => r.StationCode).IsUnique().HasFilter("\"CompletedAt\" IS NULL").HasDatabaseName("UX_BatchRuns_RunningStation");
         });
 
-        model.Entity<StationTool>(e =>
+        model.Entity<Machine>(e =>
         {
-            e.HasKey(t => t.StationCode);
-            e.Property(t => t.StationCode).HasMaxLength(32);
+            e.HasKey(m => m.Code);
+            e.Property(m => m.Code).HasMaxLength(32);
+            e.Property(m => m.StationCode).HasMaxLength(32);
+            e.Property(m => m.Name).HasMaxLength(64);
+            // 同一站的機台編號不重複。
+            e.HasIndex(m => new { m.StationCode, m.Number }).IsUnique();
+            e.HasOne<Station>().WithMany().HasForeignKey(m => m.StationCode).OnDelete(DeleteBehavior.Restrict);
+            e.ToTable(t => t.HasCheckConstraint("CK_Machines_Number", "\"Number\" >= 1"));
+        });
+
+        model.Entity<MachineTool>(e =>
+        {
+            e.HasKey(t => t.MachineCode);
+            e.Property(t => t.MachineCode).HasMaxLength(32);
             e.Ignore(t => t.IsChanging);
             e.Ignore(t => t.IsWaitingForSpare);
             e.Ignore(t => t.IsStopped);
-            e.HasOne<Station>().WithOne().HasForeignKey<StationTool>(t => t.StationCode).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<Machine>().WithOne().HasForeignKey<MachineTool>(t => t.MachineCode).OnDelete(DeleteBehavior.Cascade);
         });
 
         model.Entity<ToolChangeRecord>(e =>
         {
             e.ToTable("ToolChanges");
             e.Property(r => r.StationCode).HasMaxLength(32);
+            e.Property(r => r.MachineCode).HasMaxLength(32);
             e.HasIndex(r => new { r.StationCode, r.Id });
+            e.HasIndex(r => r.MachineCode);
             e.HasOne<Station>().WithMany().HasForeignKey(r => r.StationCode).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<Machine>().WithMany().HasForeignKey(r => r.MachineCode).OnDelete(DeleteBehavior.Cascade);
         });
 
         model.Entity<ProductionSettings>(e =>
@@ -434,9 +450,15 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.ToTable("Operations");
             e.Property(o => o.Id).ValueGeneratedNever();
             e.Property(o => o.StationCode).HasMaxLength(32);
+            e.Property(o => o.MachineCode).HasMaxLength(32);
             e.HasIndex(o => new { o.StationCode, o.Status });
+            // 換線看的是這台機台上一框做的是什麼。
+            e.HasIndex(o => new { o.MachineCode, o.StartedAt });
             e.HasOne(o => o.Lot).WithMany().HasForeignKey(o => o.LotId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<Station>().WithMany().HasForeignKey(o => o.StationCode).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Machine>().WithMany().HasForeignKey(o => o.MachineCode).OnDelete(DeleteBehavior.Restrict);
+            // 一台機台同一時間只做一框。
+            e.HasIndex(o => o.MachineCode).IsUnique().HasFilter("\"Status\" = 'Running'").HasDatabaseName("UX_Operations_RunningMachine");
         });
 
         model.Entity<RouteNode>(e =>
@@ -464,6 +486,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(t => t.Id).ValueGeneratedNever();
             e.Property(t => t.FromStationCode).HasMaxLength(32);
             e.Property(t => t.ToStationCode).HasMaxLength(32);
+            e.Property(t => t.MachineCode).HasMaxLength(32);
+            e.HasOne<Machine>().WithMany().HasForeignKey(t => t.MachineCode).OnDelete(DeleteBehavior.Restrict);
             e.Property(t => t.FailureReason).HasMaxLength(256);
             e.Property(t => t.Version).IsRowVersion();
             e.Ignore(t => t.NeedsAttention);
@@ -513,9 +537,11 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         {
             e.Ignore(d => d.IsOpen);
             e.Property(d => d.StationCode).HasMaxLength(32);
+            e.Property(d => d.MachineCode).HasMaxLength(32);
             e.HasOne<TransportTask>().WithMany().HasForeignKey(d => d.TaskId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<Station>().WithMany().HasForeignKey(d => d.StationCode).OnDelete(DeleteBehavior.Restrict);
-            e.HasIndex(d => d.StationCode).IsUnique().HasFilter("\"EndedAt\" IS NULL").HasDatabaseName("UX_MachineDelays_OpenStation");
+            e.HasOne<Machine>().WithMany().HasForeignKey(d => d.MachineCode).OnDelete(DeleteBehavior.Restrict);
+            e.HasIndex(d => d.MachineCode).IsUnique().HasFilter("\"EndedAt\" IS NULL").HasDatabaseName("UX_MachineDelays_OpenMachine");
             e.HasIndex(d => d.StepSequence);
         });
 

@@ -37,7 +37,7 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         // 逐支檢驗：每支 2 秒，檢到一半時還沒有任何判定結果寫出去。
         await AdvanceAsync(10);
         var qc = await StationAsync("qc");
-        Assert.Equal((true, 5, 10), (qc.IsInspection, qc.Machining!.PiecesCompleted, qc.Machining.Quantity));
+        Assert.Equal((true, 5, 10), (qc.IsInspection, qc.Machine().Machining!.PiecesCompleted, qc.Machine().Machining!.Quantity));
         Assert.Equal(0, (await SummaryAsync()).Inspected);
 
         await AdvanceAsync(10);
@@ -123,7 +123,7 @@ public sealed class QualityInspectionTests(PostgresFixture postgres) : IAsyncLif
         // 報廢的框不占用品管站：下一框照常開始檢驗。
         await ArriveAsync("qc", Inspection, 3);
         await AdvanceAsync(0);
-        Assert.Equal(3, (await StationAsync("qc")).Machining!.Quantity);
+        Assert.Equal(3, (await StationAsync("qc")).Machine().Machining!.Quantity);
     }
 
     [Fact]

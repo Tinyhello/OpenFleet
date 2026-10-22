@@ -249,8 +249,8 @@ public sealed class TransportService(
                 }
                 else
                 {
-                    // 刀具配送完成：新刀在機邊備用。換刀是機台端的另一件事，另外記錄。
-                    await production.OnToolDeliveredAsync(task.ToStationCode, now, cancellationToken);
+                    // 刀具配送完成：新刀在那台機台的機邊備用。換刀是機台端的另一件事，另外記錄。
+                    await production.OnToolDeliveredAsync(ToolMachine(task), now, cancellationToken);
                 }
 
                 break;
@@ -405,7 +405,7 @@ public sealed class TransportService(
             }
             else
             {
-                db.TransportTasks.Add(TransportTask.CreateToolDelivery(task.FromStationCode, task.ToStationCode, now));
+                db.TransportTasks.Add(TransportTask.CreateToolDelivery(task.FromStationCode, task.ToStationCode, ToolMachine(task), now));
             }
         }
         else if (lot is not null)
@@ -416,7 +416,7 @@ public sealed class TransportService(
         }
         else
         {
-            await production.OnToolDeliveredAsync(task.ToStationCode, now, cancellationToken);
+            await production.OnToolDeliveredAsync(ToolMachine(task), now, cancellationToken);
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -426,6 +426,8 @@ public sealed class TransportService(
     /// <summary>
     /// 目的站的待加工料容量夠不夠。已承諾量＝備料區現有的數量（排隊中的批次＋加工中批次還沒做的件數）
     /// ＋已派工、還沒卸料的數量；每一筆只算一次（卸料後任務完成，數量就改算在站內）。
+    /// 容量是這一站每台機台的備料台加起來（粗加工、精加工兩台各 30 支，共 60 支）。
+    /// 每一框最多算一個備料台：料框比備料台大的桿徑（24 mm 一框 45 支）占滿一個備料台，但至少放得下一框，否則永遠送不進去。
     /// </summary>
     private async Task<bool> HasRoomAsync(Station destination, int quantity, CancellationToken cancellationToken)
     {
@@ -436,19 +438,27 @@ public sealed class TransportService(
 
         var waiting = await db.Lots
             .Where(l => l.StationCode == destination.Code && l.Status == LotStatus.Queued)
-            .SumAsync(l => l.Quantity, cancellationToken);
+            .Select(l => l.Quantity)
+            .ToListAsync(cancellationToken);
         var remaining = await db.Operations
             .Where(o => o.StationCode == destination.Code && o.Status == OperationStatus.Running)
-            .SumAsync(o => o.Quantity - o.PiecesCompleted, cancellationToken);
+            .Select(o => o.Quantity - o.PiecesCompleted)
+            .ToListAsync(cancellationToken);
         var inbound = await db.TransportTasks
             .Where(t => t.ToStationCode == destination.Code
                 && t.Kind != TransportTaskKind.ToolDelivery
                 && (t.Status == TransportTaskStatus.Assigned || t.Status == TransportTaskStatus.Executing))
-            .SumAsync(t => t.Quantity, cancellationToken);
+            .Select(t => t.Quantity)
+            .ToListAsync(cancellationToken);
+        var machines = Math.Max(1, await db.Machines.CountAsync(m => m.StationCode == destination.Code, cancellationToken));
+        var table = Math.Max(1, capacity / machines);
 
-        // 容量以支計；料框比容量大的桿徑（24 mm 一框 45 支）至少放得下一框，否則永遠送不進去。
-        return waiting + remaining + inbound + quantity <= Math.Max(capacity, quantity);
+        var committed = waiting.Concat(remaining).Concat(inbound).Sum(q => Math.Min(q, table));
+        return committed + Math.Min(quantity, table) <= capacity;
     }
+
+    /// <summary>送刀具的任務是給哪一台機台；P6 以前建立的任務（一站一台）是那一站的 1 號機。</summary>
+    private static string ToolMachine(TransportTask task) => task.MachineCode ?? Machine.CodeOf(task.ToStationCode, 1);
 
     private OutboxMessage CreateCommandMessage(
         Assignment assignment, TransportTask task, Station pickup, Station destination, double handoverSeconds, DateTimeOffset now)

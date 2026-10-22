@@ -19,14 +19,15 @@ public static class DatabaseInitializer
     /// 上排由右到左是拋光、（雜物倉庫）、品管、包裝、成品倉、出貨，
     /// 括號裡的兩個只是場景、不是站點；
     /// 刀具庫在走道內側的島區中央（使用者 2026-10-12 指定的相鄰關係；實際座標是 Claude 排的）。
-    /// 待加工料容量 30 件是已確認的數值；倉庫與暫存點（淬火站入口）的容量規則還沒定，所以留空。
+    /// 一台車床的待加工料容量 30 件是已確認的數值；粗加工、精加工各有兩台車床（使用者 2026-10-22），所以那兩站是 60 件。
+    /// 倉庫與暫存點（淬火站入口）的容量規則還沒定，所以留空。
     /// </summary>
     private static readonly Station[] DemoStations =
     [
         new() { Code = "cutting", Name = "切料", HandoffX = -28, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
         new() { Code = "raw-store", Name = "原料倉", HandoffX = -20, HandoffZ = -DemoRoadNetwork.HandoffZ },
-        new() { Code = "rough", Name = "粗加工", HandoffX = -12, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
-        new() { Code = "fine", Name = "精加工", HandoffX = -4, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30 },
+        new() { Code = "rough", Name = "粗加工", HandoffX = -12, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 60, OutboundCapacity = 60 },
+        new() { Code = "fine", Name = "精加工", HandoffX = -4, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 60, OutboundCapacity = 60 },
         new() { Code = "heat", Name = "淬火", HandoffX = 4, HandoffZ = -DemoRoadNetwork.HandoffZ },
         new() { Code = "temper", Name = "回火", HandoffX = 12, HandoffZ = -DemoRoadNetwork.HandoffZ },
         new() { Code = "plating", Name = "電鍍", HandoffX = 20, HandoffZ = -DemoRoadNetwork.HandoffZ },
@@ -76,6 +77,12 @@ public static class DatabaseInitializer
         new() { Sequence = 7, StationCode = "qc", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, IsInspection = true, TestSpeed = DemoTestSpeed },
         new() { Sequence = 8, StationCode = "packing", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, IsPacking = true, TestSpeed = DemoTestSpeed },
     ];
+
+    /// <summary>
+    /// 逐件工序的站有幾台機台（使用者 2026-10-22：粗加工、精加工各兩台車床，其他站一台；同一站的機台都能做所有規格）。
+    /// 沒有列出的逐件工序站是一台。
+    /// </summary>
+    private static readonly Dictionary<string, int> DemoMachineCounts = new() { ["rough"] = 2, ["fine"] = 2 };
 
     /// <summary>
     /// 測試模式下每一站與貨車的倍率（使用者 2026-10-22：同其他機台的加速比例，讓一個流程約 2～3 分鐘看完）。
@@ -189,9 +196,32 @@ public static class DatabaseInitializer
             TestSpeed = demo.TestSpeed,
         }));
 
-        // 有刀具的工序各一筆刀具狀態。
-        var tools = await db.StationTools.Select(t => t.StationCode).ToListAsync();
-        db.StationTools.AddRange(DemoSteps.Where(s => s.UsesTool && !tools.Contains(s.StationCode)).Select(s => new StationTool { StationCode = s.StationCode }));
+        // 逐件工序的機台和站點一樣跟著示範佈局：補上缺少的、名稱跟著目前的命名。有刀具的工序每台機台各一筆刀具狀態。
+        var machines = await db.Machines.ToDictionaryAsync(m => m.Code);
+        var tools = await db.MachineTools.Select(t => t.MachineCode).ToListAsync();
+        foreach (var step in DemoSteps.Where(s => s.Kind == ProcessStepKind.Piece))
+        {
+            var stationName = DemoStations.Single(s => s.Code == step.StationCode).Name;
+            var count = DemoMachineCounts.GetValueOrDefault(step.StationCode, 1);
+            for (var number = 1; number <= count; number++)
+            {
+                var code = Machine.CodeOf(step.StationCode, number);
+                var name = count == 1 ? stationName : $"{stationName} {number} 號機";
+                if (machines.TryGetValue(code, out var machine))
+                {
+                    machine.Name = name;
+                }
+                else
+                {
+                    db.Machines.Add(new Machine { Code = code, StationCode = step.StationCode, Number = number, Name = name });
+                }
+
+                if (step.UsesTool && !tools.Contains(code))
+                {
+                    db.MachineTools.Add(new MachineTool { MachineCode = code });
+                }
+            }
+        }
 
         if (!await db.ProductionSettings.AnyAsync())
         {

@@ -16,8 +16,9 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 批次、製程設定與加工進度（Scoped：跟著一個 DbContext）。
 /// 一個批次依料框容量分成好幾框，每一框各自搬運、各自加工；系統裡的 <see cref="MaterialLot"/> 就是一框。
 /// 加工是後端內的簡化模擬，工序有兩種：
-/// 逐件（車床、拋光）：每站一台、一次一框、逐件計數、整框做完才放行；有刀具的站快到壽命時預先叫刀，到壽命時換刀或停機等刀；
-/// 車床接著做的那一框桿徑不同時要先換線。
+/// 逐件（車床、拋光）：粗加工、精加工各兩台車床，其他站一台（<see cref="Machine"/>）；同一站的機台共用備料區，
+/// 哪一台空下來就接下一框（<see cref="MachineAssignment"/>）。每台一次一框、逐件計數、整框做完才放行；
+/// 有刀具的機台快到壽命時預先叫刀，到壽命時換刀或停機等刀；車床接著做的那一框零件或桿徑和自己上一框不同時要先換線。
 /// 整爐（淬火、回火、電鍍）：站內累積到下限才開爐，不同批次可以混在一起，時間到整爐一起放行。
 /// 品管（逐件工序的一種）：逐支檢驗，整框檢完後在品管站分框，合格的往下走、可反工的送回去重做、其餘報廢。
 /// 包裝（逐件工序的一種）：逐支包裝，同批次同一種零件的框全部包完才併成一箱送去出貨站；貨車定時來，把整批到齊的箱子載走。
@@ -586,12 +587,14 @@ public sealed partial class ProductionService(
         }
     }
 
-    /// <summary>新刀送到機邊（刀具配送任務完成）。由搬運完成事件在同一筆交易內呼叫；換刀要等刀具到壽命才開始。</summary>
-    public async Task OnToolDeliveredAsync(string stationCode, DateTimeOffset now, CancellationToken cancellationToken)
+    /// <summary>
+    /// 新刀送到機邊（刀具配送任務完成），給 <paramref name="machineCode"/> 這台機台。由搬運完成事件在同一筆交易內呼叫；換刀要等刀具到壽命才開始。
+    /// </summary>
+    public async Task OnToolDeliveredAsync(string machineCode, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var tool = await db.StationTools.SingleAsync(t => t.StationCode == stationCode, cancellationToken);
+        var tool = await db.MachineTools.SingleAsync(t => t.MachineCode == machineCode, cancellationToken);
         tool.DeliverSpare(now);
-        logger.LogInformation("Station {Station}: spare tool delivered.", stationCode);
+        logger.LogInformation("Machine {Machine}: spare tool delivered.", machineCode);
     }
 
     /// <summary>
@@ -606,15 +609,16 @@ public sealed partial class ProductionService(
         var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
         var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
         var allocated = await AllocateWaitingMaterialAsync(steps, settings, now, cancellationToken);
-        var tools = await db.StationTools.ToDictionaryAsync(t => t.StationCode, cancellationToken);
+        var machines = await db.Machines.AsNoTracking().ToDictionaryAsync(m => m.Code, cancellationToken);
+        var tools = await db.MachineTools.ToDictionaryAsync(t => t.MachineCode, cancellationToken);
         var running = await db.Operations.Include(o => o.Lot)
             .Where(o => o.Status == OperationStatus.Running)
             .ToListAsync(cancellationToken);
 
         foreach (var operation in running.Where(o => o.BatchRunId is null))
         {
-            // 沒有刀具的工序（拋光）不計刀具壽命，也不會換刀。
-            var tool = tools.GetValueOrDefault(operation.StationCode);
+            // 刀具是每台機台各自的；沒有刀具的工序（拋光、品管、包裝、切料）不計刀具壽命，也不會換刀。
+            var tool = operation.MachineCode is { } machineCode ? tools.GetValueOrDefault(machineCode) : null;
             var step = steps.Single(s => s.Sequence == operation.StepSequence);
             var speed = settings.SpeedOf(step);
 
@@ -636,7 +640,7 @@ public sealed partial class ProductionService(
                         }
 
                         // 換刀結束：目前這一件從換刀完成的時間重新開始。
-                        FinishToolChange(tool);
+                        FinishToolChange(tool, operation.StationCode);
                         operation.ResumeAt(changeDue);
                     }
                 }
@@ -659,14 +663,14 @@ public sealed partial class ProductionService(
                     if (!settings.ToolDeliveryEnabled || tool.SpareDeliveredAt is not null)
                     {
                         tool.StartChange(pieceDue, settings.ToolChangeSeconds / speed);
-                        logger.LogInformation("Station {Station}: tool reached {Pieces} piece(s); changing for {Seconds}s.",
-                            tool.StationCode, tool.PiecesSinceChange, settings.ToolChangeSeconds);
+                        logger.LogInformation("Machine {Machine}: tool reached {Pieces} piece(s); changing for {Seconds}s.",
+                            tool.MachineCode, tool.PiecesSinceChange, settings.ToolChangeSeconds);
                     }
                     else
                     {
                         tool.WaitForSpare(pieceDue);
-                        logger.LogWarning("Station {Station}: tool reached {Pieces} piece(s) but the spare has not arrived; machine stopped.",
-                            tool.StationCode, tool.PiecesSinceChange);
+                        logger.LogWarning("Machine {Machine}: tool reached {Pieces} piece(s) but the spare has not arrived; machine stopped.",
+                            tool.MachineCode, tool.PiecesSinceChange);
                     }
                 }
             }
@@ -701,20 +705,21 @@ public sealed partial class ProductionService(
         // 沒有在加工的機台，等刀與換刀也要往前走（上一框最後一件剛好用完刀具的情況）。
         foreach (var tool in tools.Values)
         {
+            var station = machines[tool.MachineCode].StationCode;
             if (tool.IsWaitingForSpare)
             {
-                TryStartChangeAfterWaiting(tool, settings, settings.SpeedOf(steps.Single(s => s.StationCode == tool.StationCode)));
+                TryStartChangeAfterWaiting(tool, settings, settings.SpeedOf(steps.Single(s => s.StationCode == station)));
             }
 
             if (tool.ChangeDueAt <= now)
             {
-                FinishToolChange(tool);
+                FinishToolChange(tool, station);
             }
         }
 
         if (settings.ToolDeliveryEnabled)
         {
-            RequestSpareTools(steps, tools, settings, now);
+            RequestSpareTools(steps, machines, tools, settings, now);
         }
 
         var changed = db.ChangeTracker.HasChanges();
@@ -723,7 +728,7 @@ public sealed partial class ProductionService(
         changed |= await BoxOrdersAsync(settings, now, cancellationToken);
         changed |= await ReceiveSurplusAsync(now, cancellationToken);
         changed |= await AdvanceTruckAsync(settings, now, cancellationToken);
-        var started = await StartQueuedOperationsAsync(steps, tools, settings, now, cancellationToken);
+        var started = await StartQueuedOperationsAsync(steps, machines, tools, settings, now, cancellationToken);
         return await StartBatchRunsAsync(steps, settings, now, cancellationToken) || started || changed || allocated;
     }
 
@@ -1149,7 +1154,7 @@ public sealed partial class ProductionService(
     }
 
     /// <summary>新刀已送到就從送到的時間開始換刀（不會早於開始等待的時間）；還沒到回傳 false。</summary>
-    private bool TryStartChangeAfterWaiting(StationTool tool, ProductionSettings settings, double speed)
+    private bool TryStartChangeAfterWaiting(MachineTool tool, ProductionSettings settings, double speed)
     {
         if (tool.SpareDeliveredAt is not { } delivered || tool.WaitingSince is not { } waitingSince)
         {
@@ -1157,20 +1162,26 @@ public sealed partial class ProductionService(
         }
 
         tool.StartChange(delivered > waitingSince ? delivered : waitingSince, settings.ToolChangeSeconds / speed);
-        logger.LogInformation("Station {Station}: spare tool arrived; changing for {Seconds}s.", tool.StationCode, settings.ToolChangeSeconds);
+        logger.LogInformation("Machine {Machine}: spare tool arrived; changing for {Seconds}s.", tool.MachineCode, settings.ToolChangeSeconds);
         return true;
     }
 
     /// <summary>
-    /// 刀具剩餘件數低於門檻、而且還沒叫過刀的機台：建立一筆刀具配送任務（刀具庫 → 機邊），由小型車執行。
-    /// 一把刀只叫一次；換刀完成後備用刀用掉了，下一輪再依門檻判斷。
+    /// 刀具剩餘件數低於門檻、而且還沒叫過刀的機台：建立一筆刀具配送任務（刀具庫 → 那一站的機邊，給那一台），由小型車執行。
+    /// 每台機台的刀各自算；一把刀只叫一次，換刀完成後備用刀用掉了，下一輪再依門檻判斷。
     /// </summary>
     private void RequestSpareTools(
-        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, StationTool> tools, ProductionSettings settings, DateTimeOffset now)
+        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, Machine> machines, IReadOnlyDictionary<string, MachineTool> tools,
+        ProductionSettings settings, DateTimeOffset now)
     {
-        foreach (var step in steps.Where(s => s.UsesTool))
+        foreach (var tool in tools.Values.OrderBy(t => t.MachineCode, StringComparer.Ordinal))
         {
-            var tool = tools[step.StationCode];
+            var machine = machines[tool.MachineCode];
+            if (steps.FirstOrDefault(s => s.StationCode == machine.StationCode && s.UsesTool) is not { } step)
+            {
+                continue;
+            }
+
             var remaining = step.ToolLifePieces - tool.PiecesSinceChange;
             if (tool.SpareRequestedAt is not null || tool.IsChanging || remaining > settings.ToolRequestThresholdPieces)
             {
@@ -1178,16 +1189,19 @@ public sealed partial class ProductionService(
             }
 
             tool.RequestSpare(now);
-            db.TransportTasks.Add(TransportTask.CreateToolDelivery(settings.ToolStoreStationCode, step.StationCode, now));
-            logger.LogInformation("Station {Station}: {Remaining} piece(s) of tool life left; spare tool requested from {Store}.",
-                step.StationCode, remaining, settings.ToolStoreStationCode);
+            db.TransportTasks.Add(TransportTask.CreateToolDelivery(settings.ToolStoreStationCode, machine.StationCode, machine.Code, now));
+            logger.LogInformation("Machine {Machine}: {Remaining} piece(s) of tool life left; spare tool requested from {Store}.",
+                machine.Code, remaining, settings.ToolStoreStationCode);
         }
     }
 
-    /// <summary>逐件工序：空閒的機台開始下一框。</summary>
+    /// <summary>
+    /// 逐件工序：空著的機台開始下一框，誰接哪一框見 <see cref="MachineAssignment"/>。
+    /// 不能接新框的機台：正在做一框、刀具停機等刀或換刀中、自己做完的那一框還沒被搬走（機邊的成品台只放一框）。
+    /// </summary>
     private async Task<bool> StartQueuedOperationsAsync(
-        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, StationTool> tools, ProductionSettings settings,
-        DateTimeOffset now, CancellationToken cancellationToken)
+        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, Machine> machines, IReadOnlyDictionary<string, MachineTool> tools,
+        ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var pieceStations = steps.Where(s => s.Kind == ProcessStepKind.Piece).Select(s => s.StationCode).ToList();
         var queued = await db.Operations.Include(o => o.Lot)
@@ -1200,63 +1214,61 @@ public sealed partial class ProductionService(
         }
 
         var stationCodes = queued.Select(o => o.StationCode).Distinct().ToList();
-        var busyStations = await db.Operations
-            .Where(o => o.Status == OperationStatus.Running)
-            .Select(o => o.StationCode)
+        var busy = await db.Operations
+            .Where(o => o.Status == OperationStatus.Running && o.MachineCode != null)
+            .Select(o => o.MachineCode!)
             .ToListAsync(cancellationToken);
-
-        // 做完的那一框還沒被搬走的機台不開始下一框：成品區只放一框。
-        var blockedStations = await db.Lots
-            .Where(l => l.Status == LotStatus.AwaitingTransport && stationCodes.Contains(l.StationCode!))
-            .Select(l => l.StationCode!)
-            .ToListAsync(cancellationToken);
-
-        var unavailable = busyStations
-            .Concat(blockedStations)
-            .Concat(tools.Values.Where(t => t.IsStopped).Select(t => t.StationCode))
+        var blocked = await MachineQueries.BlockedMachinesAsync(db, stationCodes, machines.Values, cancellationToken);
+        var unavailable = busy
+            .Concat(blocked)
+            .Concat(tools.Values.Where(t => t.IsStopped).Select(t => t.MachineCode))
             .ToHashSet(StringComparer.Ordinal);
         var started = false;
 
-        foreach (var station in stationCodes.Where(code => !unavailable.Contains(code)))
+        foreach (var station in stationCodes)
         {
-            // 這一站最近加工的是哪個批次的哪一種零件：同批次同零件的框優先接著做，做完的才會放在一起
-            // （使用者 2026-10-10 對拋光的要求，其他逐件工序也適用）。
-            // 接下來機床（有刀具的工序）先找不用換線的（同零件同桿徑），其他站先找同批次的；最後照到站順序。
-            var last = await db.Operations.AsNoTracking()
-                .Where(o => o.StationCode == station && o.StartedAt != null)
-                .OrderByDescending(o => o.StartedAt)
-                .Select(o => new { o.Lot.BatchNumber, o.Lot.PartCode, o.Lot.RodDiameterMm })
-                .FirstOrDefaultAsync(cancellationToken);
-            var waiting = queued.Where(o => o.StationCode == station).ToList();
-            var isLathe = steps.Single(s => s.StationCode == station).UsesTool;
-            bool SameSetup(OperationExecution o) => o.Lot.PartCode == last?.PartCode && o.Lot.RodDiameterMm == last?.RodDiameterMm;
-            bool SameBatch(OperationExecution o) => o.Lot.BatchNumber == last?.BatchNumber;
-            var operation = waiting.FirstOrDefault(o => SameBatch(o) && SameSetup(o))
-                ?? waiting.FirstOrDefault(isLathe ? SameSetup : SameBatch)
-                ?? waiting.FirstOrDefault(isLathe ? SameBatch : SameSetup)
-                ?? waiting.FirstOrDefault(o => o.Lot.RodDiameterMm == last?.RodDiameterMm)
-                ?? waiting[0];
-
-            // 機床換線（使用者 2026-10-10）：24 mm 與 30 mm 的工控程式不同，桿徑和上一框不同就要先換；
-            // 上沖、中模、下沖之間切換也要換線。
-            // 「機床」以有刀具的工序判斷（粗加工、精加工）；拋光不換線。這一站的第一框不用換。
-            var step = steps.Single(s => s.Sequence == operation.StepSequence);
-            if (step.IsCutting && await db.CuttingJobs.AsNoTracking().SingleOrDefaultAsync(j => j.LotId == operation.LotId, cancellationToken) is { } job)
+            var free = new List<MachineAssignment.FreeMachine>();
+            foreach (var machine in machines.Values.Where(m => m.StationCode == station && !unavailable.Contains(m.Code)).OrderBy(m => m.Number))
             {
-                // 切料站切的是整根圓棒：最後一框連多出來的一起切。
-                operation.Quantity = job.PiecesToCut;
+                // 這台機台上一框做的是什麼：同批次同零件的框優先接著做，做完的才會放在一起（使用者 2026-10-10 對拋光的要求，其他逐件工序也適用）；
+                // 機床再看換不換線。
+                var last = await db.Operations.AsNoTracking()
+                    .Where(o => o.MachineCode == machine.Code && o.StartedAt != null)
+                    .OrderByDescending(o => o.StartedAt)
+                    .Select(o => new MachineAssignment.Setup(o.Lot.BatchNumber, o.Lot.PartCode, o.Lot.RodDiameterMm))
+                    .FirstOrDefaultAsync(cancellationToken);
+                free.Add(new MachineAssignment.FreeMachine(machine.Code, machine.Number, last));
             }
 
-            var changeover = step.UsesTool && last is not null && !SameSetup(operation)
-                ? settings.ChangeoverSeconds / settings.SpeedOf(step)
-                : 0;
-            var secondsPerPiece = await SecondsPerPieceAsync(step, operation.Lot, cancellationToken);
-            // 品管與包裝是人工逐支作業，沒有機台取放的時間。
-            operation.Start(secondsPerPiece, step.IsManual ? 0 : settings.PieceHandlingSeconds, changeover, now);
-            operation.Lot.StartProcessing(now);
-            started = true;
-            logger.LogInformation("Lot {LotNumber} started step {Step} at {Station}: {Quantity} piece(s), {Seconds}s each, changeover {Changeover:0.#}s.",
-                operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, operation.Quantity, secondsPerPiece, changeover);
+            if (free.Count == 0)
+            {
+                continue;
+            }
+
+            // 「機床」以有刀具的工序判斷（粗加工、精加工）；拋光、品管、包裝、切料不換線。
+            var step = steps.Single(s => s.StationCode == station);
+            var waiting = queued.Where(o => o.StationCode == station).ToList();
+            var assigned = MachineAssignment.Assign(
+                free, waiting, o => new MachineAssignment.Setup(o.Lot.BatchNumber, o.Lot.PartCode, o.Lot.RodDiameterMm), step.UsesTool);
+            foreach (var (machine, operation) in assigned)
+            {
+                if (step.IsCutting && await db.CuttingJobs.AsNoTracking().SingleOrDefaultAsync(j => j.LotId == operation.LotId, cancellationToken) is { } job)
+                {
+                    // 切料站切的是整根圓棒：最後一框連多出來的一起切。
+                    operation.Quantity = job.PiecesToCut;
+                }
+
+                var changeover = step.UsesTool && MachineAssignment.NeedsChangeover(machine.Last, operation.Lot.PartCode, operation.Lot.RodDiameterMm)
+                    ? settings.ChangeoverSeconds / settings.SpeedOf(step)
+                    : 0;
+                var secondsPerPiece = await SecondsPerPieceAsync(step, operation.Lot, cancellationToken);
+                // 品管與包裝是人工逐支作業，沒有機台取放的時間。
+                operation.Start(machine.Code, secondsPerPiece, step.IsManual ? 0 : settings.PieceHandlingSeconds, changeover, now);
+                operation.Lot.StartProcessing(now);
+                started = true;
+                logger.LogInformation("Lot {LotNumber} started step {Step} on {Machine}: {Quantity} piece(s), {Seconds}s each, changeover {Changeover:0.#}s.",
+                    operation.Lot.LotNumber, operation.StepSequence, machine.Code, operation.Quantity, secondsPerPiece, changeover);
+            }
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -1264,18 +1276,19 @@ public sealed partial class ProductionService(
     }
 
     /// <summary>
-    /// 每個站目前的物料與設備狀態，供顯示端畫備料區、成品區、加工、整爐與刀具的進度條。唯讀查詢。
+    /// 每個站目前的物料與設備狀態，供顯示端畫備料區、成品區、整爐，以及每台機台的加工與刀具進度條。唯讀查詢。
     /// </summary>
     public async Task<List<StationStatusDto>> GetStationStatusAsync(CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
         var stations = await db.Stations.AsNoTracking().OrderBy(s => s.Code).ToListAsync(cancellationToken);
         var steps = await db.ProcessSteps.AsNoTracking().ToDictionaryAsync(s => s.StationCode, cancellationToken);
-        var tools = await db.StationTools.AsNoTracking().ToDictionaryAsync(t => t.StationCode, cancellationToken);
+        var machines = await db.Machines.AsNoTracking().OrderBy(m => m.Number).ToListAsync(cancellationToken);
+        var tools = await db.MachineTools.AsNoTracking().ToDictionaryAsync(t => t.MachineCode, cancellationToken);
         var running = await db.Operations.AsNoTracking()
-            .Where(o => o.Status == OperationStatus.Running && o.BatchRunId == null)
-            .Select(o => new { o.StationCode, o.Lot.LotNumber, o.PiecesCompleted, o.Quantity, o.ChangeoverStartedAt, o.ChangeoverDueAt })
-            .ToDictionaryAsync(o => o.StationCode, cancellationToken);
+            .Where(o => o.Status == OperationStatus.Running && o.BatchRunId == null && o.MachineCode != null)
+            .Select(o => new { MachineCode = o.MachineCode!, o.StationCode, o.Lot.LotNumber, o.PiecesCompleted, o.Quantity, o.ChangeoverStartedAt, o.ChangeoverDueAt })
+            .ToDictionaryAsync(o => o.MachineCode, cancellationToken);
         var runs = await db.BatchRuns.AsNoTracking()
             .Where(r => r.CompletedAt == null)
             .ToDictionaryAsync(r => r.StationCode, cancellationToken);
@@ -1287,7 +1300,7 @@ public sealed partial class ProductionService(
 
         var shortages = await db.MachineDelays.AsNoTracking()
             .Where(d => d.EndedAt == null)
-            .ToDictionaryAsync(d => d.StationCode, d => new { d.Cause, d.Reason }, cancellationToken);
+            .ToDictionaryAsync(d => d.MachineCode, d => new { d.Cause, d.Reason }, cancellationToken);
         var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
         var truck = await db.TruckSchedules.AsNoTracking().SingleAsync(cancellationToken);
 
@@ -1297,7 +1310,7 @@ public sealed partial class ProductionService(
         return stations.Select(station =>
         {
             var step = steps.GetValueOrDefault(station.Code);
-            var machining = running.GetValueOrDefault(station.Code);
+            var machining = running.Values.Where(r => r.StationCode == station.Code).ToList();
             var status = new StationStatusDto
             {
                 Code = station.Code,
@@ -1305,23 +1318,45 @@ public sealed partial class ProductionService(
                 IsMachine = step is not null,
                 IsInspection = step is { IsInspection: true },
                 IsPacking = step is { IsPacking: true },
-                // 加工中的那一框：還沒做的件數在備料區，做完的件數在成品區。爐裡的不算在兩邊。
+                // 加工中的框：還沒做的件數在備料區，做完的件數在成品區（同一站的機台共用這兩區）。爐裡的不算在兩邊。
                 InboundQuantity = Sum(station.Code, LotStatus.Queued) + Sum(station.Code, LotStatus.Staged)
-                    + (machining is null ? 0 : machining.Quantity - machining.PiecesCompleted),
+                    + machining.Sum(m => m.Quantity - m.PiecesCompleted),
                 InboundCapacity = station.InboundCapacity,
                 // 包裝站：包好、在等同批次到齊的框也算在成品區。
-                OutboundQuantity = Sum(station.Code, LotStatus.AwaitingTransport) + Sum(station.Code, LotStatus.Packed) + (machining?.PiecesCompleted ?? 0),
+                OutboundQuantity = Sum(station.Code, LotStatus.AwaitingTransport) + Sum(station.Code, LotStatus.Packed) + machining.Sum(m => m.PiecesCompleted),
                 OutboundCapacity = station.OutboundCapacity,
-                Machining = machining is null ? null : new MachiningStatusDto
+                Machines = machines.Where(m => m.StationCode == station.Code).Select(machine =>
                 {
-                    LotNumber = machining.LotNumber,
-                    PiecesCompleted = machining.PiecesCompleted,
-                    Quantity = machining.Quantity,
-                    ChangingOver = machining.ChangeoverDueAt > now,
-                    ChangeoverProgress = machining.ChangeoverDueAt > now ? Progress(machining.ChangeoverStartedAt, machining.ChangeoverDueAt, now) : 0,
-                },
-                ShortageCause = shortages.GetValueOrDefault(station.Code)?.Cause,
-                ShortageReason = shortages.GetValueOrDefault(station.Code)?.Reason,
+                    var work = running.GetValueOrDefault(machine.Code);
+                    var tool = step is { UsesTool: true } ? tools.GetValueOrDefault(machine.Code) : null;
+                    return new MachineStatusDto
+                    {
+                        Code = machine.Code,
+                        Name = machine.Name,
+                        Number = machine.Number,
+                        Machining = work is null ? null : new MachiningStatusDto
+                        {
+                            LotNumber = work.LotNumber,
+                            PiecesCompleted = work.PiecesCompleted,
+                            Quantity = work.Quantity,
+                            ChangingOver = work.ChangeoverDueAt > now,
+                            ChangeoverProgress = work.ChangeoverDueAt > now ? Progress(work.ChangeoverStartedAt, work.ChangeoverDueAt, now) : 0,
+                        },
+                        Tool = tool is null ? null : new ToolStatusDto
+                        {
+                            PiecesUsed = tool.PiecesSinceChange,
+                            LifePieces = step!.ToolLifePieces,
+                            Changing = tool.IsChanging,
+                            ChangeProgress = Progress(tool.ChangeStartedAt, tool.ChangeDueAt, now),
+                            Spare = tool.SpareDeliveredAt is not null ? ToolSpareStatus.Delivered
+                                : tool.SpareRequestedAt is not null ? ToolSpareStatus.Requested
+                                : ToolSpareStatus.None,
+                            WaitingForTool = tool.IsWaitingForSpare,
+                        },
+                        ShortageCause = shortages.GetValueOrDefault(machine.Code)?.Cause,
+                        ShortageReason = shortages.GetValueOrDefault(machine.Code)?.Reason,
+                    };
+                }).ToList(),
             };
 
             if (step is { Kind: ProcessStepKind.Batch })
@@ -1345,21 +1380,6 @@ public sealed partial class ProductionService(
                 {
                     RemainingSeconds = truck.RemainingSeconds,
                     Progress = settings.TruckIntervalSeconds <= 0 ? 0 : Math.Clamp(1 - truck.RemainingSeconds / settings.TruckIntervalSeconds, 0, 1),
-                };
-            }
-
-            if (step is { UsesTool: true } && tools.TryGetValue(station.Code, out var tool))
-            {
-                status.Tool = new ToolStatusDto
-                {
-                    PiecesUsed = tool.PiecesSinceChange,
-                    LifePieces = step.ToolLifePieces,
-                    Changing = tool.IsChanging,
-                    ChangeProgress = Progress(tool.ChangeStartedAt, tool.ChangeDueAt, now),
-                    Spare = tool.SpareDeliveredAt is not null ? ToolSpareStatus.Delivered
-                        : tool.SpareRequestedAt is not null ? ToolSpareStatus.Requested
-                        : ToolSpareStatus.None,
-                    WaitingForTool = tool.IsWaitingForSpare,
                 };
             }
 
@@ -1410,11 +1430,11 @@ public sealed partial class ProductionService(
         };
     }
 
-    private void FinishToolChange(StationTool tool)
+    private void FinishToolChange(MachineTool tool, string stationCode)
     {
-        var record = tool.CompleteChange();
+        var record = tool.CompleteChange(stationCode);
         db.ToolChanges.Add(record);
-        logger.LogInformation("Station {Station}: tool changed after {Pieces} piece(s).", record.StationCode, record.PiecesUsed);
+        logger.LogInformation("Machine {Machine}: tool changed after {Pieces} piece(s).", record.MachineCode, record.PiecesUsed);
     }
 
     /// <summary>一段有起訖時間的作業（換刀、換線）做到哪裡，0～1；沒有在進行時為 0。</summary>

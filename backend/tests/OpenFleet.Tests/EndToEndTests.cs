@@ -177,11 +177,11 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(8, trace.Tasks.Count);
         Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
 
-        // 站點狀態：兩站的刀具各累計 60 件，出貨站有 60 件在等貨車；車輛卸完料後是空車。
+        // 站點狀態：粗加工、精加工的兩台車床刀具合計各 60 件，出貨站有 60 件在等貨車；車輛卸完料後是空車。
         var stations = (await _http.GetFromJsonAsync<List<StationStatusDto>>("/api/stations/status", JsonDefaults.Options))!;
-        Assert.Equal(60, stations.Single(s => s.Code == "rough").Tool!.PiecesUsed);
-        Assert.Equal(60, stations.Single(s => s.Code == "fine").Tool!.PiecesUsed);
-        Assert.Null(stations.Single(s => s.Code == "polish").Tool);
+        Assert.Equal(60, stations.Single(s => s.Code == "rough").Machines.Sum(m => m.Tool!.PiecesUsed));
+        Assert.Equal(60, stations.Single(s => s.Code == "fine").Machines.Sum(m => m.Tool!.PiecesUsed));
+        Assert.Null(stations.Single(s => s.Code == "polish").Machine().Tool);
         Assert.Equal(60, stations.Single(s => s.Code == "shipping").InboundQuantity);
         Assert.NotNull(stations.Single(s => s.Code == "shipping").Truck);
         await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });

@@ -49,12 +49,15 @@ public sealed class VehicleWait : ShortageInterval
 }
 
 /// <summary>
-/// 機台因為叫不到車而停下來的區間（耽誤的加工時間），按工序統計。
+/// 機台因為叫不到車而停下來的區間（耽誤的加工時間），按工序統計（同一道工序的兩台車床加起來，單位是機台秒）。
 /// 只在機台真的沒有在加工、也不是在換刀時才算；同一台機台同一時間只有一筆，不會因為有兩個任務在等就重複計算。
 /// </summary>
 public sealed class MachineDelay : ShortageInterval
 {
     public string StationCode { get; private set; } = string.Empty;
+
+    /// <summary>停下來的是哪一台機台。P6 以前的紀錄（一站一台）是那一站的 1 號機。</summary>
+    public string MachineCode { get; private set; } = string.Empty;
     public int StepSequence { get; private set; }
     public MachineDelayCause Cause { get; private set; }
 
@@ -62,9 +65,10 @@ public sealed class MachineDelay : ShortageInterval
     public Guid TaskId { get; private set; }
 
     public static MachineDelay Open(
-        string stationCode, int stepSequence, MachineDelayCause cause, ShortageReason reason, Guid taskId, DateTimeOffset now) => new()
+        string stationCode, string machineCode, int stepSequence, MachineDelayCause cause, ShortageReason reason, Guid taskId, DateTimeOffset now) => new()
     {
         StationCode = stationCode,
+        MachineCode = machineCode,
         StepSequence = stepSequence,
         Cause = cause,
         Reason = reason,

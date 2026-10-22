@@ -20,6 +20,27 @@ public sealed class Station
 }
 
 /// <summary>
+/// 逐件工序的機台（人工作業的品管、包裝是一個工位）。使用者 2026-10-22：粗加工、精加工各兩台車床，其他站一台；
+/// 同一站的機台都能做所有規格。同一站的機台共用一個交接點、備料區與成品區：AGV 把框送到站上，
+/// 哪一台空下來就由它接下一框（<see cref="Production.MachineAssignment"/>）。每台各有自己的刀具、換線狀態與加工進度。
+/// 整爐工序（淬火、回火、電鍍）一站一座爐，不用這張表。
+/// </summary>
+public sealed class Machine
+{
+    /// <summary>站點代碼加編號，例如 rough-1。</summary>
+    public required string Code { get; set; }
+    public required string StationCode { get; set; }
+
+    /// <summary>這一站的第幾台，從 1 起。</summary>
+    public int Number { get; set; }
+
+    /// <summary>例如「粗加工 1 號機」；一站只有一台時就是站名。</summary>
+    public required string Name { get; set; }
+
+    public static string CodeOf(string stationCode, int number) => $"{stationCode}-{number}";
+}
+
+/// <summary>
 /// 製程路線：依 Sequence 順序加工，每一站一道工序。只有一條路線，產品與版本留到之後。
 /// 工序分逐件與整爐兩種，各用各的欄位。
 /// </summary>
@@ -140,13 +161,14 @@ public sealed class BatchRun
 }
 
 /// <summary>
-/// 某一站機台的刀具狀態。快到壽命時預先叫小型車送一把新刀到機邊；到達壽命時新刀已到就開始換刀，
+/// 一台機台的刀具狀態（同一站的兩台車床各有一把，各自計壽命、各自叫刀與換刀）。
+/// 快到壽命時預先叫小型車送一把新刀到機邊；到達壽命時新刀已到就開始換刀，
 /// 還沒到就停機等刀。換刀期間機台暫停。所有時間點都存在資料庫，後端重啟後可以接續。
 /// 「新刀送到」（搬運任務完成）與「換刀完成」（<see cref="ToolChangeRecord"/>）是兩件事，分開記錄。
 /// </summary>
-public sealed class StationTool
+public sealed class MachineTool
 {
-    public required string StationCode { get; set; }
+    public required string MachineCode { get; set; }
 
     /// <summary>上次換刀後已加工的件數。</summary>
     public int PiecesSinceChange { get; private set; }
@@ -185,11 +207,12 @@ public sealed class StationTool
     }
 
     /// <summary>換刀完成：計數歸零、備用的新刀用掉了，回傳這次換刀的紀錄。</summary>
-    public ToolChangeRecord CompleteChange()
+    public ToolChangeRecord CompleteChange(string stationCode)
     {
         var record = new ToolChangeRecord
         {
-            StationCode = StationCode,
+            StationCode = stationCode,
+            MachineCode = MachineCode,
             PiecesUsed = PiecesSinceChange,
             StartedAt = ChangeStartedAt!.Value,
             CompletedAt = ChangeDueAt!.Value,
@@ -208,6 +231,9 @@ public sealed class ToolChangeRecord
 {
     public long Id { get; set; }
     public required string StationCode { get; set; }
+
+    /// <summary>哪一台機台換刀。P6 以前的紀錄（一站一台）是那一站的 1 號機。</summary>
+    public required string MachineCode { get; set; }
     public int PiecesUsed { get; set; }
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset CompletedAt { get; set; }
@@ -780,6 +806,11 @@ public sealed class OperationExecution
     public MaterialLot Lot { get; set; } = null!;
     public int StepSequence { get; set; }
     public required string StationCode { get; set; }
+
+    /// <summary>
+    /// 逐件工序：在哪一台機台加工。框在站上排隊時還不知道，哪一台空下來接手才決定（<see cref="Start"/>）；整爐工序是 null。
+    /// </summary>
+    public string? MachineCode { get; private set; }
     public OperationStatus Status { get; private set; } = OperationStatus.Queued;
     public int Quantity { get; set; }
     public int PiecesCompleted { get; private set; }
@@ -814,11 +845,14 @@ public sealed class OperationExecution
         return from.AddSeconds((SecondsPerPiece!.Value + 2 * HandlingSeconds) / speed);
     }
 
-    /// <summary><paramref name="changeoverSeconds"/> 大於 0 時先換線，第一件從換線完成的時間開始。</summary>
-    public void Start(double secondsPerPiece, double handlingSeconds, double changeoverSeconds, DateTimeOffset now)
+    /// <summary>
+    /// 由 <paramref name="machineCode"/> 這台機台開始加工。<paramref name="changeoverSeconds"/> 大於 0 時先換線，第一件從換線完成的時間開始。
+    /// </summary>
+    public void Start(string machineCode, double secondsPerPiece, double handlingSeconds, double changeoverSeconds, DateTimeOffset now)
     {
         Require(OperationStatus.Queued, nameof(Start));
         Status = OperationStatus.Running;
+        MachineCode = machineCode;
         SecondsPerPiece = secondsPerPiece;
         HandlingSeconds = handlingSeconds;
         StartedAt = now;

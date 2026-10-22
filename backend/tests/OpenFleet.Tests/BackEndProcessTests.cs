@@ -85,18 +85,20 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
-    public async Task Bins_are_fed_to_the_machine_one_at_a_time_even_when_a_bin_is_larger_than_the_inbound_capacity()
+    public async Task A_bin_larger_than_a_lathe_table_takes_one_whole_table()
     {
         await using (var scope = _database.NewScope())
         {
-            await scope.Production.CreateBatchAsync(90, 24, [ProductParts.UpperPunch], default);
+            await scope.Production.CreateBatchAsync(135, 24, [ProductParts.UpperPunch], default);
         }
 
-        // 粗加工的備料區容量是 30 支，但 45 支的一框至少要放得下一框；第二框要等。
+        // 一台車床的備料台是 30 支，但 45 支的一框至少要放得下一框，一框占滿一個備料台。
+        // 粗加工兩台車床：放得下兩框，第三框要等。
         await using (var scope = _database.NewScope())
         {
-            Assert.Equal(1, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b")], default));
-            Assert.Equal(45, (await scope.Db.TransportTasks.SingleAsync(t => t.Status == TransportTaskStatus.Assigned)).Quantity);
+            Assert.Equal(2, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b"), Online("agv-c")], default));
+            Assert.Equal(new[] { 45, 45 },
+                await scope.Db.TransportTasks.Where(t => t.Status == TransportTaskStatus.Assigned).Select(t => t.Quantity).ToListAsync());
         }
     }
 
@@ -110,7 +112,7 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         await AdvanceAsync(0);
         var heat = await StationAsync("heat");
         Assert.Equal((120, false, 150, 300), (heat.InboundQuantity, heat.Batch!.Running, heat.Batch.MinPieces, heat.Batch.MaxPieces));
-        Assert.Null(heat.Tool);
+        Assert.Empty(heat.Machines);
 
         // 另一個批次的一框到了，湊滿 150 支：開爐，不同批次混在同一爐。
         await ArriveAsync("heat", 3, "B-B", 30);
@@ -301,62 +303,68 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
-    public async Task Lathe_changes_over_when_the_rod_diameter_changes_and_first_takes_bins_that_need_no_changeover()
+    public async Task Each_lathe_changes_over_on_its_own_and_bins_go_to_the_lathe_that_needs_no_changeover()
     {
-        // 換線 60 秒。到站順序：30 mm、24 mm、30 mm，各 5 支（每件 2 秒）。
+        // 換線 60 秒，粗加工兩台車床，每件 2 秒。到站順序：B-A 30 mm、B-B 24 mm，各 5 支。
         await ConfigureAsync(settings => settings.ChangeoverSeconds = 60);
         await ArriveRodAsync("rough", 1, "B-A", 30, 5);
         await ArriveRodAsync("rough", 1, "B-B", 24, 5);
-        await ArriveRodAsync("rough", 1, "B-C", 30, 5);
         await AdvanceAsync(0);
 
-        // 這一站的第一框不用換線。
-        Assert.Equal("B-A", await RunningBatchAsync("rough"));
-        Assert.False((await StationAsync("rough")).Machining!.ChangingOver);
+        // 兩台都是第一框，不用換線：先到的給 1 號機。
+        Assert.Equal(("B-A", "B-B"), (await RunningOnAsync("rough-1"), await RunningOnAsync("rough-2")));
+        var rough = await StationAsync("rough");
+        Assert.Equal((false, false), (rough.Machine(1).Machining!.ChangingOver, rough.Machine(2).Machining!.ChangingOver));
 
-        // 做完搬走後，先做同桿徑的 B-C（不用換線），不是先到的 B-B。
+        // 兩框做完搬走後，到了 24 mm 的 B-C（15 支）和 30 mm 的 B-D（5 支）：
+        // 各給上一框同桿徑的那一台，都不用換線（不是照到站順序先給 1 號機）。
         await AdvanceAsync(10);
         await DeliverAllAsync();
+        await ArriveRodAsync("rough", 1, "B-C", 24, 15);
+        await ArriveRodAsync("rough", 1, "B-D", 30, 5);
         await AdvanceAsync(0);
-        Assert.Equal("B-C", await RunningBatchAsync("rough"));
-        Assert.False((await StationAsync("rough")).Machining!.ChangingOver);
+        Assert.Equal(("B-D", "B-C"), (await RunningOnAsync("rough-1"), await RunningOnAsync("rough-2")));
+        rough = await StationAsync("rough");
+        Assert.Equal((false, false), (rough.Machine(1).Machining!.ChangingOver, rough.Machine(2).Machining!.ChangingOver));
 
-        // 輪到 24 mm 的 B-B：先換線。測試模式下換線也依這一站的倍率加快（10 倍：60 秒變 6 秒，每件 0.2 秒）。
+        // 1 號機做完 B-D、搬走，2 號機還在做 B-C。到了 24 mm 的 B-E：只有 1 號機空著，它上一框是 30 mm，要先換線。
+        // 測試模式下換線也依這一站的倍率加快（10 倍：60 秒變 6 秒，每件 0.2 秒）。
         await AdvanceAsync(10);
         await DeliverAllAsync();
+        await ArriveRodAsync("rough", 1, "B-E", 24, 5);
         await ConfigureAsync(settings =>
         {
             settings.TestMode = true;
             settings.Steps[1].TestSpeed = 10;
         });
         await AdvanceAsync(0);
-        Assert.Equal("B-B", await RunningBatchAsync("rough"));
-        var rough = await StationAsync("rough");
-        Assert.Equal((true, 0d, 0), (rough.Machining!.ChangingOver, rough.Machining.ChangeoverProgress, rough.Machining.PiecesCompleted));
+        Assert.Equal("B-E", await RunningOnAsync("rough-1"));
+        var first = (await StationAsync("rough")).Machine(1);
+        Assert.Equal((true, 0d, 0), (first.Machining!.ChangingOver, first.Machining!.ChangeoverProgress, first.Machining!.PiecesCompleted));
 
         await AdvanceAsync(3);
-        rough = await StationAsync("rough");
-        Assert.Equal((true, 0.5, 0), (rough.Machining!.ChangingOver, rough.Machining.ChangeoverProgress, rough.Machining.PiecesCompleted));
+        first = (await StationAsync("rough")).Machine(1);
+        Assert.Equal((true, 0.5, 0), (first.Machining!.ChangingOver, first.Machining!.ChangeoverProgress, first.Machining!.PiecesCompleted));
 
         // 換線完成後才開始做第一件：再 3.5 秒，換線用掉 3 秒，剩下 0.5 秒做完 2 件。
         await AdvanceAsync(3.5);
-        rough = await StationAsync("rough");
-        Assert.Equal((false, 2), (rough.Machining!.ChangingOver, rough.Machining.PiecesCompleted));
+        first = (await StationAsync("rough")).Machine(1);
+        Assert.Equal((false, 2), (first.Machining!.ChangingOver, first.Machining!.PiecesCompleted));
 
-        // 同桿徑、換一種零件也要換線：B-B 做完後接著做同批次的下沖。
+        // 同桿徑、換一種零件也要換線：B-E 做完後，同批次的下沖交給做過 B-E 的 1 號機（同批次），先換線。
         await AdvanceAsync(1);
         await DeliverAllAsync();
-        await ArrivePartAsync("rough", 1, "B-B", ProductParts.LowerPunch, 24, [5]);
+        await ArrivePartAsync("rough", 1, "B-E", ProductParts.LowerPunch, 24, [5]);
         await AdvanceAsync(0);
-        rough = await StationAsync("rough");
-        Assert.Equal((true, 5), (rough.Machining!.ChangingOver, rough.Machining.Quantity));
+        first = (await StationAsync("rough")).Machine(1);
+        Assert.Equal((true, 5), (first.Machining!.ChangingOver, first.Machining!.Quantity));
 
         // 拋光不是機床：桿徑不同也不換線。
-        await ArriveRodAsync("polish", 6, "B-D", 30, 5);
+        await ArriveRodAsync("polish", 6, "B-F", 30, 5);
         await AdvanceAsync(10);
-        await ArriveRodAsync("polish", 6, "B-E", 24, 5);
+        await ArriveRodAsync("polish", 6, "B-G", 24, 5);
         await AdvanceAsync(0);
-        Assert.False((await StationAsync("polish")).Machining?.ChangingOver ?? false);
+        Assert.False((await StationAsync("polish")).Machine().Machining?.ChangingOver ?? false);
     }
 
     [Fact]
@@ -372,7 +380,7 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
         // 拋光每支 2 秒，沒有刀具：做再多也不會換刀。
         await AdvanceAsync(20);
         var polish = await StationAsync("polish");
-        Assert.Equal((10, null), (polish.OutboundQuantity, polish.Tool));
+        Assert.Equal((10, null), (polish.OutboundQuantity, polish.Machine().Tool));
 
         // 做完的那一框搬到品管站，在那裡開始檢驗；拋光接著做的是同批次的另一框，不是先到的 B。
         Assert.Equal(1, await DispatchAsync());
@@ -466,6 +474,16 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
             .Where(o => o.Status == OperationStatus.Running && (station == null || o.StationCode == station))
             .Select(o => o.Lot.BatchNumber)
             .SingleAsync();
+    }
+
+    /// <summary>某台機台正在做的批次；沒有在做時為 null。</summary>
+    private async Task<string?> RunningOnAsync(string machineCode)
+    {
+        await using var scope = _database.NewScope();
+        return await scope.Db.Operations
+            .Where(o => o.Status == OperationStatus.Running && o.MachineCode == machineCode)
+            .Select(o => o.Lot.BatchNumber)
+            .SingleOrDefaultAsync();
     }
 
     private async Task<StationStatusDto> StationAsync(string code)
