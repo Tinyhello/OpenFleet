@@ -42,6 +42,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<SalesOrderLine> SalesOrderLines => Set<SalesOrderLine>();
     public DbSet<ProductionOrder> ProductionOrders => Set<ProductionOrder>();
     public DbSet<ScrapRecord> ScrapRecords => Set<ScrapRecord>();
+    public DbSet<Delivery> Deliveries => Set<Delivery>();
+    public DbSet<SurplusTransfer> SurplusTransfers => Set<SurplusTransfer>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
@@ -132,8 +134,10 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(b => b.StationCode).HasMaxLength(32);
             e.Property(b => b.Version).IsRowVersion();
             e.Ignore(b => b.Available);
-            // 一個品項在一個站點只有一列；兩邊同時建立第一列時由資料庫擋下其中一個。
-            e.HasIndex(b => new { b.ItemCode, b.StationCode }).IsUnique();
+            e.Property(b => b.Owner).HasMaxLength(64);
+            // 一個品項在一個站點（成品倉再依客戶）只有一列；兩邊同時建立第一列時由資料庫擋下其中一個。
+            // 沒有客戶的列（圓棒、備料）也只能有一列：NULLS NOT DISTINCT。
+            e.HasIndex(b => new { b.ItemCode, b.StationCode, b.Owner }).IsUnique().AreNullsDistinct(false);
             e.HasOne<Item>().WithMany().HasForeignKey(b => b.ItemCode).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<Station>().WithMany().HasForeignKey(b => b.StationCode).OnDelete(DeleteBehavior.Restrict);
             // 程式寫錯時由資料庫擋下：不會是負數，保留的不會比在庫多。
@@ -184,6 +188,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(o => o.Customer).HasMaxLength(64);
             e.Property(o => o.RequestKey).HasMaxLength(64);
             e.Ignore(o => o.NumberSuffix);
+            e.Property(o => o.PartialApprovedBy).HasMaxLength(64);
+            e.Property(o => o.Version).IsRowVersion();
             e.HasIndex(o => o.Number).IsUnique();
             // 同一個 Idempotency-Key 只會有一張訂單；兩個同鍵的請求同時到，由資料庫擋下後到的那一個。
             e.HasIndex(o => o.RequestKey).IsUnique().HasFilter("\"RequestKey\" IS NOT NULL");
@@ -239,7 +245,47 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.HasOne<ProductionOrder>().WithMany().HasForeignKey(r => r.SourceOrderId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<ProductionOrder>().WithMany().HasForeignKey(r => r.MakeupOrderId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<MaterialLot>().WithMany().HasForeignKey(r => r.LotId).OnDelete(DeleteBehavior.Cascade);
-            e.ToTable(t => t.HasCheckConstraint("CK_ScrapRecords_Quantity", "\"Quantity\" > 0"));
+            e.ToTable(t =>
+            {
+                t.HasCheckConstraint("CK_ScrapRecords_Quantity", "\"Quantity\" > 0 AND \"CoveredByExtra\" >= 0 AND \"CoveredByExtra\" <= \"Quantity\"");
+                // 全部由多做的抵掉時沒有補做工單；有不夠抵的就一定有補做工單。
+                t.HasCheckConstraint("CK_ScrapRecords_Makeup", "(\"MakeupOrderId\" IS NULL) = (\"CoveredByExtra\" = \"Quantity\")");
+            });
+        });
+
+        model.Entity<Delivery>(e =>
+        {
+            e.Property(d => d.Id).ValueGeneratedNever();
+            e.Property(d => d.Number).HasMaxLength(32);
+            e.HasIndex(d => d.Number).IsUnique();
+            e.HasIndex(d => d.SalesOrderId);
+            e.HasOne<SalesOrder>().WithMany().HasForeignKey(d => d.SalesOrderId).OnDelete(DeleteBehavior.Restrict);
+            e.HasMany(d => d.Lines).WithOne().HasForeignKey(l => l.DeliveryId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        model.Entity<DeliveryLine>(e =>
+        {
+            e.Property(l => l.Id).ValueGeneratedNever();
+            e.Property(l => l.PartCode).HasMaxLength(32);
+            e.HasIndex(l => l.BoxLotId).IsUnique();
+            e.HasOne<SalesOrderLine>().WithMany().HasForeignKey(l => l.SalesOrderLineId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<MaterialLot>().WithMany().HasForeignKey(l => l.BoxLotId).OnDelete(DeleteBehavior.Cascade);
+            e.ToTable(t => t.HasCheckConstraint("CK_DeliveryLines_Quantity", "\"Quantity\" > 0"));
+        });
+
+        model.Entity<SurplusTransfer>(e =>
+        {
+            e.Property(t => t.Id).ValueGeneratedNever();
+            e.Property(t => t.Customer).HasMaxLength(64);
+            e.Property(t => t.ItemCode).HasMaxLength(48);
+            e.Property(t => t.PartCode).HasMaxLength(32);
+            e.HasIndex(t => t.BoxLotId).IsUnique();
+            e.HasIndex(t => t.SalesOrderId);
+            e.HasOne<MaterialLot>().WithMany().HasForeignKey(t => t.BoxLotId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<SalesOrder>().WithMany().HasForeignKey(t => t.SalesOrderId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<SalesOrderLine>().WithMany().HasForeignKey(t => t.SalesOrderLineId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Item>().WithMany().HasForeignKey(t => t.ItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.ToTable(t => t.HasCheckConstraint("CK_SurplusTransfers_Quantity", "\"Quantity\" > 0"));
         });
 
         model.Entity<CuttingJob>(e =>
@@ -341,6 +387,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(l => l.PartCode).HasMaxLength(32);
             e.Property(l => l.SpecCode).HasMaxLength(32);
             e.HasIndex(l => l.ProductionOrderId);
+            e.HasIndex(l => l.DeliveryId);
+            e.HasOne<Delivery>().WithMany().HasForeignKey(l => l.DeliveryId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<ProductionOrder>().WithMany().HasForeignKey(l => l.ProductionOrderId).OnDelete(DeleteBehavior.Restrict);
             e.Property(l => l.StationCode).HasMaxLength(32);
             e.Property(l => l.VehicleId).HasMaxLength(32);

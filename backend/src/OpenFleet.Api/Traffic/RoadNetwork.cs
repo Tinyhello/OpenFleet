@@ -160,9 +160,9 @@ public static class DemoRoadNetwork
     /// <summary>刀具庫在走道內側的島區中央，交接點接在內圈車道下邊。</summary>
     public const double IslandX = 0, IslandHandoffZ = -3.2;
 
-    /// <summary>下排七站（切料、原料倉到電鍍）與上排四站（出貨、包裝、品管、拋光）的位置；上排的 -12 與 12 是成品倉與雜物倉庫，沒有交接點。</summary>
+    /// <summary>下排七站（切料、原料倉到電鍍）與上排五站（出貨、成品倉、包裝、品管、拋光）的位置；上排的 12 是雜物倉庫，沒有交接點。</summary>
     private static readonly double[] BottomColumns = [-28, -20, -12, -4, 4, 12, 20];
-    private static readonly double[] TopColumns = [-20, -4, 4, 20];
+    private static readonly double[] TopColumns = [-20, -12, -4, 4, 20];
     private static readonly double[] ParkingColumns = [-10.3, -8, -5.7];
 
     public static string Code(double x, double z) => FormattableString.Invariant($"{x:0.##},{z:0.##}");

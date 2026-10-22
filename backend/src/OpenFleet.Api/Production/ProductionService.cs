@@ -25,7 +25,7 @@ public sealed class RequestValidationException(string field, string message) : E
 /// 品管報廢的料會自動從原料倉補投同樣數量，補齊之後整批才裝箱。
 /// 測試模式開啟時，每一站依自己的專用倍率加快（<see cref="ProductionSettings.SpeedOf"/>）。
 /// </summary>
-public sealed class ProductionService(
+public sealed partial class ProductionService(
     OpenFleetDbContext db, InventoryService inventory, IDefectSource defects, TimeProvider time, ILogger<ProductionService> logger)
 {
     public const double MaxSecondsPerPiece = 600;
@@ -309,11 +309,12 @@ public sealed class ProductionService(
     }
 
     /// <summary>
-    /// 開立工單：在原料倉建立這張工單的框，批次編號就是工單號碼。規格用工單開立時存下的那一份。
+    /// 開立工單：在原料倉建立這張工單的框（含開工時多做的），批次編號就是工單號碼。規格用工單開立時存下的那一份。
     /// 不存檔：由呼叫端（建立訂單）在同一筆交易裡一起存。
     /// </summary>
     public Task<List<MaterialLot>> ReleaseAsync(ProductionOrder order, CancellationToken cancellationToken) =>
-        ReceiveLotsAsync(order.Spec, order.Spec.RodDiameterMm, order.Parts, order.Quantity, order.Number, order.Id, cancellationToken);
+        ReceiveLotsAsync(
+            order.Spec, order.Spec.RodDiameterMm, order.Parts, order.Quantity + order.ExtraQuantity, order.Number, order.Id, cancellationToken);
 
     /// <summary>
     /// 在原料倉建立一批框，每一種零件各自依料框容量分框（不存檔）。
@@ -715,6 +716,8 @@ public sealed class ProductionService(
         var changed = db.ChangeTracker.HasChanges();
         await db.SaveChangesAsync(cancellationToken);
         changed |= await BoxPackedBatchesAsync(settings, now, cancellationToken);
+        changed |= await BoxOrdersAsync(settings, now, cancellationToken);
+        changed |= await ReceiveSurplusAsync(now, cancellationToken);
         changed |= await AdvanceTruckAsync(settings, now, cancellationToken);
         var started = await StartQueuedOperationsAsync(steps, tools, settings, now, cancellationToken);
         return await StartBatchRunsAsync(steps, settings, now, cancellationToken) || started || changed || allocated;
@@ -727,7 +730,8 @@ public sealed class ProductionService(
     /// </summary>
     private async Task<bool> BoxPackedBatchesAsync(ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var groups = await db.Lots.Where(l => l.Status == LotStatus.Packed)
+        // 有訂單的框照訂單出貨（BoxOrdersAsync）；這裡只處理沒有訂單的批次。
+        var groups = await db.Lots.Where(l => l.Status == LotStatus.Packed && l.ProductionOrderId == null)
             .Select(l => new { l.BatchNumber, l.PartCode }).Distinct().ToListAsync(cancellationToken);
         var boxed = false;
         foreach (var group in groups)
@@ -778,6 +782,7 @@ public sealed class ProductionService(
         if (truck.Accrue(now, settings.TruckSpeed, settings.TruckIntervalSeconds))
         {
             var boxes = await ReadyBoxes(db.Lots, settings.BufferStationCode).ToListAsync(cancellationToken);
+            boxes.AddRange(await ShipReadyDeliveriesAsync(settings, now, cancellationToken));
             foreach (var box in boxes)
             {
                 box.Ship(now);
@@ -810,7 +815,7 @@ public sealed class ProductionService(
     /// 也就是批次裡除了這些箱子以外，只剩下已裝箱（空了）的料框與報廢的框。
     /// </summary>
     private static IQueryable<MaterialLot> ReadyBoxes(IQueryable<MaterialLot> lots, string shippingStation) =>
-        lots.Where(box => box.IsBox && box.Status == LotStatus.Staged && box.StationCode == shippingStation
+        lots.Where(box => box.IsBox && box.DeliveryId == null && box.Status == LotStatus.Staged && box.StationCode == shippingStation
             && !lots.Any(other => other.BatchNumber == box.BatchNumber
                 && other.Status != LotStatus.Boxed && other.Status != LotStatus.Scrapped && other.Status != LotStatus.Shipped
                 && !(other.IsBox && other.Status == LotStatus.Staged && other.StationCode == shippingStation)));
@@ -902,22 +907,26 @@ public sealed class ProductionService(
             var cutting = steps.FirstOrDefault(s => s.IsCutting);
             var first = steps.FirstOrDefault(s => !s.IsCutting);
             var needsMaterial = lot.SpecCode is not null && cutting is not null;
-            // 有工單的料：在主工單上註記報廢，另開一張補做工單（使用者 2026-10-22），補做的框屬於補做工單。
-            var makeupOrder = lot.ProductionOrderId is { } orderId
-                ? await OpenMakeupOrderAsync(orderId, lot, scrapped, now, cancellationToken)
-                : null;
-            var makeup = MaterialLot.ReceiveMakeup(
-                lot, scrapped, settings.SourceStationCode, needsMaterial ? cutting!.Sequence : first?.Sequence, now,
-                awaitingMaterial: needsMaterial, productionOrderId: makeupOrder?.Id);
-            db.Lots.Add(makeup);
-            db.InventoryMovements.Add(InventoryMovement.Record(makeup, from: null, "MakeupReceived", now));
-            if (!needsMaterial)
+            // 有工單的料：在主工單上註記報廢；先用開工時多做的抵，不夠抵的才另開補做工單（使用者 2026-10-22），補做的框屬於補做工單。
+            var (makeupOrder, makeupQuantity) = lot.ProductionOrderId is { } orderId
+                ? await RecordScrapAsync(orderId, lot, scrapped, now, cancellationToken)
+                : (null, scrapped);
+            if (makeupQuantity > 0)
             {
-                db.TransportTasks.Add(TransportTask.Create(
-                    makeup, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+                var makeup = MaterialLot.ReceiveMakeup(
+                    lot, makeupQuantity, settings.SourceStationCode, needsMaterial ? cutting!.Sequence : first?.Sequence, now,
+                    awaitingMaterial: needsMaterial, productionOrderId: makeupOrder?.Id);
+                db.Lots.Add(makeup);
+                db.InventoryMovements.Add(InventoryMovement.Record(makeup, from: null, "MakeupReceived", now));
+                if (!needsMaterial)
+                {
+                    db.TransportTasks.Add(TransportTask.Create(
+                        makeup, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+                }
+
+                logger.LogInformation("Lot {LotNumber}: {Scrapped} piece(s) scrapped; make-up lot {Makeup} of {Quantity} received at {Station}.",
+                    lot.LotNumber, scrapped, makeup.LotNumber, makeupQuantity, settings.SourceStationCode);
             }
-            logger.LogInformation("Lot {LotNumber}: {Scrapped} piece(s) scrapped; make-up lot {Makeup} received at {Station}.",
-                lot.LotNumber, scrapped, makeup.LotNumber, settings.SourceStationCode);
         }
 
         var reworkRound = lot.ReworkCount + 1;
@@ -958,28 +967,42 @@ public sealed class ProductionService(
     }
 
     /// <summary>
-    /// 報廢了 <paramref name="scrapped"/> 支：在主工單註記，另開一張補做工單（號碼是主工單號碼加 -R 與第幾張）。
-    /// 補做工單裡又報廢時，一樣記在主工單、再開一張，連回主工單（使用者 2026-10-22）。
-    /// 補做工單的規格沿用主工單開立時存下的那一份；BOM 用那個零件目前的版本。
+    /// 報廢了 <paramref name="scrapped"/> 支：在主工單註記。先用主工單開工時多做的抵（每種零件各自算），
+    /// 不夠抵的才另開一張補做工單（號碼是主工單號碼加 -R 與第幾張）。補做工單裡又報廢時，一樣記在主工單、需要時再開一張，
+    /// 連回主工單（使用者 2026-10-22）。補做工單的規格沿用主工單開立時存下的那一份；BOM 用那個零件目前的版本。
+    /// 回傳開的補做工單（全部抵掉時是 null）與要補做的數量。
     /// </summary>
-    private async Task<ProductionOrder> OpenMakeupOrderAsync(
+    private async Task<(ProductionOrder? Makeup, int Quantity)> RecordScrapAsync(
         Guid orderId, MaterialLot lot, int scrapped, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var source = await db.ProductionOrders.SingleAsync(o => o.Id == orderId, cancellationToken);
         var main = source.ParentId is { } parentId ? await db.ProductionOrders.SingleAsync(o => o.Id == parentId, cancellationToken) : source;
 
-        // 同一輪可能已經替同一張主工單開過補做工單（還沒存檔），一起算進編號。
-        var saved = await db.ProductionOrders.CountAsync(o => o.ParentId == main.Id, cancellationToken);
-        var pending = db.ChangeTracker.Entries<ProductionOrder>().Count(e => e.State == EntityState.Added && e.Entity.ParentId == main.Id);
-        var partItem = CatalogService.PartItemCode(main.Spec.SpecCode, lot.PartCode);
-        var bomVersion = await db.BomVersions.Where(b => b.ItemCode == partItem).MaxAsync(b => (int?)b.Version, cancellationToken) ?? 1;
+        // 這張主工單、這種零件已經用掉多少多做的（含同一輪還沒存檔的）。
+        var used = await db.ScrapRecords.Where(r => r.MainOrderId == main.Id && r.PartCode == lot.PartCode)
+                .SumAsync(r => r.CoveredByExtra, cancellationToken)
+            + db.ChangeTracker.Entries<ScrapRecord>()
+                .Where(e => e.State == EntityState.Added && e.Entity.MainOrderId == main.Id && e.Entity.PartCode == lot.PartCode)
+                .Sum(e => e.Entity.CoveredByExtra);
+        var covered = Math.Min(scrapped, Math.Max(0, main.ExtraQuantity - used));
+        var makeupQuantity = scrapped - covered;
 
-        var makeup = ProductionOrder.OpenMakeup(main, saved + pending + 1, lot.PartCode, partItem, scrapped, bomVersion, now);
-        db.ProductionOrders.Add(makeup);
-        db.ScrapRecords.Add(ScrapRecord.Create(main, source, makeup, lot, scrapped, now));
-        logger.LogInformation("Work order {Main}: {Scrapped} piece(s) of {Part} scrapped in {Lot}; make-up order {Makeup} opened.",
-            main.Number, scrapped, lot.PartCode, lot.LotNumber, makeup.Number);
-        return makeup;
+        ProductionOrder? makeup = null;
+        if (makeupQuantity > 0)
+        {
+            // 同一輪可能已經替同一張主工單開過補做工單（還沒存檔），一起算進編號。
+            var saved = await db.ProductionOrders.CountAsync(o => o.ParentId == main.Id, cancellationToken);
+            var pending = db.ChangeTracker.Entries<ProductionOrder>().Count(e => e.State == EntityState.Added && e.Entity.ParentId == main.Id);
+            var partItem = CatalogService.PartItemCode(main.Spec.SpecCode, lot.PartCode);
+            var bomVersion = await db.BomVersions.Where(b => b.ItemCode == partItem).MaxAsync(b => (int?)b.Version, cancellationToken) ?? 1;
+            makeup = ProductionOrder.OpenMakeup(main, saved + pending + 1, lot.PartCode, partItem, makeupQuantity, bomVersion, now);
+            db.ProductionOrders.Add(makeup);
+        }
+
+        db.ScrapRecords.Add(ScrapRecord.Create(main, source, makeup, lot, scrapped, covered, now));
+        logger.LogInformation("Work order {Main}: {Scrapped} piece(s) of {Part} scrapped in {Lot}; {Covered} covered by extra, make-up order {Makeup}.",
+            main.Number, scrapped, lot.PartCode, lot.LotNumber, covered, makeup?.Number ?? "none");
+        return (makeup, makeupQuantity);
     }
 
     /// <summary>
@@ -1371,7 +1394,8 @@ public sealed class ProductionService(
             PackedPieces = await db.Lots.AsNoTracking().Where(l => l.Status == LotStatus.Packed).SumAsync(l => l.Quantity, cancellationToken),
             WaitingBoxes = waiting.Count,
             WaitingPieces = waiting.Sum(),
-            ReadyBoxes = await ReadyBoxes(db.Lots.AsNoTracking(), settings.BufferStationCode).CountAsync(cancellationToken),
+            ReadyBoxes = await ReadyBoxes(db.Lots.AsNoTracking(), settings.BufferStationCode).CountAsync(cancellationToken)
+                + await CountReadyDeliveryBoxesAsync(settings, cancellationToken),
             ShippedBoxes = await db.Shipments.AsNoTracking().CountAsync(cancellationToken),
             ShippedPieces = await db.Shipments.AsNoTracking().SumAsync(s => s.Quantity, cancellationToken),
             Shipments = await db.Shipments.AsNoTracking().OrderByDescending(s => s.Id).Take(20)

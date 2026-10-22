@@ -12,6 +12,9 @@ public sealed class StockBalance
     public Guid Id { get; private set; }
     public string ItemCode { get; private set; } = string.Empty;
     public string StationCode { get; private set; } = string.Empty;
+
+    /// <summary>成品倉的現貨屬於哪一個客戶（使用者 2026-10-22：依規格與客戶分開放）；圓棒與備料是 null。</summary>
+    public string? Owner { get; private set; }
     public int OnHand { get; private set; }
     public int Reserved { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
@@ -19,8 +22,8 @@ public sealed class StockBalance
 
     public int Available => OnHand - Reserved;
 
-    public static StockBalance Create(string itemCode, string stationCode, DateTimeOffset now) =>
-        new() { Id = Guid.NewGuid(), ItemCode = itemCode, StationCode = stationCode, UpdatedAt = now };
+    public static StockBalance Create(string itemCode, string stationCode, DateTimeOffset now, string? owner = null) =>
+        new() { Id = Guid.NewGuid(), ItemCode = itemCode, StationCode = stationCode, Owner = owner, UpdatedAt = now };
 
     public void Add(int quantity, DateTimeOffset now)
     {

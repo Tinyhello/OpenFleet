@@ -228,6 +228,71 @@ public sealed class OrderService(
         }
     }
 
+    /// <summary>
+    /// 負責人同意這張訂單分批出貨（使用者 2026-10-22）。一張訂單只能同意一次；同意後，下一輪會把已經包好、
+    /// 湊成完整的組先裝箱出貨，剩下的要等整張訂單都做完才一起出。
+    /// 已經全部做完的訂單本來就會整張出貨，不用分批；還沒有任何完整的組包好時也不能同意（409）。
+    /// 兩個人同時按，由 xmin 擋下後到的那一個（409）。
+    /// </summary>
+    public async Task<SalesOrderDto> ApprovePartialShipmentAsync(Guid id, PartialShipmentRequest request, CancellationToken cancellationToken)
+    {
+        var approvedBy = (request.ApprovedBy ?? string.Empty).Trim();
+        if (approvedBy.Length is 0 or > 64)
+        {
+            throw new RequestValidationException("approvedBy", "The approver's name is required and must be at most 64 characters.");
+        }
+
+        var order = await db.SalesOrders.Include(o => o.Lines).SingleOrDefaultAsync(o => o.Id == id, cancellationToken)
+            ?? throw new KeyNotFoundException($"Sales order {id} not found.");
+        if (order.PartialApprovedAt is not null)
+        {
+            throw new ConflictException($"A partial shipment of {order.Number} was already approved; the rest ships when the whole order is complete.");
+        }
+
+        if (await db.Deliveries.AnyAsync(d => d.SalesOrderId == id, cancellationToken))
+        {
+            throw new ConflictException($"Sales order {order.Number} is already being shipped.");
+        }
+
+        var lineIds = order.Lines.Select(l => l.Id).ToList();
+        var workOrders = await db.ProductionOrders.AsNoTracking().Where(o => lineIds.Contains(o.SalesOrderLineId)).ToListAsync(cancellationToken);
+        var lineOf = workOrders.ToDictionary(o => o.Id, o => o.SalesOrderLineId);
+        var workOrderIds = lineOf.Keys.ToList();
+        var lots = await db.Lots.AsNoTracking()
+            .Where(l => !l.IsBox && l.ProductionOrderId != null && workOrderIds.Contains(l.ProductionOrderId.Value))
+            .Select(l => new { OrderId = l.ProductionOrderId!.Value, l.PartCode, l.Quantity, l.Status, l.CurrentStepSequence })
+            .ToListAsync(cancellationToken);
+        var mains = workOrders.Where(o => o.Kind == ProductionOrderKind.Main).ToDictionary(o => o.SalesOrderLineId);
+
+        int Packed(SalesOrderLine line, string part) =>
+            lots.Where(l => l.Status == LotStatus.Packed && l.PartCode == part && lineOf[l.OrderId] == line.Id).Sum(l => l.Quantity);
+
+        var complete = !lots.Any(l => Fulfillment.IsActive(l.Status, l.CurrentStepSequence))
+            && order.Lines.All(line => mains[line.Id].Parts.All(part => Packed(line, part) >= line.Quantity));
+        if (complete)
+        {
+            throw new ConflictException($"Sales order {order.Number} is complete and ships as a whole.");
+        }
+
+        if (order.Lines.All(line => Fulfillment.CompleteSets(mains[line.Id].Parts, part => Packed(line, part), line.Quantity) == 0))
+        {
+            throw new ConflictException($"No complete set of {order.Number} is packed yet.");
+        }
+
+        order.ApprovePartial(approvedBy, time.GetUtcNow());
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ConflictException($"Sales order {order.Number} was changed by someone else; check whether the partial shipment is already approved.");
+        }
+
+        logger.LogInformation("Sales order {Number}: partial shipment approved by {ApprovedBy}.", order.Number, approvedBy);
+        return (await GetAsync(id, cancellationToken))!;
+    }
+
     private async Task<List<SalesOrderDto>> BuildAsync(IReadOnlyList<SalesOrder> orders, CancellationToken cancellationToken)
     {
         var lineIds = orders.SelectMany(o => o.Lines).Select(l => l.Id).ToList();
@@ -243,17 +308,30 @@ public sealed class OrderService(
         var itemCodes = orders.SelectMany(o => o.Lines).Select(l => l.ItemCode).Distinct().ToList();
         var items = await db.Items.AsNoTracking().Where(i => itemCodes.Contains(i.Code)).ToDictionaryAsync(i => i.Code, cancellationToken);
 
+        var orderIds = orders.Select(o => o.Id).ToList();
+        var deliveries = await db.Deliveries.AsNoTracking().Include(d => d.Lines).Where(d => orderIds.Contains(d.SalesOrderId))
+            .OrderBy(d => d.CreatedAt).ThenBy(d => d.Number)
+            .ToListAsync(cancellationToken);
+        var boxIds = deliveries.SelectMany(d => d.Lines).Select(l => l.BoxLotId).ToList();
+        var boxNumbers = await db.Lots.AsNoTracking().Where(l => boxIds.Contains(l.Id)).ToDictionaryAsync(l => l.Id, l => l.LotNumber, cancellationToken);
+        var surplus = await db.SurplusTransfers.AsNoTracking().Where(t => orderIds.Contains(t.SalesOrderId)).ToListAsync(cancellationToken);
+
         return orders.Select(order =>
         {
+            var lineNumbers = order.Lines.ToDictionary(l => l.Id, l => l.LineNumber);
             var lineDtos = order.Lines.OrderBy(l => l.LineNumber).Select(line =>
             {
                 var item = items[line.ItemCode];
                 var family = workOrders.Where(o => o.SalesOrderLineId == line.Id).ToList();
                 var main = family.Single(o => o.Kind == ProductionOrderKind.Main);
                 var familyIds = family.Select(o => o.Id).ToHashSet();
+                var familyLots = lots.Where(l => familyIds.Contains(l.OrderId)).ToList();
                 var parts = main.Parts.Select(part => Progress(
-                    part, line.Quantity, lots.Where(l => familyIds.Contains(l.OrderId)),
-                    scraps.Where(r => r.MainOrderId == main.Id), family.Where(o => o.Kind == ProductionOrderKind.Makeup))).ToList();
+                    part, line.Quantity, main.ExtraQuantity, familyLots,
+                    scraps.Where(r => r.MainOrderId == main.Id), family.Where(o => o.Kind == ProductionOrderKind.Makeup),
+                    shipped: deliveries.Where(d => d.ShippedAt is not null).SelectMany(d => d.Lines)
+                        .Where(l => l.SalesOrderLineId == line.Id && l.PartCode == part).Sum(l => l.Quantity),
+                    surplus: surplus.Where(t => t.SalesOrderLineId == line.Id && t.PartCode == part).Sum(t => t.Quantity))).ToList();
                 return new SalesOrderLineDto
                 {
                     LineNumber = line.LineNumber,
@@ -261,7 +339,7 @@ public sealed class OrderService(
                     ItemName = item.Name,
                     Kind = item.Kind,
                     Quantity = line.Quantity,
-                    IsComplete = parts.All(p => p.Finished >= p.Ordered),
+                    IsComplete = !familyLots.Any(IsActive) && parts.All(p => p.Finished >= p.Ordered),
                     Parts = parts,
                     ProductionOrders = family.OrderBy(o => o.Kind).ThenBy(o => o.CreatedAt).ThenBy(o => o.Number)
                         .Select(o => ToDto(o, order, line, lots, scraps, workOrders, numbers)).ToList(),
@@ -275,33 +353,68 @@ public sealed class OrderService(
                 Customer = order.Customer,
                 DueDate = order.DueDate?.ToDateTime(TimeOnly.MinValue),
                 CreatedAt = order.CreatedAt,
-                Status = lineDtos.All(l => l.IsComplete) ? SalesOrderStatus.Completed : SalesOrderStatus.InProduction,
+                Status = StatusOf(lineDtos),
+                PartialApprovedBy = order.PartialApprovedBy,
+                PartialApprovedAt = order.PartialApprovedAt,
                 Lines = lineDtos,
+                Deliveries = deliveries.Where(d => d.SalesOrderId == order.Id).Select(d => new DeliveryDto
+                {
+                    Number = d.Number,
+                    IsPartial = d.IsPartial,
+                    CreatedAt = d.CreatedAt,
+                    ShippedAt = d.ShippedAt,
+                    Lines = d.Lines.OrderBy(l => lineNumbers[l.SalesOrderLineId]).ThenBy(l => Array.IndexOf(ProductParts.All, l.PartCode))
+                        .Select(l => new DeliveryLineDto
+                        {
+                            LineNumber = lineNumbers[l.SalesOrderLineId],
+                            PartCode = l.PartCode,
+                            Quantity = l.Quantity,
+                            BoxLotNumber = boxNumbers.GetValueOrDefault(l.BoxLotId, string.Empty),
+                        }).ToList(),
+                }).ToList(),
             };
         }).ToList();
     }
 
+    /// <summary>全部出貨了 → 已出貨；全部做完 → 完成（等貨車）；出過一批 → 已分批出貨；其餘是生產中。</summary>
+    private static SalesOrderStatus StatusOf(List<SalesOrderLineDto> lines)
+    {
+        var parts = lines.SelectMany(l => l.Parts).ToList();
+        if (parts.All(p => p.Shipped >= p.Ordered))
+        {
+            return SalesOrderStatus.Shipped;
+        }
+
+        if (lines.All(l => l.IsComplete))
+        {
+            return SalesOrderStatus.Completed;
+        }
+
+        return parts.Any(p => p.Shipped > 0) ? SalesOrderStatus.PartiallyShipped : SalesOrderStatus.InProduction;
+    }
+
     private sealed record LotState(Guid OrderId, string PartCode, int Quantity, LotStatus Status, int? Step);
 
-    /// <summary>完成＝包裝完成（或走完製程、送到暫存點）。</summary>
-    private static bool IsFinished(LotState lot) =>
-        lot.Status is LotStatus.Packed or LotStatus.Boxed || (lot.Status == LotStatus.Staged && lot.Step is null);
+    private static bool IsFinished(LotState lot) => Fulfillment.IsFinished(lot.Status, lot.Step);
 
-    /// <summary>還在流動：等料、在原料倉、在車上、在各站排隊或加工。</summary>
-    private static bool IsActive(LotState lot) => !IsFinished(lot) && lot.Status is not (LotStatus.Scrapped or LotStatus.Shipped);
+    private static bool IsActive(LotState lot) => Fulfillment.IsActive(lot.Status, lot.Step);
 
     private static PartProgressDto Progress(
-        string part, int ordered, IEnumerable<LotState> lots, IEnumerable<ScrapRecord> scraps, IEnumerable<ProductionOrder> makeups)
+        string part, int ordered, int extra, IEnumerable<LotState> lots, IEnumerable<ScrapRecord> scraps, IEnumerable<ProductionOrder> makeups,
+        int shipped, int surplus)
     {
         var ofPart = lots.Where(l => l.PartCode == part).ToList();
         return new PartProgressDto
         {
             PartCode = part,
             Ordered = ordered,
+            Extra = extra,
             Finished = ofPart.Where(IsFinished).Sum(l => l.Quantity),
             InProgress = ofPart.Where(IsActive).Sum(l => l.Quantity),
             Scrapped = scraps.Where(r => r.PartCode == part).Sum(r => r.Quantity),
             Makeup = makeups.Where(o => o.PartCode == part).Sum(o => o.Quantity),
+            Shipped = shipped,
+            Surplus = surplus,
         };
     }
 
@@ -323,6 +436,7 @@ public sealed class OrderService(
             ItemCode = workOrder.ItemCode,
             PartCode = workOrder.PartCode,
             Quantity = workOrder.Quantity,
+            ExtraQuantity = workOrder.ExtraQuantity,
             BomVersion = workOrder.BomVersion,
             Spec = new ProductionSpecDto
             {
@@ -337,14 +451,17 @@ public sealed class OrderService(
             },
             CreatedAt = workOrder.CreatedAt,
             IsComplete = own.Count > 0 && !own.Any(IsActive),
-            Parts = workOrder.Parts.Select(part => Progress(part, workOrder.Quantity, own, scrappedHere, makeups)).ToList(),
+            Parts = workOrder.Parts
+                .Select(part => Progress(part, workOrder.Quantity, workOrder.ExtraQuantity, own, scrappedHere, makeups, shipped: 0, surplus: 0))
+                .ToList(),
             ScrapNotes = scraps.Where(r => r.MainOrderId == workOrder.Id).Select(r => new ScrapNoteDto
             {
                 SourceOrderNumber = numbers[r.SourceOrderId],
                 LotNumber = r.LotNumber,
                 PartCode = r.PartCode,
                 Quantity = r.Quantity,
-                MakeupOrderNumber = numbers[r.MakeupOrderId],
+                CoveredByExtra = r.CoveredByExtra,
+                MakeupOrderNumber = r.MakeupOrderId is { } makeup ? numbers[makeup] : null,
                 At = r.CreatedAt,
             }).ToList(),
         };

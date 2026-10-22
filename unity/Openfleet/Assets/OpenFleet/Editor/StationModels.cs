@@ -25,6 +25,7 @@ namespace OpenFleet.Unity.Editor
                 case StationKind.QualityInspection: Model(root, "Station_QualityInspection", Vector3.zero); break;
                 case StationKind.Packing: Model(root, "Station_Packing", Vector3.zero); break;
                 case StationKind.Shipping: Shipping(root); break;
+                case StationKind.FinishedGoodsStore: Model(root, "Station_FinishedGoodsStore", Vector3.zero); break;
                 case StationKind.ToolStore: Model(root, "Station_ToolStore", Vector3.zero); break;
             }
         }

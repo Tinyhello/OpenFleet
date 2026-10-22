@@ -59,15 +59,16 @@ public sealed class OrderTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal((ProductParts.Die, 10, 24, 45), (dieOrder.PartCode, dieOrder.Quantity, dieOrder.Spec.RodDiameterMm, dieOrder.Spec.PiecesPerBin));
         Assert.Equal([ProductParts.Die], die.Parts.Select(p => p.PartCode));
 
-        // 工單的框：批次編號就是工單號碼。HX10 沒有現成備料，每種 40 支分成 30、10 兩框去切。
+        // 工單的框：批次編號就是工單號碼。40 組多做 1 組；HX10 沒有現成備料，每種 41 支分成 30、11 兩框去切。
         await using var db = _database.NewContext();
         var lots = await db.Lots.AsNoTracking().Where(l => l.ProductionOrderId == setOrder.Id).ToListAsync();
         Assert.Equal(6, lots.Count);
         Assert.All(lots, l => Assert.Equal((setOrder.Number, "P30-HX10", 0), (l.BatchNumber, l.SpecCode, l.CurrentStepSequence!.Value)));
         Assert.Equal(10, await db.Lots.Where(l => l.ProductionOrderId == dieOrder.Id).SumAsync(l => l.Quantity));
 
-        // 剛開立：全部在製作中，還沒有完成的。
-        Assert.All(set.Parts, p => Assert.Equal((40, 0, 40, 0, 0), (p.Ordered, p.Finished, p.InProgress, p.Scrapped, p.Makeup)));
+        // 剛開立：全部在製作中（含多做的 1 支），還沒有完成的。
+        Assert.Equal(1, setOrder.ExtraQuantity);
+        Assert.All(set.Parts, p => Assert.Equal((40, 1, 0, 41, 0, 0), (p.Ordered, p.Extra, p.Finished, p.InProgress, p.Scrapped, p.Makeup)));
     }
 
     [Fact]

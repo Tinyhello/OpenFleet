@@ -16,7 +16,7 @@ public static class DatabaseInitializer
     /// <summary>
     /// 暫定佈局的交接點（與 Unity 的 FactoryLayout 相同：站點中心往走道方向 3.4 m）。
     /// 下排由左到右是切料、原料倉到電鍍（淬火與回火相鄰；切料站在原料倉左邊，使用者 2026-10-22 選擇把廠房往西加寬），
-    /// 上排由右到左是拋光、（雜物倉庫）、品管、包裝、（成品倉）、出貨，
+    /// 上排由右到左是拋光、（雜物倉庫）、品管、包裝、成品倉、出貨，
     /// 括號裡的兩個只是場景、不是站點；
     /// 刀具庫在走道內側的島區中央（使用者 2026-10-12 指定的相鄰關係；實際座標是 Claude 排的）。
     /// 待加工料容量 30 件是已確認的數值；倉庫與暫存點（淬火站入口）的容量規則還沒定，所以留空。
@@ -33,6 +33,8 @@ public static class DatabaseInitializer
         new() { Code = "polish", Name = "拋光", HandoffX = 20, HandoffZ = DemoRoadNetwork.HandoffZ },
         new() { Code = "qc", Name = "品管", HandoffX = 4, HandoffZ = DemoRoadNetwork.HandoffZ },
         new() { Code = "packing", Name = "包裝", HandoffX = -4, HandoffZ = DemoRoadNetwork.HandoffZ },
+        // 成品倉：P4 只是場景，P5 變成真正的站點（使用者 2026-10-22：多出來的零件依規格與客戶收進成品倉）。
+        new() { Code = "finished-store", Name = "成品倉", HandoffX = -12, HandoffZ = DemoRoadNetwork.HandoffZ },
         new() { Code = "shipping", Name = "出貨", HandoffX = -20, HandoffZ = DemoRoadNetwork.HandoffZ },
         new() { Code = "tool-store", Name = "刀具庫", HandoffX = DemoRoadNetwork.IslandX, HandoffZ = DemoRoadNetwork.IslandHandoffZ },
     ];

@@ -16,6 +16,13 @@ public sealed class SalesOrder
     public DateOnly? DueDate { get; private set; }
     public string? RequestKey { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
+
+    /// <summary>負責人同意分批出貨（使用者 2026-10-22：分批要負責人同意，最多分一次）。</summary>
+    public string? PartialApprovedBy { get; private set; }
+    public DateTimeOffset? PartialApprovedAt { get; private set; }
+
+    /// <summary>樂觀並行控制（xmin）：兩個人同時按同意，只有一個會成功。</summary>
+    public uint Version { get; private set; }
     public List<SalesOrderLine> Lines { get; private set; } = [];
 
     /// <summary>單號的後半段（日期與亂碼），工單號碼沿用它，看得出是同一張訂單。</summary>
@@ -30,6 +37,17 @@ public sealed class SalesOrder
         RequestKey = requestKey,
         CreatedAt = now,
     };
+
+    public void ApprovePartial(string approvedBy, DateTimeOffset now)
+    {
+        if (PartialApprovedAt is not null)
+        {
+            throw new InvalidOperationException($"Partial shipment of {Number} was already approved.");
+        }
+
+        PartialApprovedBy = approvedBy;
+        PartialApprovedAt = now;
+    }
 
     public SalesOrderLine AddLine(string itemCode, int quantity)
     {
@@ -75,12 +93,21 @@ public sealed class ProductionOrder
     /// <summary>只做一種零件時是那一種（單一零件的明細、補做）；整組是 null。</summary>
     public string? PartCode { get; private set; }
     public int Quantity { get; private set; }
+
+    /// <summary>主工單開工時每種零件多做的數量（<see cref="ExtraFor"/>）；補做工單是 0。報廢先用它抵。</summary>
+    public int ExtraQuantity { get; private set; }
     public int BomVersion { get; private set; }
     public ProductionSpec Spec { get; private set; } = new();
     public DateTimeOffset CreatedAt { get; private set; }
 
     /// <summary>這張工單要做哪幾種零件。</summary>
     public IReadOnlyList<string> Parts => PartCode is null ? ProductParts.All : [PartCode];
+
+    /// <summary>
+    /// 開工時多做幾組（使用者 2026-10-22：超過 30 組多做 1 組、超過 60 組多做 2 組）。
+    /// 看的是這一行明細的數量；超過 90 組仍是 2 組；單一零件以支數套用同樣的門檻（這三點是 Claude 的解讀，待確認）。
+    /// </summary>
+    public static int ExtraFor(int quantity) => quantity > 60 ? 2 : quantity > 30 ? 1 : 0;
 
     public static ProductionOrder OpenMain(
         SalesOrder order, SalesOrderLine line, Item item, int bomVersion, ProductionSpec spec, DateTimeOffset now) => new()
@@ -92,6 +119,7 @@ public sealed class ProductionOrder
         ItemCode = item.Code,
         PartCode = item.Kind == ItemKind.Part ? item.PartCode : null,
         Quantity = line.Quantity,
+        ExtraQuantity = ExtraFor(line.Quantity),
         BomVersion = bomVersion,
         Spec = spec,
         CreatedAt = now,
@@ -162,15 +190,17 @@ public sealed class ProductionSpec
 }
 
 /// <summary>
-/// 報廢註記：品管在哪一張工單、哪一框報廢了幾支，記在主工單上，並連到因此開立的補做工單。
-/// 同一框的同一次檢驗只會有一筆（(框, 第幾次檢驗) 唯一），避免重複補做。
+/// 報廢註記：品管在哪一張工單、哪一框報廢了幾支，記在主工單上。先用開工時多做的抵（<see cref="CoveredByExtra"/>），
+/// 不夠抵的才開補做工單，並連到那一張。同一框的同一次檢驗只會有一筆（(框, 第幾次檢驗) 唯一），避免重複補做。
 /// </summary>
 public sealed class ScrapRecord
 {
     public Guid Id { get; private set; }
     public Guid MainOrderId { get; private set; }
     public Guid SourceOrderId { get; private set; }
-    public Guid MakeupOrderId { get; private set; }
+
+    /// <summary>多做的不夠抵時開的補做工單；全部抵掉時是 null。</summary>
+    public Guid? MakeupOrderId { get; private set; }
     public Guid LotId { get; private set; }
     public string LotNumber { get; private set; } = string.Empty;
 
@@ -178,15 +208,19 @@ public sealed class ScrapRecord
     public int InspectionRound { get; private set; }
     public string PartCode { get; private set; } = string.Empty;
     public int Quantity { get; private set; }
+
+    /// <summary>其中由開工時多做的抵掉的數量。</summary>
+    public int CoveredByExtra { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
 
     public static ScrapRecord Create(
-        ProductionOrder main, ProductionOrder source, ProductionOrder makeup, MaterialLot lot, int quantity, DateTimeOffset now) => new()
+        ProductionOrder main, ProductionOrder source, ProductionOrder? makeup, MaterialLot lot, int quantity, int coveredByExtra, DateTimeOffset now) => new()
     {
         Id = Guid.NewGuid(),
         MainOrderId = main.Id,
         SourceOrderId = source.Id,
-        MakeupOrderId = makeup.Id,
+        MakeupOrderId = makeup?.Id,
+        CoveredByExtra = coveredByExtra,
         LotId = lot.Id,
         LotNumber = lot.LotNumber,
         InspectionRound = lot.ReworkCount,

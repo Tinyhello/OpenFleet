@@ -21,8 +21,8 @@ public class RoadNetworkTests
 
         Assert.All(Network.Nodes, node => Assert.NotNull(Network.FindPath(start, node.Code)));
 
-        // 12 個站點交接點（含切料站；刀具庫在島區，接在內圈車道上）+ 3 個充電車位。
-        Assert.Equal(15, Network.Nodes.Count(n => Network.IsDeadEnd(n.Code)));
+        // 13 個站點交接點（含切料站與成品倉；刀具庫在島區，接在內圈車道上）+ 3 個充電車位。
+        Assert.Equal(16, Network.Nodes.Count(n => Network.IsDeadEnd(n.Code)));
     }
 
     [Fact]

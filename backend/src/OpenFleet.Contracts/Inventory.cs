@@ -21,6 +21,9 @@ namespace OpenFleet.Contracts
 
         /// <summary>切料產出的備料入庫。</summary>
         Production,
+
+        /// <summary>出貨後多出來的零件收進成品倉。</summary>
+        Surplus,
     }
 
     public enum PurchaseOrderStatus
@@ -37,6 +40,9 @@ namespace OpenFleet.Contracts
         public string ItemName { get; set; } = string.Empty;
         public ItemKind Kind { get; set; }
         public string StationCode { get; set; } = string.Empty;
+
+        /// <summary>成品倉的現貨屬於哪一個客戶（依規格與客戶分開放）；圓棒與備料沒有。</summary>
+        public string? Owner { get; set; }
         public int OnHand { get; set; }
         public int Reserved { get; set; }
         public int Available { get; set; }

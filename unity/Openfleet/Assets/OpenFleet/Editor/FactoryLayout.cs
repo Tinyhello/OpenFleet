@@ -14,6 +14,7 @@ namespace OpenFleet.Unity.Editor
         QualityInspection,
         Packing,
         Shipping,
+        FinishedGoodsStore,
         ToolStore,
 
         /// <summary>只是場景的倉儲區，不是後端的站點。</summary>
@@ -51,7 +52,8 @@ namespace OpenFleet.Unity.Editor
     /// 走道的車道位置必須與後端的路網相同（見 OuterLane／InnerLane）。
     /// 下排（靠南牆）由左到右依製程順序：切料、原料倉、粗加工、精加工、淬火、回火、電鍍；
     /// 切料站在原料倉左邊，廠房因此往西加寬 8 m（使用者 2026-10-22 選的），場地中心不在原點。
-    /// 上排（靠北牆）由右到左：拋光、雜物倉庫、品管、包裝、成品倉、出貨。成品倉與雜物倉庫只是場景，沒有後端站點（見 Storages）。
+    /// 上排（靠北牆）由右到左：拋光、雜物倉庫、品管、包裝、成品倉、出貨。雜物倉庫只是場景，沒有後端站點（見 Storages）；
+    /// 成品倉在 P5 變成真正的站點（多出來的零件送進去）。
     /// 西牆中間是工廠大門，進料與出貨共用（使用者 2026-10-12）。
     /// 刀具庫在走道內側的島區中央，交接點接在內圈車道下邊；位置必須和後端 DemoRoadNetwork 的 IslandHandoffZ 一致。
     /// </summary>
@@ -90,6 +92,7 @@ namespace OpenFleet.Unity.Editor
             new StationSpec("polish", StationKind.Polishing, "拋光", "Polishing", new Vector2(20f, 12.8f), true),
             new StationSpec("qc", StationKind.QualityInspection, "品管", "Inspection", new Vector2(4f, 12.8f), true),
             new StationSpec("packing", StationKind.Packing, "包裝", "Packing", new Vector2(-4f, 12.8f), true),
+            new StationSpec("finished-store", StationKind.FinishedGoodsStore, "成品倉", "Finished Goods", new Vector2(-12f, 12.8f), true),
             new StationSpec("shipping", StationKind.Shipping, "出貨", "Shipping", new Vector2(-20f, 12.8f), true),
             new StationSpec("tool-store", StationKind.ToolStore, "刀具庫", "Tool Store", new Vector2(0f, 0.2f), true),
         };
@@ -100,7 +103,6 @@ namespace OpenFleet.Unity.Editor
         /// </summary>
         public static readonly StationSpec[] Storages =
         {
-            new StationSpec("Station_FinishedGoodsStore", StationKind.Storage, "成品倉", "Finished Goods", new Vector2(-12f, 12.8f), true),
             new StationSpec("Station_MiscStore", StationKind.Storage, "雜物倉庫", "General Storage", new Vector2(12f, 12.8f), true),
         };
 

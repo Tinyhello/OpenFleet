@@ -26,6 +26,10 @@ public static class OrderEndpoints
         orders.MapGet("/{id:guid}", async (Guid id, OrderService service, CancellationToken ct) =>
             await service.GetAsync(id, ct) is { } order ? Results.Ok(order) : Results.NotFound());
 
+        // 負責人同意分批出貨：一張訂單只能同意一次，只出已經包好、湊成完整的組。
+        orders.MapPost("/{id:guid}/partial-shipment", (Guid id, PartialShipmentRequest request, OrderService service, CancellationToken ct) =>
+            service.ApprovePartialShipmentAsync(id, request, ct));
+
         var workOrders = app.MapGroup("/api/production-orders").AddEndpointFilter<ApiErrorFilter>();
 
         workOrders.MapGet("/", (int? take, OrderService service, CancellationToken ct) => service.ListProductionOrdersAsync(take ?? 50, ct));

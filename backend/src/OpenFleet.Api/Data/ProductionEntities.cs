@@ -378,6 +378,9 @@ public sealed class MaterialLot
 
     /// <summary>屬於哪一張生產工單（補做的框屬於補做工單）；沒有訂單的批次是 null。</summary>
     public Guid? ProductionOrderId { get; private set; }
+
+    /// <summary>出貨箱：屬於哪一張出貨單；沒有訂單的出貨箱與送成品倉的箱子是 null。</summary>
+    public Guid? DeliveryId { get; private set; }
     public string PartCode { get; private set; } = string.Empty;
     public int Quantity { get; private set; }
     public LotStatus Status { get; private set; }
@@ -620,6 +623,65 @@ public sealed class MaterialLot
             Status = LotStatus.AwaitingTransport,
             StationCode = first.StationCode,
             IsBox = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+    }
+
+    /// <summary>
+    /// 訂單的出貨箱（或送成品倉的箱子）：從包好的框裝 <paramref name="quantity"/> 支，在包裝站等待搬運。
+    /// 箱號由呼叫端決定；<paramref name="deliveryId"/> 是出貨單（送成品倉的箱子沒有）。
+    /// </summary>
+    public static MaterialLot CreateBox(
+        string lotNumber, string batchNumber, MaterialLot sample, int quantity, Guid? deliveryId, DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid(),
+        LotNumber = lotNumber,
+        BatchNumber = batchNumber,
+        BinIndex = 1,
+        BinCount = 1,
+        RodDiameterMm = sample.RodDiameterMm,
+        SpecCode = sample.SpecCode,
+        PartCode = sample.PartCode,
+        Quantity = quantity,
+        Status = LotStatus.AwaitingTransport,
+        StationCode = sample.StationCode,
+        IsBox = true,
+        DeliveryId = deliveryId,
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    /// <summary>
+    /// 分批出貨只出完整的組：從包好的框分出 <paramref name="quantity"/> 支另成一框（框號加 -P），剩下的留在原框繼續在包裝站等。
+    /// 一張訂單只會分一次批，所以一框最多被分一次。
+    /// </summary>
+    public static MaterialLot SplitPacked(MaterialLot source, int quantity, DateTimeOffset now)
+    {
+        source.Require(LotStatus.Packed, nameof(SplitPacked));
+        if (quantity <= 0 || quantity >= source.Quantity)
+        {
+            throw new InvalidOperationException($"Lot {source.LotNumber}: cannot split {quantity} of {source.Quantity}.");
+        }
+
+        source.Quantity -= quantity;
+        source.UpdatedAt = now;
+        return new MaterialLot
+        {
+            Id = Guid.NewGuid(),
+            LotNumber = $"{source.LotNumber}-P",
+            BatchNumber = source.BatchNumber,
+            BinIndex = source.BinIndex,
+            BinCount = source.BinCount,
+            RodDiameterMm = source.RodDiameterMm,
+            SpecCode = source.SpecCode,
+            ProductionOrderId = source.ProductionOrderId,
+            PartCode = source.PartCode,
+            Quantity = quantity,
+            Status = LotStatus.Packed,
+            StationCode = source.StationCode,
+            ReworkCount = source.ReworkCount,
+            IsMakeup = source.IsMakeup,
             CreatedAt = now,
             UpdatedAt = now,
         };

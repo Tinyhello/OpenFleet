@@ -49,25 +49,29 @@ public sealed class InventoryService(OpenFleetDbContext db, TimeProvider time, I
 
     // ---- 建構塊：只改追蹤中的資料，不存檔 ----
 
-    public async Task<StockBalance> GetOrCreateBalanceAsync(string itemCode, string stationCode, CancellationToken cancellationToken)
+    /// <summary>一個品項在一個站點的庫存列（成品倉再依客戶 <paramref name="owner"/> 分開）；還沒有就建立一列。</summary>
+    public async Task<StockBalance> GetOrCreateBalanceAsync(
+        string itemCode, string stationCode, CancellationToken cancellationToken, string? owner = null)
     {
-        var balance = db.StockBalances.Local.SingleOrDefault(b => b.ItemCode == itemCode && b.StationCode == stationCode)
-            ?? await db.StockBalances.SingleOrDefaultAsync(b => b.ItemCode == itemCode && b.StationCode == stationCode, cancellationToken);
+        var balance = db.StockBalances.Local.SingleOrDefault(b => b.ItemCode == itemCode && b.StationCode == stationCode && b.Owner == owner)
+            ?? await db.StockBalances.SingleOrDefaultAsync(
+                b => b.ItemCode == itemCode && b.StationCode == stationCode && b.Owner == owner, cancellationToken);
         if (balance is null)
         {
-            balance = StockBalance.Create(itemCode, stationCode, time.GetUtcNow());
+            balance = StockBalance.Create(itemCode, stationCode, time.GetUtcNow(), owner);
             db.StockBalances.Add(balance);
         }
 
         return balance;
     }
 
-    /// <summary>入庫（收貨、切料產出、初始庫存），同時記一筆異動。</summary>
+    /// <summary>入庫（收貨、切料產出、多出來的零件、初始庫存），同時記一筆異動。</summary>
     public async Task<StockBalance> AddStockAsync(
-        string itemCode, string stationCode, int quantity, StockMovementReason reason, string? reference, CancellationToken cancellationToken)
+        string itemCode, string stationCode, int quantity, StockMovementReason reason, string? reference, CancellationToken cancellationToken,
+        string? owner = null)
     {
         var now = time.GetUtcNow();
-        var balance = await GetOrCreateBalanceAsync(itemCode, stationCode, cancellationToken);
+        var balance = await GetOrCreateBalanceAsync(itemCode, stationCode, cancellationToken, owner);
         balance.Add(quantity, now);
         Record(balance, quantity, reason, reference, now);
         return balance;
@@ -140,14 +144,16 @@ public sealed class InventoryService(OpenFleetDbContext db, TimeProvider time, I
             .ToDictionaryAsync(i => i.Code, cancellationToken);
         var onOrder = await OnOrderAsync(cancellationToken);
 
-        var rows = balances.Select(b => (Item: items[b.ItemCode], b.StationCode, b.OnHand, b.Reserved)).ToList();
-        rows.AddRange(items.Values.Where(i => !stocked.Contains(i.Code)).Select(i => (Item: i, StationCode: StoreStation, OnHand: 0, Reserved: 0)));
+        var rows = balances.Select(b => (Item: items[b.ItemCode], b.StationCode, b.Owner, b.OnHand, b.Reserved)).ToList();
+        rows.AddRange(items.Values.Where(i => !stocked.Contains(i.Code))
+            .Select(i => (Item: i, StationCode: StoreStation, Owner: (string?)null, OnHand: 0, Reserved: 0)));
 
         var available = rows.GroupBy(r => r.Item.Code).ToDictionary(g => g.Key, g => g.Sum(r => r.OnHand - r.Reserved));
         var dto = new InventorySummaryDto
         {
             Balances = rows
-                .OrderBy(r => r.Item.Kind == ItemKind.Bar ? 0 : 1)
+                .OrderBy(r => r.Item.Kind == ItemKind.Bar ? 0 : r.Item.Kind == ItemKind.Blank ? 1 : 2)
+                .ThenBy(r => r.Owner)
                 .ThenBy(r => r.Item.PunchSpecCode)
                 .ThenBy(r => r.Item.PartCode is null ? -1 : Array.IndexOf(ProductParts.All, r.Item.PartCode))
                 .Select(r => new StockBalanceDto
@@ -156,6 +162,7 @@ public sealed class InventoryService(OpenFleetDbContext db, TimeProvider time, I
                     ItemName = r.Item.Name,
                     Kind = r.Item.Kind,
                     StationCode = r.StationCode,
+                    Owner = r.Owner,
                     OnHand = r.OnHand,
                     Reserved = r.Reserved,
                     Available = r.OnHand - r.Reserved,
@@ -232,7 +239,7 @@ public sealed class InventoryService(OpenFleetDbContext db, TimeProvider time, I
         }, cancellationToken);
 
         logger.LogInformation("Stock of {Item} adjusted by {Quantity} to {OnHand}.", item.Code, request.Quantity, balance.OnHand);
-        return (await GetSummaryAsync(cancellationToken)).Balances.Single(b => b.ItemCode == item.Code && b.StationCode == StoreStation);
+        return (await GetSummaryAsync(cancellationToken)).Balances.Single(b => b.ItemCode == item.Code && b.StationCode == StoreStation && b.Owner is null);
     }
 
     /// <summary>
