@@ -12,13 +12,13 @@ using Colors = OpenFleet.Unity.PresentationController.Colors;
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件、品管的不良率、貨車間隔）、開關測試模式、建立批次、
-    /// 查看缺車耽誤的時間、品管的累計結果、出貨的現況與批次目前的狀態與位置。
-    /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；批次清單與缺車統計以輪詢更新。
+    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件、品管的不良率、貨車間隔）、開關測試模式、
+    /// 下單與訂單的進度（ProductionPanel.Orders.cs）、查看缺車耽誤的時間、品管的累計結果與出貨的現況。
+    /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；訂單與缺車統計以輪詢更新。
     /// 由 PresentationController 在執行時建立。
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
-    public sealed class ProductionPanel : MonoBehaviour
+    public sealed partial class ProductionPanel : MonoBehaviour
     {
         private const float RefreshSeconds = 1f;
 
@@ -28,7 +28,6 @@ namespace OpenFleet.Unity
         private VisualElement _root;
         private VisualElement _panel;
         private VisualElement _stepRows;
-        private VisualElement _lotRows;
         private SliderInt _lotQuantity;
         private SliderInt _pieceHandlingSeconds;
         private SliderInt _agvHandoverSeconds;
@@ -223,6 +222,16 @@ namespace OpenFleet.Unity
             _attention = new VisualElement();
             content.Add(_attention);
 
+
+            // 下單與訂單（P5）：建立批次改成下客戶訂單。
+            BuildOrderForm(content);
+
+            _status = Hint(string.Empty);
+            _status.style.whiteSpace = WhiteSpace.Normal;
+            content.Add(_status);
+
+            BuildOrderList(content);
+
             // 缺車統計：車都在忙、叫不到車時，機台真的停下來的時間，按工序列出。
             content.Add(Heading("缺車耽誤"));
             _shortage = Hint("尚未讀到資料。");
@@ -235,29 +244,15 @@ namespace OpenFleet.Unity
             _inspection.style.whiteSpace = WhiteSpace.Normal;
             content.Add(_inspection);
 
-            // 包裝與出貨：同批次同一種零件的框全部包完才併成一箱送到出貨站；貨車定時來，把整批到齊的箱子載走。
+            // 包裝與出貨：整張訂單做完才裝箱送到出貨站（或負責人同意的那一次分批）；貨車定時來，把出貨單的箱子都到齊的載走。
             content.Add(Heading("出貨"));
             _shipping = Hint("尚未讀到資料。");
             _shipping.style.whiteSpace = WhiteSpace.Normal;
             content.Add(_shipping);
 
-            content.Add(Heading("批次"));
-            var lotButtons = Row();
-            // 桿徑決定一框裝幾支（Φ30 裝 30 支、Φ24 裝 45 支）；批次超過一框就分成多框，AGV 一趟送一框。
-            lotButtons.Add(ActionButton("建立批次 Φ30", () => StartCoroutine(Post("/api/lots", "{\"rodDiameterMm\":30}", "已建立批次"))));
-            lotButtons.Add(ActionButton("Φ24", () => StartCoroutine(Post("/api/lots", "{\"rodDiameterMm\":24}", "已建立批次"))));
-            lotButtons.Add(ActionButton("清除示範資料", () => StartCoroutine(Post("/api/demo/reset", null, "已清除批次與搬運資料"))));
-            content.Add(lotButtons);
-
-            _status = Hint(string.Empty);
-            _status.style.whiteSpace = WhiteSpace.Normal;
-            content.Add(_status);
-
-            var scroll = new ScrollView(ScrollViewMode.Vertical);
-            scroll.style.maxHeight = 200;
-            scroll.style.marginTop = 6;
-            _lotRows = scroll.contentContainer;
-            content.Add(scroll);
+            var resetRow = Row();
+            resetRow.Add(ActionButton("清除示範資料", () => StartCoroutine(Post("/api/demo/reset", null, "已清除訂單、批次與搬運資料"))));
+            content.Add(resetRow);
         }
 
         /// <summary>
@@ -306,9 +301,12 @@ namespace OpenFleet.Unity
                 }
 
                 ShowSettings(FleetJson.Deserialize<ProductionSettingsDto>(request.downloadHandler.text));
+                _orderQuantity.value = _settings.LotQuantity;
             }
 
-            // 站點名稱用來把批次位置顯示成中文。
+            yield return LoadSpecs();
+
+            // 站點名稱用來把料框的位置顯示成中文。
             using (var request = UnityWebRequest.Get($"{Api}/api/stations"))
             {
                 yield return request.SendWebRequest();
@@ -471,7 +469,7 @@ namespace OpenFleet.Unity
                 if (Succeeded(request, successMessage))
                 {
                     SetStatus(successMessage + "。", Colors.Ok);
-                    yield return RefreshLots();
+                    yield return RefreshOrders();
                 }
             }
         }
@@ -480,7 +478,7 @@ namespace OpenFleet.Unity
         {
             while (true)
             {
-                yield return RefreshLots();
+                yield return RefreshOrders();
                 yield return RefreshShortage();
                 yield return RefreshInspection();
                 yield return RefreshShipping();
@@ -556,7 +554,7 @@ namespace OpenFleet.Unity
                 {
                     SetStatus(resolution == TaskResolution.ReturnToSource ? "已記錄：物料放回取料站，系統會重新派一趟。" : "已記錄：物料已由人工送達。", Colors.Ok);
                     yield return RefreshAttention();
-                    yield return RefreshLots();
+                    yield return RefreshOrders();
                 }
             }
         }
@@ -633,8 +631,8 @@ namespace OpenFleet.Unity
                 var remaining = Mathf.Max(0, Mathf.CeilToInt((float)summary.TruckRemainingSeconds));
                 _shipping.text =
                     $"下一班貨車：{remaining / 60} 分 {remaining % 60:00} 秒後\n" +
-                    $"已包裝、等同零件的框到齊：{summary.PackedPieces} 支\n" +
-                    $"在出貨站等貨車：{summary.WaitingBoxes} 箱／{summary.WaitingPieces} 支（整批到齊 {summary.ReadyBoxes} 箱）\n" +
+                    $"已包裝、等整張訂單到齊：{summary.PackedPieces} 支\n" +
+                    $"在出貨站等貨車：{summary.WaitingBoxes} 箱／{summary.WaitingPieces} 支（下一班會載走 {summary.ReadyBoxes} 箱）\n" +
                     $"累計已出貨：{summary.ShippedBoxes} 箱／{summary.ShippedPieces} 支";
             }
         }
@@ -688,101 +686,6 @@ namespace OpenFleet.Unity
             return $"{total / 60}:{total % 60:00}";
         }
 
-        private IEnumerator RefreshLots()
-        {
-            using (var request = UnityWebRequest.Get($"{Api}/api/lots"))
-            {
-                yield return request.SendWebRequest();
-                if (request.result != UnityWebRequest.Result.Success)
-                {
-                    yield break;
-                }
-
-                var lots = FleetJson.Deserialize<LotDto[]>(request.downloadHandler.text);
-                _lotRows.Clear();
-                if (lots.Length == 0)
-                {
-                    _lotRows.Add(Hint("還沒有批次。"));
-                }
-
-                // 一個批次有三種零件，各自分成好幾框、各自搬運與加工：每個批次一段，底下每一種零件列出「幾框在哪裡做什麼」。
-                var order = new List<string>();
-                var batches = new Dictionary<string, List<LotDto>>();
-                foreach (var lot in lots)
-                {
-                    if (!batches.TryGetValue(lot.BatchNumber, out var bins))
-                    {
-                        bins = new List<LotDto>();
-                        batches.Add(lot.BatchNumber, bins);
-                        order.Add(lot.BatchNumber);
-                    }
-
-                    bins.Add(lot);
-                }
-
-                foreach (var batchNumber in order)
-                {
-                    var bins = batches[batchNumber];
-                    var finished = true;
-                    var text = new StringBuilder($"{batchNumber}（Φ{bins[0].RodDiameterMm}）");
-                    foreach (var part in ProductParts.All)
-                    {
-                        var partBins = bins.FindAll(b => b.PartCode == part);
-                        if (partBins.Count == 0)
-                        {
-                            continue;
-                        }
-
-                        // 這一種零件包裝完會併成一箱：之後只列那一箱，原本的料框（已空）與報廢的框不再列。
-                        var box = partBins.Find(b => b.IsBox);
-                        if (box != null)
-                        {
-                            finished &= box.Status == LotStatus.Shipped;
-                            text.Append($"\n{ProductParts.Name(part)}　{box.Quantity} 支／1 箱：{Describe(box)}");
-                            continue;
-                        }
-
-                        // 報廢的框不算在數量裡（報廢的料會另外補做）。
-                        finished = false;
-                        var pieces = 0;
-                        var active = 0;
-                        var places = new List<string>();
-                        var counts = new Dictionary<string, int>();
-                        foreach (var bin in partBins)
-                        {
-                            if (bin.Status == LotStatus.Scrapped)
-                            {
-                                continue;
-                            }
-
-                            pieces += bin.Quantity;
-                            active++;
-                            var place = Describe(bin);
-                            if (!counts.ContainsKey(place))
-                            {
-                                counts[place] = 0;
-                                places.Add(place);
-                            }
-
-                            counts[place]++;
-                        }
-
-                        text.Append($"\n{ProductParts.Name(part)}　{pieces} 支／{active} 框");
-                        foreach (var place in places)
-                        {
-                            text.Append($"\n　{counts[place]} 框 {place}");
-                        }
-                    }
-
-                    var row = new Label(text.ToString());
-                    row.style.whiteSpace = WhiteSpace.Normal;
-                    row.style.marginBottom = 6;
-                    row.style.color = finished ? Colors.Muted : Color.white;
-                    _lotRows.Add(row);
-                }
-            }
-        }
-
         private string Describe(LotDto lot)
         {
             var place = lot.VehicleId ?? (_stationNames.TryGetValue(lot.StationCode ?? string.Empty, out var name) ? name : lot.StationCode);
@@ -790,13 +693,16 @@ namespace OpenFleet.Unity
             var rework = lot.IsMakeup ? "（補做）" : lot.ReworkCount > 0 && lot.Status != LotStatus.Staged ? "（反工）" : string.Empty;
             switch (lot.Status)
             {
+                case LotStatus.AwaitingMaterial: return $"在 {place} 等料（圓棒不夠）{rework}";
                 case LotStatus.AwaitingTransport: return $"在 {place} 等待搬運{rework}";
                 case LotStatus.InTransit: return $"在 {place} 車上運送中{rework}";
                 case LotStatus.Queued: return $"在 {place} 排隊等待加工{rework}";
                 case LotStatus.Processing: return $"在 {place} 加工中{rework}";
-                case LotStatus.Staged: return lot.IsBox ? $"在 {place} 等貨車（整批到齊才載）" : $"已送達 {place} 暫存";
+                case LotStatus.Staged when lot.IsBox && lot.StationCode == "finished-store": return "已收進成品倉";
+                case LotStatus.Staged: return lot.IsBox ? $"在 {place} 等貨車（同一張出貨單的箱子到齊才載）" : $"已送達 {place} 暫存";
                 case LotStatus.Scrapped: return $"在 {place} 整框報廢";
-                case LotStatus.Packed: return $"在 {place} 已包裝，等同零件的框到齊";
+                case LotStatus.Packed: return $"在 {place} 已包裝，等整張訂單到齊";
+                case LotStatus.Boxed: return "已裝箱";
                 case LotStatus.Shipped: return "已出貨";
                 default: return lot.Status.ToString();
             }
@@ -822,7 +728,10 @@ namespace OpenFleet.Unity
                 return true;
             }
 
-            var detail = request.responseCode == 400 ? ValidationMessage(request.downloadHandler?.text) : request.error;
+            // 400 帶驗證訊息；404、409 帶後端的說明（例如已經同意過分批、還沒有完整的組）。
+            var detail = request.responseCode == 400 ? ValidationMessage(request.downloadHandler?.text)
+                : request.responseCode == 404 || request.responseCode == 409 ? ProblemDetail(request.downloadHandler?.text) ?? request.error
+                : request.error;
             SetStatus($"{action}失敗：{detail}", Colors.Error);
             Debug.LogWarning($"[OpenFleet] {action} failed: {request.responseCode} {request.error} {request.downloadHandler?.text}");
             return false;
@@ -844,6 +753,18 @@ namespace OpenFleet.Unity
             catch (Exception)
             {
                 return body;
+            }
+        }
+
+        private static string ProblemDetail(string body)
+        {
+            try
+            {
+                return FleetJson.Deserialize<Problem>(body)?.Detail;
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
 
@@ -909,6 +830,12 @@ namespace OpenFleet.Unity
             button.style.color = Colors.InputText;
             button.style.height = 28;
             return button;
+        }
+
+        /// <summary>ASP.NET Core ProblemDetails 的回應格式（只取說明）。</summary>
+        private sealed class Problem
+        {
+            public string Detail { get; set; }
         }
 
         /// <summary>ASP.NET Core ValidationProblem 的回應格式。</summary>
