@@ -73,8 +73,11 @@ namespace OpenFleet.Contracts
         /// <summary>已放行的點數：可以開到 Path[ReleasedCount - 1]。</summary>
         public int ReleasedCount { get; set; }
 
-        /// <summary>空車時的車速倍率（測試模式用，平常是 1）。載貨時不適用。</summary>
+        /// <summary>空車時的車速倍率（測試模式用，平常是 1）。</summary>
         public double EmptySpeedFactor { get; set; } = 1;
+
+        /// <summary>載貨時的車速倍率（測試模式用，平常是 1）。</summary>
+        public double LoadedSpeedFactor { get; set; } = 1;
     }
 
     public enum VehicleEventType
@@ -86,6 +89,16 @@ namespace OpenFleet.Contracts
 
         /// <summary>Transport：已在取料點完成交接，物料在車上。抵達不等於已取料，所以另外回報。</summary>
         Loaded,
+    }
+
+    /// <summary>設備拒絕指令時的原因（<see cref="VehicleEvent.Reason"/>）。</summary>
+    public static class VehicleRejectReasons
+    {
+        /// <summary>車輛還在執行別的工作，例如示範重設前派出、後端已經不記得的搬運。車本身沒有問題。</summary>
+        public const string Busy = "Busy";
+
+        /// <summary>指令收到時已經過期。</summary>
+        public const string Expired = "Expired";
     }
 
     /// <summary>設備／模擬器 → 後端。業務結果回報，與位置遙測分開。</summary>

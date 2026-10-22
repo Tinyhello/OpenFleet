@@ -899,6 +899,9 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<double>("TestHandoverSpeed")
                         .HasColumnType("double precision");
 
+                    b.Property<double>("TestLoadedVehicleSpeed")
+                        .HasColumnType("double precision");
+
                     b.Property<bool>("TestMode")
                         .HasColumnType("boolean");
 

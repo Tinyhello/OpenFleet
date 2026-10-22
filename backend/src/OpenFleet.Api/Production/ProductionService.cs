@@ -38,10 +38,11 @@ public sealed partial class ProductionService(
     public const int MaxBatchQuantity = 300;
     public const int MaxBatchRunPieces = 1_000;
     public const double MaxBatchRunSeconds = 48 * 3600;
-    public const double MaxTestSpeed = 1000;
+    /// <summary>測試倍率的上限（各站、AGV 交接、貨車）。示範用 3000 倍，讓一個流程約 2～3 分鐘（使用者 2026-10-22）。</summary>
+    public const double MaxTestSpeed = 5000;
     public const double MaxChangeoverSeconds = 4 * 3600;
 
-    /// <summary>空車倍率的上限：再快交通控制的放行會跟不上。</summary>
+    /// <summary>車速倍率（空車與載貨）的上限：再快交通控制的放行會跟不上。</summary>
     public const double MaxTestEmptyVehicleSpeed = 5;
 
     public const int MaxReworkLimit = 3;
@@ -93,6 +94,7 @@ public sealed partial class ProductionService(
             ChangeoverSeconds = settings.ChangeoverSeconds,
             TestHandoverSpeed = settings.TestHandoverSpeed,
             TestEmptyVehicleSpeed = settings.TestEmptyVehicleSpeed,
+            TestLoadedVehicleSpeed = settings.TestLoadedVehicleSpeed,
             DefectRate = settings.DefectRate,
             MaxReworkCount = settings.MaxReworkCount,
             ReworkBatchMinPieces = settings.ReworkBatchMinPieces,
@@ -138,6 +140,7 @@ public sealed partial class ProductionService(
         ValidateRange(request.ChangeoverSeconds, 0, MaxChangeoverSeconds, "changeoverSeconds");
         ValidateRange(request.TestHandoverSpeed, 1, MaxTestSpeed, "testHandoverSpeed");
         ValidateRange(request.TestEmptyVehicleSpeed, 1, MaxTestEmptyVehicleSpeed, "testEmptyVehicleSpeed");
+        ValidateRange(request.TestLoadedVehicleSpeed, 1, MaxTestEmptyVehicleSpeed, "testLoadedVehicleSpeed");
         ValidateRange(request.DefectRate, 0, 1, "defectRate");
         ValidateRange(request.MaxReworkCount, 0, MaxReworkLimit, "maxReworkCount");
         ValidateRange(request.ReworkBatchMinPieces, 1, MaxBatchRunPieces, "reworkBatchMinPieces");
@@ -153,6 +156,7 @@ public sealed partial class ProductionService(
         settings.ChangeoverSeconds = request.ChangeoverSeconds;
         settings.TestHandoverSpeed = request.TestHandoverSpeed;
         settings.TestEmptyVehicleSpeed = request.TestEmptyVehicleSpeed;
+        settings.TestLoadedVehicleSpeed = request.TestLoadedVehicleSpeed;
         settings.DefectRate = request.DefectRate;
         settings.MaxReworkCount = request.MaxReworkCount;
         settings.ReworkBatchMinPieces = request.ReworkBatchMinPieces;
@@ -1100,8 +1104,10 @@ public sealed partial class ProductionService(
             var waiting = reworkReleased ? arrived : arrived.Except(rework).ToList();
 
             var moreComing = active.Any(l => l.Step <= step.Sequence && !arrivedIds.Contains(l.Id));
+            // 湊不到下限：只有補做的料可以先開（使用者 2026-10-10）；測試模式下一般的料也可以，示範的小單才看得到後段（使用者 2026-10-22）。
+            // 兩種都要等到已經沒有其他料會再來這一站。
             var enough = waiting.Sum(o => o.Quantity) >= step.BatchMinPieces
-                || (waiting.Any(o => o.Lot.IsMakeup) && !moreComing);
+                || (waiting.Count > 0 && !moreComing && (settings.TestMode || waiting.Any(o => o.Lot.IsMakeup)));
             if (!enough)
             {
                 continue;

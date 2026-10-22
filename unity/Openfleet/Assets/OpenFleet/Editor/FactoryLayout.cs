@@ -106,8 +106,12 @@ namespace OpenFleet.Unity.Editor
             new StationSpec("Station_MiscStore", StationKind.Storage, "雜物倉庫", "General Storage", new Vector2(12f, 12.8f), true),
         };
 
-        /// <summary>走道內側島區：充電維護區（位置、席位數為待定規則，這裡只畫 3 個示意車位）。</summary>
-        public static readonly Vector2 ChargingArea = new Vector2(-8f, 0f);
+        /// <summary>
+        /// 走道內側島區：充電維護區，一台車一格（示範車隊 4 台大型車加 1 台小型車，使用者 2026-10-22）。
+        /// 車位的位置必須和後端 DemoRoadNetwork 的 ParkingColumns 相同。
+        /// </summary>
+        public static readonly Vector2 ChargingArea = new Vector2(-10.05f, 0f);
+        public static readonly float[] ChargingBayOffsets = { -4.35f, -2.55f, -0.25f, 2.05f, 4.35f };
 
         /// <summary>走道內側島區：料箱／托盤存放區（歸還位置待定，這裡只是示意）。</summary>
         public static readonly Vector2 CarrierArea = new Vector2(8f, 0f);

@@ -35,8 +35,12 @@ namespace OpenFleet.Unity
         private SliderInt _toolChangeSeconds;
         private SliderInt _toolThreshold;
         private SliderInt _changeoverMinutes;
+        /// <summary>測試倍率的上限，和後端的 ProductionService.MaxTestSpeed 相同。</summary>
+        private const int MaxTestSpeed = 5000;
+
         private SliderInt _testHandoverSpeed;
         private SliderInt _testEmptyVehicleSpeed;
+        private SliderInt _testLoadedVehicleSpeed;
         private SliderInt _defectPercent;
         private SliderInt _maxReworkCount;
         private SliderInt _reworkBatchMin;
@@ -166,11 +170,14 @@ namespace OpenFleet.Unity
             _changeoverMinutes = NumberField("機床換線（分）", 1, 60);
             settings.Add(_changeoverMinutes);
 
-            // 測試模式下車輛的兩個倍率；各站自己的倍率在下面每一站各一欄。
-            _testHandoverSpeed = NumberField("測試：AGV 交接（×）", 1, 100);
+            // 測試模式下車輛的倍率：交接、空車與載貨的車速（車速最多 5 倍，再快交通控制跟不上）；各站自己的倍率在下面每一站各一欄。
+            // 倍率的上限和後端相同（5000）。
+            _testHandoverSpeed = NumberField("測試：AGV 交接（×）", 1, MaxTestSpeed);
             settings.Add(_testHandoverSpeed);
             _testEmptyVehicleSpeed = NumberField("測試：空車車速（×）", 1, 5);
             settings.Add(_testEmptyVehicleSpeed);
+            _testLoadedVehicleSpeed = NumberField("測試：載貨車速（×）", 1, 5);
+            settings.Add(_testLoadedVehicleSpeed);
 
             // 品管：每一支以這個機率被判不良（三種原因機率相同）；同一支最多反工幾次，超過就報廢，0 表示不反工。
             _defectPercent = NumberField("品管不良率（%）", 0, 50);
@@ -184,7 +191,7 @@ namespace OpenFleet.Unity
             // 出貨：貨車每隔這麼久來一次，把出貨站上的箱子載走；測試模式下用右邊的倍率加快。
             _truckMinutes = NumberField("貨車間隔（分）", 1, 240);
             settings.Add(_truckMinutes);
-            _testTruckSpeed = NumberField("測試：貨車（×）", 1, 300);
+            _testTruckSpeed = NumberField("測試：貨車（×）", 1, MaxTestSpeed);
             settings.Add(_testTruckSpeed);
 
             _stepRows = new VisualElement();
@@ -195,13 +202,13 @@ namespace OpenFleet.Unity
             settingButtons.Add(ActionButton("重新載入", () => StartCoroutine(LoadSettings())));
             settings.Add(settingButtons);
 
-            // 測試模式：每一站依自己的專用倍率加快（倍率在示範設定裡調整），車輛維持實際速度。
+            // 測試模式：每一站依自己的專用倍率加快（倍率在示範設定裡調整），車輛的交接與車速也依設定加快（使用者 2026-10-22）。
             // 沒有整體的時間加速（使用者 2026-10-10 取消）。
             var testRow = Row();
             _testMode = ActionButton("測試模式", () => StartCoroutine(ToggleTestMode()));
             testRow.Add(_testMode);
             content.Add(testRow);
-            content.Add(Hint("開啟後各站依自己的倍率加快；AGV 交接與空車車速也依設定加快。"));
+            content.Add(Hint("開啟後各站依自己的倍率加快；AGV 交接與車速（空車、載貨）也依設定加快。"));
 
             // 重大事故：某個車型全部離線。平常隱藏，發生時用紅字顯示在最上面。
             _incident = new Label();
@@ -322,7 +329,7 @@ namespace OpenFleet.Unity
             ShowTestMode(settings.TestMode);
             _lotQuantity.highValue = settings.MaxLotQuantity;
             _lotQuantity.value = settings.LotQuantity;
-            _quantityHint.text = $"1～{settings.MaxLotQuantity} 組，一組是上沖、下沖、中模各一；一框 Φ30 裝 30 支、Φ24 裝 45 支（中模一律 30 個），超過就分成多框";
+            _quantityHint.text = $"1～{settings.MaxLotQuantity} 組，一組是上沖、中模、下沖各一；一框 Φ30 裝 30 支、Φ24 裝 45 支（中模跟同組的上下沖相同），超過就分成多框";
 
             SetValue(_pieceHandlingSeconds, settings.PieceHandlingSeconds);
             SetValue(_agvHandoverSeconds, settings.AgvHandoverSeconds);
@@ -331,6 +338,7 @@ namespace OpenFleet.Unity
             SetValue(_changeoverMinutes, settings.ChangeoverSeconds / 60d);
             SetValue(_testHandoverSpeed, settings.TestHandoverSpeed);
             SetValue(_testEmptyVehicleSpeed, settings.TestEmptyVehicleSpeed);
+            SetValue(_testLoadedVehicleSpeed, settings.TestLoadedVehicleSpeed);
             // 這兩個欄位 0 是有意義的值（不產生不良、不反工），不能用 SetValue（它會把 0 當成 1）。
             _defectPercent.value = Mathf.RoundToInt((float)(settings.DefectRate * 100d));
             _maxReworkCount.value = settings.MaxReworkCount;
@@ -346,7 +354,7 @@ namespace OpenFleet.Unity
                 _stepRows.Add(Hint($"{step.Sequence}. {step.StationName}"));
 
                 // 這一站的專用倍率，測試模式開啟時才有作用。
-                var testSpeed = NumberField("測試倍率（×）", 1, 300);
+                var testSpeed = NumberField("測試倍率（×）", 1, MaxTestSpeed);
                 SetValue(testSpeed, step.TestSpeed);
                 _stepRows.Add(testSpeed);
                 _stepAppliers.Add(() => step.TestSpeed = testSpeed.value);
@@ -433,6 +441,7 @@ namespace OpenFleet.Unity
             _settings.ChangeoverSeconds = _changeoverMinutes.value * 60d;
             _settings.TestHandoverSpeed = _testHandoverSpeed.value;
             _settings.TestEmptyVehicleSpeed = _testEmptyVehicleSpeed.value;
+            _settings.TestLoadedVehicleSpeed = _testLoadedVehicleSpeed.value;
             _settings.DefectRate = _defectPercent.value / 100d;
             _settings.MaxReworkCount = _maxReworkCount.value;
             _settings.ReworkBatchMinPieces = _reworkBatchMin.value;

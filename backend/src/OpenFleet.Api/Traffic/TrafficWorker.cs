@@ -59,7 +59,7 @@ public sealed class TrafficWorker(
         }
 
         Dictionary<string, MovementGoal> assignments;
-        double emptySpeedFactor;
+        double emptySpeedFactor, loadedSpeedFactor;
         await using (var scope = scopes.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<OpenFleetDbContext>();
@@ -71,10 +71,12 @@ public sealed class TrafficWorker(
             assignments = (await scope.ServiceProvider.GetRequiredService<TransportService>().GetMovementGoalsAsync(cancellationToken))
                 .ToDictionary(g => g.VehicleId, StringComparer.Ordinal);
 
-            // 測試模式下空車可以開得比較快；倍率跟著放行送給車輛。
-            emptySpeedFactor = await db.ProductionSettings.AsNoTracking()
-                .Select(s => s.TestMode ? s.TestEmptyVehicleSpeed : 1d)
+            // 測試模式下車輛可以開得比較快（空車與載貨各一個倍率）；倍率跟著放行送給車輛。
+            var speeds = await db.ProductionSettings.AsNoTracking()
+                .Select(s => new { Empty = s.TestMode ? s.TestEmptyVehicleSpeed : 1d, Loaded = s.TestMode ? s.TestLoadedVehicleSpeed : 1d })
                 .SingleAsync(cancellationToken);
+            emptySpeedFactor = speeds.Empty;
+            loadedSpeedFactor = speeds.Loaded;
         }
 
         var inputs = vehicles.Select(vehicle =>
@@ -96,6 +98,7 @@ public sealed class TrafficWorker(
         foreach (var (vehicleId, clearance) in traffic.Update(inputs))
         {
             clearance.EmptySpeedFactor = emptySpeedFactor;
+            clearance.LoadedSpeedFactor = loadedSpeedFactor;
             var topic = Topics.Vehicle(publisher.Settings.FactoryId, vehicleId, VehicleChannel.Clearance);
             try
             {

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Production;
+using OpenFleet.Api.Transport;
 using OpenFleet.Contracts;
 using static OpenFleet.Tests.TestDatabase;
 
@@ -226,7 +227,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         {
             var assignment = await DispatchAsync(Online("agv-a"));
             Assert.Equal(attempt, assignment.Attempt);
-            await ApplyAsync(assignment, VehicleEventType.Rejected, "Busy");
+            await ApplyAsync(assignment, VehicleEventType.Rejected, "Blocked");
 
             await using var scope = _database.NewScope();
             var expected = attempt < _database.Fleet.MaxDispatchAttempts ? TransportTaskStatus.Pending : TransportTaskStatus.Failed;
@@ -237,6 +238,48 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         var events = await final.Db.TaskEvents.OrderBy(e => e.Id).Select(e => e.ToStatus).ToListAsync();
         Assert.Equal(TransportTaskStatus.Failed, events[^1]);
         Assert.Equal(3, events.Count(s => s == TransportTaskStatus.Assigned));
+    }
+
+    [Fact]
+    public async Task Busy_vehicle_is_not_a_failure_and_rests_while_another_vehicle_takes_the_task()
+    {
+        // 示範重設之後，車可能還在做後端已經不記得的工作，回報「忙碌」：不算失敗，這台車先休息，任務交給別台。
+        await CreateLotAsync();
+        var first = await DispatchAsync(Online("agv-a"), Online("agv-b"));
+        await ApplyAsync(first, VehicleEventType.Rejected, VehicleRejectReasons.Busy);
+
+        var second = await DispatchAsync(Online("agv-a"), Online("agv-b"));
+        Assert.NotEqual(first.VehicleId, second.VehicleId);
+        await ApplyAsync(second, VehicleEventType.Rejected, VehicleRejectReasons.Busy);
+
+        // 兩台都在休息：這一輪派不出去，任務還在等，不會失敗。
+        await using (var scope = _database.NewScope())
+        {
+            Assert.Equal(0, await scope.Transport.DispatchPendingAsync([Online("agv-a"), Online("agv-b")], default));
+            Assert.Equal(TransportTaskStatus.Pending, (await scope.Db.TransportTasks.SingleAsync()).Status);
+        }
+
+        // 忙碌回報再多次也不會讓任務失敗。
+        for (var i = 0; i < _database.Fleet.MaxDispatchAttempts + 1; i++)
+        {
+            _database.Time.Advance(TransportService.BusyCooldown + TimeSpan.FromSeconds(1));
+            await ApplyAsync(await DispatchAsync(Online("agv-a")), VehicleEventType.Rejected, VehicleRejectReasons.Busy);
+        }
+
+        await using (var scope = _database.NewScope())
+        {
+            Assert.Equal(TransportTaskStatus.Pending, (await scope.Db.TransportTasks.SingleAsync()).Status);
+        }
+
+        // 真正的拒絕還是照次數算：再被拒絕 3 次才失敗。
+        for (var i = 1; i <= _database.Fleet.MaxDispatchAttempts; i++)
+        {
+            _database.Time.Advance(TransportService.BusyCooldown + TimeSpan.FromSeconds(1));
+            await ApplyAsync(await DispatchAsync(Online("agv-a")), VehicleEventType.Rejected, "Blocked");
+            await using var scope = _database.NewScope();
+            var expected = i < _database.Fleet.MaxDispatchAttempts ? TransportTaskStatus.Pending : TransportTaskStatus.Failed;
+            Assert.Equal(expected, (await scope.Db.TransportTasks.SingleAsync()).Status);
+        }
     }
 
     [Fact]
@@ -489,13 +532,13 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
     [Fact]
     public async Task Test_mode_shortens_the_handover_time_in_new_transport_commands()
     {
-        // 測試模式下交接依設定的倍率加快（示範值 40 倍）：30 秒變 0.75 秒。派出的那一刻決定。
+        // 測試模式下交接依設定的倍率加快（示範值 3000 倍）：30 秒變 0.01 秒。派出的那一刻決定。
         await ConfigureAsync(s => s.TestMode = true);
         await CreateLotAsync();
         await DispatchAsync(Online("agv-a"));
 
         await using var scope = _database.NewScope();
-        Assert.Contains("\"handoverSeconds\":0.75", (await scope.Db.OutboxMessages.SingleAsync()).Payload);
+        Assert.Contains("\"handoverSeconds\":0.01", (await scope.Db.OutboxMessages.SingleAsync()).Payload);
     }
 
     [Fact]
@@ -543,14 +586,15 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
             Assert.Equal(new[] { (150, 300, 0, 14400d), (150, 300, 0, 28800d), (1, 40, 56, 3600d) },
                 defaults.Steps.Where(step => step.Kind == ProcessStepKind.Batch)
                     .Select(step => (step.BatchMinPieces, step.BatchMaxPieces, step.BatchMaxPiecesRod24, step.BatchSeconds)));
-            // 包好的出貨箱送到出貨站；貨車每小時一班，測試模式 60 倍。
-            Assert.Equal(("shipping", 3600d, 60d), (defaults.BufferStationCode, defaults.TruckIntervalSeconds, defaults.TestTruckSpeed));
+            // 包好的出貨箱送到出貨站；貨車每小時一班，測試模式和各站一樣 3000 倍。
+            Assert.Equal(("shipping", 3600d, 3000d), (defaults.BufferStationCode, defaults.TruckIntervalSeconds, defaults.TestTruckSpeed));
             // 品管：不良率 10%，同一支最多反工 1 次。
             Assert.Equal((0.1, 1), (defaults.DefectRate, defaults.MaxReworkCount));
-            // 測試模式預設關閉；各站的專用倍率：切料 80、粗加工與精加工 80、淬火與回火 250、電鍍 60、拋光 10、品管 20、包裝 20；AGV 交接 40、空車 2。
+            // 測試模式預設關閉；各站的專用倍率與 AGV 交接都是 3000（使用者 2026-10-22：一個流程約 2～3 分鐘）；空車與載貨都 5 倍。
             Assert.False(defaults.TestMode);
-            Assert.Equal(new[] { 80d, 80d, 80d, 250d, 250d, 60d, 10d, 20d, 20d }, defaults.Steps.Select(step => step.TestSpeed));
-            Assert.Equal((600d, 40d, 2d), (defaults.ChangeoverSeconds, defaults.TestHandoverSpeed, defaults.TestEmptyVehicleSpeed));
+            Assert.All(defaults.Steps, step => Assert.Equal(3000d, step.TestSpeed));
+            Assert.Equal((600d, 3000d, 5d, 5d),
+                (defaults.ChangeoverSeconds, defaults.TestHandoverSpeed, defaults.TestEmptyVehicleSpeed, defaults.TestLoadedVehicleSpeed));
             Assert.Equal((5d, 30d, 90d, 50, true),
                 (defaults.PieceHandlingSeconds, defaults.AgvHandoverSeconds, defaults.ToolChangeSeconds, defaults.ToolRequestThresholdPieces, defaults.ToolDeliveryEnabled));
         }
@@ -574,7 +618,7 @@ public sealed class MaterialFlowTests(PostgresFixture postgres) : IAsyncLifetime
         await Invalid(s => s.LotQuantity = 301);
         await Invalid(s => s.Steps[2].SecondsPerPiece = 0);
         await Invalid(s => s.Steps[2].TestSpeed = 0.5);
-        await Invalid(s => s.Steps[2].TestSpeed = 1001);
+        await Invalid(s => s.Steps[2].TestSpeed = 5001);
         await Invalid(s => s.ChangeoverSeconds = -1);
         await Invalid(s => s.TestHandoverSpeed = 0);
         await Invalid(s => s.TestEmptyVehicleSpeed = 6);

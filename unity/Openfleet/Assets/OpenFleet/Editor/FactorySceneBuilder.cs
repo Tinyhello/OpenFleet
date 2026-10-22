@@ -261,8 +261,8 @@ namespace OpenFleet.Unity.Editor
 
         private static void BuildChargingArea(Transform root)
         {
-            FloorFrame(root, "Zone", Vector3.zero, new Vector2(7.6f, 3.6f), 0.06f, Palette.ChargerLight);
-            foreach (var x in new[] { -2.3f, 0f, 2.3f })
+            FloorFrame(root, "Zone", Vector3.zero, new Vector2(11.0f, 3.6f), 0.06f, Palette.ChargerLight);
+            foreach (var x in FactoryLayout.ChargingBayOffsets)
             {
                 Model(root, "ChargingBay", new Vector3(x, 0f, 0f));
             }

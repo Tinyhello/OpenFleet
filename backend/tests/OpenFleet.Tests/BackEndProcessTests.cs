@@ -214,6 +214,26 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
+    public async Task In_test_mode_a_short_load_runs_once_nothing_else_is_coming()
+    {
+        // 使用者 2026-10-22：測試模式下，淬火與回火沒有其他料會再來時不滿 150 支也開爐。
+        await ConfigureAsync(settings => settings.TestMode = true);
+        await ArriveAsync("heat", 3, "B-A", 30);
+        await AdvanceAsync(0);
+        Assert.True((await StationAsync("heat")).Batch!.Running);
+    }
+
+    [Fact]
+    public async Task In_test_mode_a_short_load_still_waits_while_more_material_is_coming()
+    {
+        await ConfigureAsync(settings => settings.TestMode = true);
+        await ArriveAsync("heat", 3, "B-A", 30);
+        await ArriveAsync("fine", 2, "B-B", 10);
+        await AdvanceAsync(0);
+        Assert.False((await StationAsync("heat")).Batch!.Running);
+    }
+
+    [Fact]
     public async Task Plating_rework_waits_for_thirty_pieces_and_then_runs_like_any_other_load()
     {
         // 回來重鍍的 20 支在電鍍站等；還有一框在拋光（之後可能也會被判鍍層不良），所以不到 30 支先不開。

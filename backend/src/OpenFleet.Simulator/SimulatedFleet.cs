@@ -17,7 +17,8 @@ public sealed class SimulatedFleet
     private const double ArrivalTolerance = 1e-9;
 
     /// <summary>設備端自己的上限：後端要求的空車倍率再大也不超過這個值。</summary>
-    private const double MaxEmptySpeedFactor = 5;
+    /// <summary>測試模式的車速倍率上限（空車與載貨相同）：再快交通控制的放行會跟不上。</summary>
+    private const double MaxSpeedFactor = 5;
 
     /// <summary>離交接點多近算是到了（公尺）。</summary>
     private const double HandoffTolerance = 0.05;
@@ -114,7 +115,8 @@ public sealed class SimulatedFleet
 
             vehicle.Revision = clearance.Revision;
             // 寫成「在範圍內才採用」，NaN 與小於 1 的值都當成 1。
-            vehicle.EmptySpeedFactor = clearance.EmptySpeedFactor >= 1 ? Math.Min(clearance.EmptySpeedFactor, MaxEmptySpeedFactor) : 1;
+            vehicle.EmptySpeedFactor = clearance.EmptySpeedFactor >= 1 ? Math.Min(clearance.EmptySpeedFactor, MaxSpeedFactor) : 1;
+            vehicle.LoadedSpeedFactor = clearance.LoadedSpeedFactor >= 1 ? Math.Min(clearance.LoadedSpeedFactor, MaxSpeedFactor) : 1;
             vehicle.Path = clearance.Path.Select(Copy).ToList();
             vehicle.Released = Math.Clamp(clearance.ReleasedCount, vehicle.Reached, vehicle.Path.Count);
         }
@@ -144,7 +146,7 @@ public sealed class SimulatedFleet
 
             if (_time.GetUtcNow() > command.ExpiresAt)
             {
-                Emit(source, VehicleEventType.Rejected, "Expired");
+                Emit(source, VehicleEventType.Rejected, VehicleRejectReasons.Expired);
                 return false;
             }
 
@@ -161,7 +163,7 @@ public sealed class SimulatedFleet
 
                 case VehicleCommandType.Transport when vehicle.Job is not null:
                     // 搬運中不接受另一筆搬運：物料還在車上或正要去取。
-                    Emit(source, VehicleEventType.Rejected, "Busy");
+                    Emit(source, VehicleEventType.Rejected, VehicleRejectReasons.Busy);
                     break;
 
                 case VehicleCommandType.Transport:
@@ -210,7 +212,7 @@ public sealed class SimulatedFleet
 
     /// <summary>
     /// 目前的車速：空車最快，載貨越多越慢，滿載時是 FullLoadSpeed。
-    /// 空車時再乘上後端在放行裡指定的倍率（測試模式）。
+    /// 再乘上後端在放行裡指定的倍率（測試模式；空車與載貨各一個）。
     /// </summary>
     private double SpeedFor(SimulatedVehicle vehicle)
     {
@@ -220,7 +222,7 @@ public sealed class SimulatedFleet
         }
 
         var loadRatio = Math.Clamp((double)vehicle.LoadQuantity / _settings.LoadCapacity, 0, 1);
-        return _settings.Speed + (_settings.FullLoadSpeed - _settings.Speed) * loadRatio;
+        return (_settings.Speed + (_settings.FullLoadSpeed - _settings.Speed) * loadRatio) * vehicle.LoadedSpeedFactor;
     }
 
     /// <summary>推進一台車，回傳這一步是否在移動。</summary>
@@ -388,6 +390,7 @@ public sealed class SimulatedFleet
         public Guid? PlanId { get; set; }
         public long Revision { get; set; }
         public double EmptySpeedFactor { get; set; } = 1;
+        public double LoadedSpeedFactor { get; set; } = 1;
         public List<Position3> Path { get; set; } = [];
 
         /// <summary>可以開到 Path[Released - 1]。</summary>

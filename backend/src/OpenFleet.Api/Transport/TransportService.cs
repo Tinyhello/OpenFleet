@@ -52,6 +52,14 @@ public sealed class TransportService(
             .Where(a => Assignment.ActiveStatuses.Contains(a.Status))
             .Select(a => a.VehicleId)
             .ToListAsync(cancellationToken);
+
+        // 剛回報「忙碌」的車（還在做後端不記得的工作，例如示範重設前派出的）先休息一下，任務交給別台車。
+        var restingSince = time.GetUtcNow() - BusyCooldown;
+        busy.AddRange(await db.Assignments
+            .Where(a => a.Status == AssignmentStatus.Rejected && a.Reason == VehicleRejectReasons.Busy && a.ClosedAt > restingSince)
+            .Select(a => a.VehicleId)
+            .Distinct()
+            .ToListAsync(cancellationToken));
         var types = await db.Vehicles
             .Where(v => v.DispatchEnabled)
             .ToDictionaryAsync(v => v.Id, v => v.Type, cancellationToken);
@@ -192,11 +200,18 @@ public sealed class TransportService(
                 Accept();
                 break;
 
+            case VehicleEventType.Rejected when assignment.IsAwaitingReply && vehicleEvent.Reason == VehicleRejectReasons.Busy:
+                // 車還在做別的事（例如示範重設前派出的工作）：車本身沒問題，不算一次失敗。任務回到待派工，這台車先休息 BusyCooldown。
+                assignment.Close(AssignmentStatus.Rejected, vehicleEvent.Reason, now);
+                task.Requeue(assignment, vehicleEvent.Reason, now);
+                break;
+
             case VehicleEventType.Rejected when assignment.IsAwaitingReply:
                 assignment.Close(AssignmentStatus.Rejected, vehicleEvent.Reason, now);
-                if (assignment.Attempt >= fleetOptions.Value.MaxDispatchAttempts)
+                var failures = await FailedAttemptsAsync(task.Id, cancellationToken) + 1;
+                if (failures >= fleetOptions.Value.MaxDispatchAttempts)
                 {
-                    task.Fail(assignment, $"Rejected {assignment.Attempt} time(s): {vehicleEvent.Reason}", now);
+                    task.Fail(assignment, $"Rejected {failures} time(s): {vehicleEvent.Reason}", now);
                 }
                 else
                 {
@@ -241,7 +256,7 @@ public sealed class TransportService(
                 break;
 
             case VehicleEventType.Failed when assignment.IsActive:
-                FailAssignment(assignment, vehicleEvent.Reason, now);
+                await FailAssignmentAsync(assignment, vehicleEvent.Reason, now, cancellationToken);
                 break;
 
             default:
@@ -261,18 +276,30 @@ public sealed class TransportService(
         }
     }
 
+    /// <summary>車輛回報「忙碌」後，這台車多久不派新工作。</summary>
+    public static readonly TimeSpan BusyCooldown = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// 這個任務之前真正失敗過幾次（被拒絕或執行失敗）。回報「忙碌」的不算：車沒有問題，只是當時沒空。
+    /// 還沒存檔的這一次由呼叫端自己加上。
+    /// </summary>
+    private Task<int> FailedAttemptsAsync(Guid taskId, CancellationToken cancellationToken) =>
+        db.Assignments.CountAsync(a => a.TaskId == taskId
+            && (a.Status == AssignmentStatus.Rejected || a.Status == AssignmentStatus.Failed)
+            && (a.Reason == null || a.Reason != VehicleRejectReasons.Busy), cancellationToken);
+
     /// <summary>
     /// 一趟搬運失敗之後怎麼辦，依「物料在哪裡」決定：
     /// 還沒取料 → 物料還在取料站，任務回到等待中重新派工（次數用完才標記失敗）。
     /// 已經取料 → 物料在車上，系統無法確認實際狀況，標記失敗等人工處理。
     /// </summary>
-    private void FailAssignment(Assignment assignment, string? reason, DateTimeOffset now)
+    private async Task FailAssignmentAsync(Assignment assignment, string? reason, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var task = assignment.Task;
         var loaded = assignment.IsLoaded;
         assignment.Close(AssignmentStatus.Failed, reason, now);
 
-        if (!loaded && assignment.Attempt < fleetOptions.Value.MaxDispatchAttempts)
+        if (!loaded && await FailedAttemptsAsync(task.Id, cancellationToken) + 1 < fleetOptions.Value.MaxDispatchAttempts)
         {
             task.Requeue(assignment, reason, now);
             logger.LogWarning("Assignment {AssignmentId} on {VehicleId} failed before pickup ({Reason}); task {TaskId} will be dispatched again.",
@@ -280,7 +307,7 @@ public sealed class TransportService(
         }
         else
         {
-            task.Fail(assignment, loaded ? $"Failed with the load on {assignment.VehicleId}: {reason}" : $"Failed {assignment.Attempt} time(s): {reason}", now);
+            task.Fail(assignment, loaded ? $"Failed with the load on {assignment.VehicleId}: {reason}" : $"Failed before pickup: {reason}", now);
             logger.LogError("Task {TaskId} ({From} -> {To}) failed on {VehicleId} and needs attention: {Reason}.",
                 task.Id, task.FromStationCode, task.ToStationCode, assignment.VehicleId, task.FailureReason);
         }
@@ -323,7 +350,7 @@ public sealed class TransportService(
             assignment.MarkMissing(now);
             if (now - assignment.MissingSince >= fleetOptions.Value.LostCommandGrace)
             {
-                FailAssignment(assignment, "Vehicle no longer reports this command", now);
+                await FailAssignmentAsync(assignment, "Vehicle no longer reports this command", now, cancellationToken);
                 lost++;
             }
         }

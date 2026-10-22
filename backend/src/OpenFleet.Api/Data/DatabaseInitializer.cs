@@ -45,41 +45,51 @@ public static class DatabaseInitializer
     /// 電鍍一爐 30 mm 最多 40 支／24 mm 最多 56 支可以混夾，都是使用者提供的數值；
     /// 電鍍一爐 1 小時、拋光每支 20 秒是 Claude 提議、使用者同意先用的示範值。
     /// 回火的開爐條件沿用淬火的 150～300 支、電鍍有料就開（下限 1 支），是 Claude 的推定，待使用者確認。
-    /// 品管逐支全檢、每支 60 秒是使用者提供的數值（2026-10-10）；品管的測試倍率 20 是 Claude 挑的。
-    /// 包裝逐支、每支 60 秒是使用者提供的數值（2026-10-10）；包裝的測試倍率 20 是 Claude 挑的。
-    /// 測試模式的專用倍率（TestSpeed）：粗加工與精加工 80（原本 20，使用者 2026-10-10 改）、淬火與回火 250 是使用者指定的；電鍍 60、拋光 10 是 Claude 挑的。面板可以改。
+    /// 品管逐支全檢、每支 60 秒是使用者提供的數值（2026-10-10）。
+    /// 包裝逐支、每支 60 秒是使用者提供的數值（2026-10-10）。
+    /// 測試模式的專用倍率（TestSpeed）：P5 起每一站都是 <see cref="DemoTestSpeed"/>（使用者 2026-10-22：同其他機台的加速比例，讓一個流程約 2～3 分鐘看完）；
+    /// P4 時是粗加工與精加工 80、淬火與回火 250、電鍍 60、拋光 10、品管與包裝 20。面板可以逐站改。
     /// </summary>
     private static readonly ProcessStep[] DemoSteps =
     [
         // 切料：使用者 2026-10-22 要有切料站、切一支約 5 分鐘。排在第 0 道，只有從圓棒切的框會經過；
-        // 測試倍率 80 比照車床，是 Claude 挑的。待加工與完工容量 30 也比照車床。
-        new() { Sequence = 0, StationCode = "cutting", Kind = ProcessStepKind.Piece, SecondsPerPiece = 300, IsCutting = true, TestSpeed = 80 },
-        new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = 80 },
-        new() { Sequence = 2, StationCode = "fine", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, UsesTool = true, ToolLifePieces = 250, TestSpeed = 80 },
+        // 待加工與完工容量 30 比照車床，是 Claude 挑的。
+        new() { Sequence = 0, StationCode = "cutting", Kind = ProcessStepKind.Piece, SecondsPerPiece = 300, IsCutting = true, TestSpeed = DemoTestSpeed },
+        new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30, UsesTool = true, ToolLifePieces = 500, TestSpeed = DemoTestSpeed },
+        new() { Sequence = 2, StationCode = "fine", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, UsesTool = true, ToolLifePieces = 250, TestSpeed = DemoTestSpeed },
         new()
         {
             Sequence = 3, StationCode = "heat", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300,
-            BatchSeconds = 4 * 3600, StageName = "淬火", TestSpeed = 250,
+            BatchSeconds = 4 * 3600, StageName = "淬火", TestSpeed = DemoTestSpeed,
         },
         new()
         {
             Sequence = 4, StationCode = "temper", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300,
-            BatchSeconds = 8 * 3600, StageName = "回火", TestSpeed = 250,
+            BatchSeconds = 8 * 3600, StageName = "回火", TestSpeed = DemoTestSpeed,
         },
         new()
         {
             Sequence = 5, StationCode = "plating", Kind = ProcessStepKind.Batch, BatchMinPieces = 1, BatchMaxPieces = 40, BatchMaxPiecesRod24 = 56,
-            BatchSeconds = 3600, StageName = "電鍍", TestSpeed = 60,
+            BatchSeconds = 3600, StageName = "電鍍", TestSpeed = DemoTestSpeed,
         },
-        new() { Sequence = 6, StationCode = "polish", Kind = ProcessStepKind.Piece, SecondsPerPiece = 20, TestSpeed = 10 },
-        new() { Sequence = 7, StationCode = "qc", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, IsInspection = true, TestSpeed = 20 },
-        new() { Sequence = 8, StationCode = "packing", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, IsPacking = true, TestSpeed = 20 },
+        new() { Sequence = 6, StationCode = "polish", Kind = ProcessStepKind.Piece, SecondsPerPiece = 20, TestSpeed = DemoTestSpeed },
+        new() { Sequence = 7, StationCode = "qc", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, IsInspection = true, TestSpeed = DemoTestSpeed },
+        new() { Sequence = 8, StationCode = "packing", Kind = ProcessStepKind.Piece, SecondsPerPiece = 60, IsPacking = true, TestSpeed = DemoTestSpeed },
     ];
+
+    /// <summary>
+    /// 測試模式下每一站與貨車的倍率（使用者 2026-10-22：同其他機台的加速比例，讓一個流程約 2～3 分鐘看完）。
+    /// 量測過：各站 1000 倍時，面板預設的 30 組要 199 秒，其中淬火與回火占 44 秒；3000 倍時兩爐約 15 秒。面板可以逐站修改。
+    /// </summary>
+    public const double DemoTestSpeed = 3000;
+
+    /// <summary>測試模式下車輛的倍率：空車與載貨都快 5 倍（使用者 2026-10-22；5 是交通控制的上限）。</summary>
+    public const double DemoTestVehicleSpeed = 5;
 
     /// <summary>包好的出貨箱送到出貨站等貨車。</summary>
     private const string DemoBufferStation = "shipping";
 
-    /// <summary>貨車每小時來一次、測試模式 60 倍（1 分鐘一班）：Claude 挑的示範值，待使用者確認。</summary>
+    /// <summary>貨車每小時來一次（Claude 挑的示範值，待使用者確認）；測試模式下和各站一樣用 <see cref="DemoTestSpeed"/>。</summary>
     private const double DemoTruckIntervalSeconds = 3600;
 
     /// <summary>
@@ -198,17 +208,18 @@ public static class DatabaseInitializer
                 ToolChangeSeconds = 90,
                 ToolRequestThresholdPieces = 50,
                 ToolDeliveryEnabled = true,
-                // 使用者 2026-10-10：機床換線約 10 分鐘；測試模式下 AGV 交接 40 倍、空車車速 2 倍。
+                // 使用者 2026-10-10：機床換線約 10 分鐘。測試模式下 AGV 交接和各站同一個倍率、車速 5 倍（使用者 2026-10-22）。
                 ChangeoverSeconds = 600,
-                TestHandoverSpeed = 40,
-                TestEmptyVehicleSpeed = 2,
+                TestHandoverSpeed = DemoTestSpeed,
+                TestEmptyVehicleSpeed = DemoTestVehicleSpeed,
+                TestLoadedVehicleSpeed = DemoTestVehicleSpeed,
                 // 使用者 2026-10-10：示範用不良率 10%，同一支最多反工 1 次。
                 DefectRate = 0.1,
                 MaxReworkCount = 1,
                 // 使用者 2026-10-10：鍍層不良的反工品最少 30 支才重新電鍍。
                 ReworkBatchMinPieces = 30,
                 TruckIntervalSeconds = DemoTruckIntervalSeconds,
-                TestTruckSpeed = 60,
+                TestTruckSpeed = DemoTestSpeed,
             });
         }
 

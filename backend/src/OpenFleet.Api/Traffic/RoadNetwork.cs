@@ -163,7 +163,11 @@ public static class DemoRoadNetwork
     /// <summary>下排七站（切料、原料倉到電鍍）與上排五站（出貨、成品倉、包裝、品管、拋光）的位置；上排的 12 是雜物倉庫，沒有交接點。</summary>
     private static readonly double[] BottomColumns = [-28, -20, -12, -4, 4, 12, 20];
     private static readonly double[] TopColumns = [-20, -12, -4, 4, 20];
-    private static readonly double[] ParkingColumns = [-10.3, -8, -5.7];
+    /// <summary>
+    /// 充電車位：示範車隊 4 台大型車加 1 台小型車（使用者 2026-10-22：大型車從 2 台加到 4 台），一台一格。
+    /// 新加的兩格在原本三格的西邊；最西那格離內圈車道 -16 的節點 1.6 m（一台大型車長），所以間距比其他格小。
+    /// </summary>
+    private static readonly double[] ParkingColumns = [-14.4, -12.6, -10.3, -8, -5.7];
 
     public static string Code(double x, double z) => FormattableString.Invariant($"{x:0.##},{z:0.##}");
 
@@ -201,7 +205,7 @@ public static class DemoRoadNetwork
 
         // 內圈車道：轉角兼作最外側兩站的連接點；上邊多了三個充電車位的出入口。
         double[] innerBottomXs = [-24, -20, -16, -12, -8, -4, 0, 4, 8, 12, 16];
-        double[] innerTopXs = [16, 12, 8, 4, 0, -5.7, -8, -10.3, -16, -20, -24];
+        double[] innerTopXs = [16, 12, 8, 4, 0, -5.7, -8, -10.3, -12.6, -14.4, -16, -20, -24];
         var inner = new List<string> { Add(InnerWestX, -InnerZ) };
         inner.AddRange(innerBottomXs.Select(x => Add(x, -InnerZ)));
         inner.AddRange([Add(InnerEastX, -InnerZ), Add(InnerEastX, 0), Add(InnerEastX, InnerZ)]);

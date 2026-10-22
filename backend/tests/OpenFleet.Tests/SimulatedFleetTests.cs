@@ -185,7 +185,7 @@ public class SimulatedFleetTests
     }
 
     [Fact]
-    public void Empty_vehicle_drives_faster_by_the_factor_in_the_clearance_but_a_loaded_one_does_not()
+    public void Empty_and_loaded_vehicles_drive_faster_by_their_own_factors_in_the_clearance()
     {
         // 測試模式：後端在放行裡指定空車 2 倍。空車 1 m/s 變 2 m/s；超出設備上限或不合理的值不採用。
         _fleet.HandleCommand("agv", Transport(loadQuantity: 15, handoverSeconds: 1));
@@ -195,7 +195,7 @@ public class SimulatedFleetTests
         var empty = Advance(0.5);
         Assert.Equal((2d, 1d), (empty.Speed, empty.Position.X));
 
-        // 取料後載著 15 件（半載）：車速照舊是 0.75 m/s，不乘倍率。
+        // 取料後載著 15 件（半載）：0.75 m/s。空車倍率不影響載貨，載貨有自己的倍率（使用者 2026-10-22：載貨也加快）。
         Advance(1);
         Advance(1.5);
         var toDropoff = Clearance(Guid.NewGuid(), 1, 5, ToDropoff);
@@ -203,6 +203,17 @@ public class SimulatedFleetTests
         _fleet.ApplyClearance("agv", toDropoff);
         var loaded = Advance(1);
         Assert.Equal((15, 0.75), (loaded.LoadQuantity, loaded.Speed));
+
+        var faster = Clearance(Guid.NewGuid(), 1, 5, ToDropoff);
+        faster.LoadedSpeedFactor = 3;
+        _fleet.ApplyClearance("agv", faster);
+        Assert.Equal(2.25, Advance(0.1).Speed, 6);
+
+        // 超過上限 5 倍的只用到 5 倍。
+        var tooFast = Clearance(Guid.NewGuid(), 1, 5, ToDropoff);
+        tooFast.LoadedSpeedFactor = 50;
+        _fleet.ApplyClearance("agv", tooFast);
+        Assert.Equal(3.75, Advance(0.1).Speed, 6);
     }
 
     [Fact]

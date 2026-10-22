@@ -61,7 +61,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `POST /api/vehicles/{id}/ping` | P1 通訊驗證指令 |
 | `GET /api/stations` | 站點與交接點座標 |
 | `GET /api/stations/status` | 每站的備料區、成品區件數與容量、加工進度、刀具狀態；整爐工序的站另有開爐門檻、這一爐的階段與剩餘時間（顯示端輪詢用） |
-| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具、機床換線時間；測試模式的開關與倍率（各站、AGV 交接、空車車速）；逐件工序的每件加工秒數與刀具壽命；整爐工序的開爐下限、一爐上限（電鍍依桿徑）與時間；品管的不良率、反工上限與反工重鍍的下限；貨車間隔。PUT 是整份取代，不合規則回 400 |
+| `GET /api/settings`、`PUT /api/settings` | 示範設定：批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、是否配送刀具、機床換線時間；測試模式的開關與倍率（各站、AGV 交接、空車與載貨車速、貨車）；逐件工序的每件加工秒數與刀具壽命；整爐工序的開爐下限、一爐上限（電鍍依桿徑）與時間；品管的不良率、反工上限與反工重鍍的下限；貨車間隔。PUT 是整份取代，不合規則回 400 |
 | `POST /api/lots` | 模擬收料：在原料倉建立一個批次。可帶 `{"quantity": 組數, "rodDiameterMm": 24 或 30, "partCodes": [...]}`；一組是上沖、下沖、中模各一（`partCodes` 可以只做其中幾種），每一種零件依料框容量分成多框，每一框各建立一趟搬運。回應是每一框 |
 | `GET /api/lots`、`GET /api/lots/{id}` | 料框清單（同一批次的框有相同的 `batchNumber`）；單一框的完整追蹤 |
 | `GET /api/transport-tasks`、`GET /api/transport-tasks/{id}`、`.../{id}/events` | 搬運任務、派工狀態與狀態歷史。`needsAttention` 為 true 表示搬運失敗、等人工處理 |
@@ -78,9 +78,9 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 
 | 設定 | 位置 | 內容 |
 | --- | --- | --- |
-| 車輛清單 | 模擬器 `Simulator:VehicleIds` | `agv-01`、`agv-02`、`agv-03` |
-| 車型 | 後端 `Fleet:VehicleTypes` | `agv-01`、`agv-02` 為 `Large`，`agv-03` 為 `Small`；啟動時寫入 `Vehicles` 資料表 |
-| 派工車輛 | 後端 `Fleet:DispatchVehicleIds` | `agv-01`、`agv-02`（兩台大型車） |
+| 車輛清單 | 模擬器 `Simulator:VehicleIds` | `agv-01` ～ `agv-05` |
+| 車型 | 後端 `Fleet:VehicleTypes` | `agv-01`、`agv-02`、`agv-04`、`agv-05` 為 `Large`，`agv-03` 為 `Small`；啟動時寫入 `Vehicles` 資料表 |
+| 派工車輛 | 後端 `Fleet:DispatchVehicleIds` | 五台都派工：大型車搬料、小型車送刀具（P5 起大型車從 2 台加到 4 台） |
 | 待命車位 | 後端 `Fleet:Parking` | 充電維護區的 3 個車位；沒有任務的車會被引導回去 |
 | 起始位置 | 模擬器 `Simulator:StartPositions` | 各車的充電車位 |
 | 路網 | 資料庫 `RouteNodes`／`RouteEdges`（`DemoRoadNetwork` 建立） | 內外兩條車道、車道間的連接、站點與車位的支線；須與 Unity `FactoryLayout` 的車道位置相同 |

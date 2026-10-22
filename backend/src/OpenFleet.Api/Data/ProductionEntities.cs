@@ -271,6 +271,9 @@ public sealed class ProductionSettings
     /// <summary>測試模式下空車車速的倍率。使用者 2026-10-10：空車可以再快 2 倍。</summary>
     public double TestEmptyVehicleSpeed { get; set; } = 1;
 
+    /// <summary>測試模式下載貨時的車速倍率（使用者 2026-10-22：測試模式下空車與載貨都快 5 倍）。</summary>
+    public double TestLoadedVehicleSpeed { get; set; } = 1;
+
     /// <summary>某一站目前實際採用的倍率。</summary>
     public double SpeedOf(ProcessStep step) => TestMode ? step.TestSpeed : 1;
 

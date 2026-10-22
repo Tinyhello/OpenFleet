@@ -266,6 +266,9 @@ namespace OpenFleet.Contracts
         /// <summary>測試模式下空車車速的倍率；載貨時的車速不變。</summary>
         public double TestEmptyVehicleSpeed { get; set; } = 1;
 
+        /// <summary>測試模式下載貨時的車速倍率（1～5）。</summary>
+        public double TestLoadedVehicleSpeed { get; set; } = 1;
+
         /// <summary>品管的不良率（0～1），示範用：每一支以這個機率被判不良，三種原因機率相同。</summary>
         public double DefectRate { get; set; }
 

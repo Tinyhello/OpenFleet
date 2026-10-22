@@ -220,6 +220,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
             var settings = await scope.Production.GetSettingsAsync(default);
             settings.TruckIntervalSeconds = 600;
             settings.TestMode = true;
+            settings.TestTruckSpeed = 60;
             await scope.Production.UpdateSettingsAsync(settings, default);
         }
 
