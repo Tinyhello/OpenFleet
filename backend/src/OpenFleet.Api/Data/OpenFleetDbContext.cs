@@ -33,6 +33,10 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<PunchSpec> PunchSpecs => Set<PunchSpec>();
     public DbSet<Item> Items => Set<Item>();
     public DbSet<BomVersion> BomVersions => Set<BomVersion>();
+    public DbSet<StockBalance> StockBalances => Set<StockBalance>();
+    public DbSet<StockReservation> StockReservations => Set<StockReservation>();
+    public DbSet<StockMovement> StockMovements => Set<StockMovement>();
+    public DbSet<PurchaseOrder> PurchaseOrders => Set<PurchaseOrder>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
@@ -50,6 +54,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         configuration.Properties<TaskResolution>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<ProcessStepKind>().HaveConversion<string>().HaveMaxLength(32);
         configuration.Properties<ItemKind>().HaveConversion<string>().HaveMaxLength(32);
+        configuration.Properties<StockMovementReason>().HaveConversion<string>().HaveMaxLength(32);
+        configuration.Properties<PurchaseOrderStatus>().HaveConversion<string>().HaveMaxLength(32);
     }
 
     protected override void OnModelCreating(ModelBuilder model)
@@ -111,6 +117,58 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.HasIndex(l => new { l.BomVersionId, l.ChildItemCode }).IsUnique();
             e.HasOne<Item>().WithMany().HasForeignKey(l => l.ChildItemCode).OnDelete(DeleteBehavior.Restrict);
             e.ToTable(t => t.HasCheckConstraint("CK_BomLines_Quantity", "\"Quantity\" > 0"));
+        });
+
+        model.Entity<StockBalance>(e =>
+        {
+            e.Property(b => b.Id).ValueGeneratedNever();
+            e.Property(b => b.ItemCode).HasMaxLength(48);
+            e.Property(b => b.StationCode).HasMaxLength(32);
+            e.Property(b => b.Version).IsRowVersion();
+            e.Ignore(b => b.Available);
+            // 一個品項在一個站點只有一列；兩邊同時建立第一列時由資料庫擋下其中一個。
+            e.HasIndex(b => new { b.ItemCode, b.StationCode }).IsUnique();
+            e.HasOne<Item>().WithMany().HasForeignKey(b => b.ItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Station>().WithMany().HasForeignKey(b => b.StationCode).OnDelete(DeleteBehavior.Restrict);
+            // 程式寫錯時由資料庫擋下：不會是負數，保留的不會比在庫多。
+            e.ToTable(t => t.HasCheckConstraint("CK_StockBalances_Quantities",
+                "\"OnHand\" >= 0 AND \"Reserved\" >= 0 AND \"Reserved\" <= \"OnHand\""));
+        });
+
+        model.Entity<StockReservation>(e =>
+        {
+            e.Property(r => r.Id).ValueGeneratedNever();
+            e.Property(r => r.ItemCode).HasMaxLength(48);
+            e.Property(r => r.Reference).HasMaxLength(64);
+            e.HasIndex(r => r.Reference);
+            e.HasOne<StockBalance>().WithMany().HasForeignKey(r => r.StockBalanceId).OnDelete(DeleteBehavior.Cascade);
+            e.ToTable(t => t.HasCheckConstraint("CK_StockReservations_Quantity",
+                "\"Quantity\" > 0 AND \"Remaining\" >= 0 AND \"Remaining\" <= \"Quantity\""));
+        });
+
+        model.Entity<StockMovement>(e =>
+        {
+            e.Property(m => m.ItemCode).HasMaxLength(48);
+            e.Property(m => m.StationCode).HasMaxLength(32);
+            e.Property(m => m.Reference).HasMaxLength(64);
+            e.HasIndex(m => new { m.ItemCode, m.Id });
+            e.HasOne<Item>().WithMany().HasForeignKey(m => m.ItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<Station>().WithMany().HasForeignKey(m => m.StationCode).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        model.Entity<PurchaseOrder>(e =>
+        {
+            e.Property(o => o.Id).ValueGeneratedNever();
+            e.Property(o => o.Number).HasMaxLength(32);
+            e.Property(o => o.ItemCode).HasMaxLength(48);
+            e.Property(o => o.Supplier).HasMaxLength(64);
+            e.Property(o => o.RequestKey).HasMaxLength(64);
+            e.Property(o => o.Version).IsRowVersion();
+            e.HasIndex(o => o.Number).IsUnique();
+            e.HasIndex(o => o.RequestKey).IsUnique().HasFilter("\"RequestKey\" IS NOT NULL");
+            e.HasIndex(o => new { o.Status, o.ItemCode });
+            e.HasOne<Item>().WithMany().HasForeignKey(o => o.ItemCode).OnDelete(DeleteBehavior.Restrict);
+            e.ToTable(t => t.HasCheckConstraint("CK_PurchaseOrders_Quantity", "\"Quantity\" > 0"));
         });
 
         model.Entity<Station>(e =>

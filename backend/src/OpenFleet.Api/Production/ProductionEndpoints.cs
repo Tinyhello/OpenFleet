@@ -112,7 +112,7 @@ public static class ProductionEndpoints
             return Results.Created("/api/lots", bins.Select(ToDto).ToList());
         });
 
-        // 示範用：清掉所有批次與搬運資料（含刀具配送）並把刀具計數歸零（設定、站點、車輛保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
+        // 示範用：清掉所有批次與搬運資料（含刀具配送）並把刀具計數歸零，庫存與採購回到初始值（設定、站點、車輛、規格保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
         api.MapPost("/demo/reset", async (OpenFleetDbContext db, ILoggerFactory loggers, CancellationToken ct) =>
         {
             await db.Database.ExecuteSqlRawAsync("""TRUNCATE "Lots", "TransportTasks", "OutboxMessages", "InboxMessages" CASCADE""", ct);
@@ -122,7 +122,11 @@ public static class ProductionEndpoints
             // 貨車從頭倒數。
             await db.Database.ExecuteSqlRawAsync(
                 """UPDATE "TruckSchedules" SET "RemainingSeconds" = (SELECT "TruckIntervalSeconds" FROM "ProductionSettings"), "AccruedAt" = NULL, "LastArrivedAt" = NULL""", ct);
-            loggers.CreateLogger(nameof(ProductionEndpoints)).LogWarning("Demo data reset: lots, tasks, movements, outbox and inbox cleared.");
+            // 庫存與採購回到示範的初始值。
+            await db.Database.ExecuteSqlRawAsync("""TRUNCATE "StockReservations", "StockMovements", "StockBalances", "PurchaseOrders" """, ct);
+            await DatabaseInitializer.SeedInventoryAsync(db);
+            await db.SaveChangesAsync(ct);
+            loggers.CreateLogger(nameof(ProductionEndpoints)).LogWarning("Demo data reset: lots, tasks, movements, stock, purchase orders, outbox and inbox cleared.");
             return Results.NoContent();
         });
 

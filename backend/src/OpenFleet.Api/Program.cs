@@ -1,4 +1,5 @@
 using OpenFleet.Api.Catalog;
+using OpenFleet.Api.Inventory;
 using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
@@ -34,6 +35,7 @@ builder.Services.AddSingleton(sp => new TrafficController(
 builder.Services.AddSingleton<IDefectSource, RandomDefectSource>();
 builder.Services.AddScoped<ProductionService>();
 builder.Services.AddScoped<CatalogService>();
+builder.Services.AddScoped<InventoryService>();
 builder.Services.AddScoped<VehicleShortageService>();
 builder.Services.AddScoped<TransportService>();
 builder.Services.AddScoped<VehicleEventProcessor>();
@@ -63,6 +65,7 @@ app.MapGet("/health", (IMqttPublisher mqtt) => Results.Ok(new
 app.MapVehicleEndpoints();
 app.MapProductionEndpoints();
 app.MapCatalogEndpoints();
+app.MapInventoryEndpoints();
 app.MapTransportEndpoints();
 
 app.Run();

@@ -20,7 +20,8 @@ namespace OpenFleet.Tests;
 /// </summary>
 public sealed class PostgresFixture : IAsyncLifetime
 {
-    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:17").Build();
+    // 每個測試各有一個資料庫與自己的連線池，閒置連線會一直留著；預設上限 100 不夠整個測試集合用。
+    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:17").WithCommand("-c", "max_connections=500").Build();
 
     public Task InitializeAsync() => _container.StartAsync();
 

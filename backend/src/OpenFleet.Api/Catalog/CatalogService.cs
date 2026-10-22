@@ -7,9 +7,6 @@ using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Catalog;
 
-/// <summary>同一個代碼已經有了；端點轉成 HTTP 409。</summary>
-public sealed class CatalogConflictException(string message) : Exception(message);
-
 /// <summary>
 /// 沖頭規格解析後的有效值：沖頭規格有覆寫就用覆寫，否則沿用桿徑（備料長度、一框支數）或製程設定（加工秒數）。
 /// 之後開立工單時會把這一份存下來，修改規格或桿徑不影響已開立的工單。
@@ -171,7 +168,7 @@ public sealed partial class CatalogService(OpenFleetDbContext db, TimeProvider t
 
         if (await db.PunchSpecs.AnyAsync(s => s.Code == code, cancellationToken))
         {
-            throw new CatalogConflictException($"Punch spec {code} already exists.");
+            throw new ConflictException($"Punch spec {code} already exists.");
         }
 
         var now = time.GetUtcNow();
@@ -199,7 +196,7 @@ public sealed partial class CatalogService(OpenFleetDbContext db, TimeProvider t
         }
         catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
         {
-            throw new CatalogConflictException($"Punch spec {code} already exists.");
+            throw new ConflictException($"Punch spec {code} already exists.");
         }
 
         logger.LogInformation("Punch spec {Code} created on rod {Rod} mm with {Items} item(s).", code, rod.DiameterMm, items.Count);

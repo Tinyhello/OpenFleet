@@ -77,6 +77,9 @@ public sealed class Item
 
     /// <summary>圓棒：一根多長（mm，示範值）。</summary>
     public int? LengthMm { get; set; }
+
+    /// <summary>安全庫存：只有圓棒有設（使用者 2026-10-22：安全庫存看圓棒，常用規格的備料也是從圓棒切）。</summary>
+    public int? SafetyStock { get; set; }
 }
 
 /// <summary>

@@ -7,7 +7,7 @@ public static class CatalogEndpoints
 {
     public static IEndpointRouteBuilder MapCatalogEndpoints(this IEndpointRouteBuilder app)
     {
-        var api = app.MapGroup("/api/catalog").AddEndpointFilter<CatalogErrorFilter>();
+        var api = app.MapGroup("/api/catalog").AddEndpointFilter<ApiErrorFilter>();
 
         api.MapGet("/rod-sizes", (CatalogService catalog, CancellationToken ct) => catalog.GetRodSizesAsync(ct));
 
@@ -48,29 +48,5 @@ public static class CatalogEndpoints
             catalog.ExplodeAsync(code, quantity, ct));
 
         return app;
-    }
-
-    /// <summary>驗證錯誤 → 400、代碼重複 → 409、找不到 → 404。</summary>
-    private sealed class CatalogErrorFilter : IEndpointFilter
-    {
-        public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
-        {
-            try
-            {
-                return await next(context);
-            }
-            catch (RequestValidationException ex)
-            {
-                return Results.ValidationProblem(ex.Errors);
-            }
-            catch (CatalogConflictException ex)
-            {
-                return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
-            }
-            catch (KeyNotFoundException ex)
-            {
-                return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
-            }
-        }
     }
 }

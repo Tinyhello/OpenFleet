@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using OpenFleet.Api;
 using OpenFleet.Api.Catalog;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Production;
@@ -105,7 +106,7 @@ public sealed class CatalogTests(PostgresFixture postgres) : IAsyncLifetime
         await using var db = _database.NewContext();
         var catalog = NewCatalog(db);
 
-        await Assert.ThrowsAsync<CatalogConflictException>(() =>
+        await Assert.ThrowsAsync<ConflictException>(() =>
             catalog.CreateSpecAsync(new CreatePunchSpecRequest { Code = "P30-HX10", Name = "重複", RodDiameterMm = 30 }, default));
         await Assert.ThrowsAsync<RequestValidationException>(() =>
             catalog.CreateSpecAsync(new CreatePunchSpecRequest { Code = "P25-X1", Name = "沒有這種桿徑", RodDiameterMm = 25 }, default));
@@ -132,7 +133,7 @@ public sealed class CatalogTests(PostgresFixture postgres) : IAsyncLifetime
                 await NewCatalog(db).CreateSpecAsync(request, default);
                 return true;
             }
-            catch (CatalogConflictException)
+            catch (ConflictException)
             {
                 return false;
             }

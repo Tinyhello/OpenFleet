@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using OpenFleet.Api.Catalog;
 using OpenFleet.Api.Fleet;
+using OpenFleet.Api.Inventory;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Contracts;
 
@@ -210,6 +211,7 @@ public static class DatabaseInitializer
         }
 
         await SeedCatalogAsync(db);
+        await SeedInventoryAsync(db);
 
         var vehicles = await db.Vehicles.ToDictionaryAsync(v => v.Id);
         foreach (var (id, type) in fleet.VehicleTypes)
@@ -226,6 +228,38 @@ public static class DatabaseInitializer
 
         await db.SaveChangesAsync();
     }
+    /// <summary>
+    /// 示範的初始庫存：Φ40 圓棒 40 根（安全庫存 30 根）、P30-RD12 三種備料各 40 支。
+    /// 數量是 Claude 挑的示範值：一般的單切完會低於安全庫存，下 300 組會看到圓棒不夠。
+    /// </summary>
+    public const int DemoBarSafetyStock = 30;
+
+    private static readonly (string ItemCode, int Quantity)[] DemoStock =
+    [
+        (CatalogService.BarItemCode, 40),
+        ("P30-RD12-U-BLK", 40),
+        ("P30-RD12-D-BLK", 40),
+        ("P30-RD12-L-BLK", 40),
+    ];
+
+    /// <summary>補上缺少的初始庫存（只補還沒有庫存列的品項）。啟動與示範重設都呼叫；呼叫端負責存檔。</summary>
+    public static async Task SeedInventoryAsync(OpenFleetDbContext db)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var stocked = await db.StockBalances.Select(b => b.ItemCode).ToListAsync();
+        foreach (var (itemCode, quantity) in DemoStock.Where(s => !stocked.Contains(s.ItemCode)))
+        {
+            var balance = StockBalance.Create(itemCode, InventoryService.StoreStation, now);
+            balance.Add(quantity, now);
+            db.StockBalances.Add(balance);
+            db.StockMovements.Add(new StockMovement
+            {
+                ItemCode = itemCode, StationCode = InventoryService.StoreStation, Quantity = quantity,
+                Reason = StockMovementReason.Seed, OnHandAfter = balance.OnHand, At = now,
+            });
+        }
+    }
+
     /// <summary>補上缺少的桿徑、圓棒與示範規格；已經有的不動（之後可能被改過）。</summary>
     private static async Task SeedCatalogAsync(OpenFleetDbContext db)
     {
@@ -240,13 +274,19 @@ public static class DatabaseInitializer
             LowerBlankLengthMm = r.LowerBlankLengthMm,
         }));
 
-        if (!await db.Items.AnyAsync(i => i.Code == CatalogService.BarItemCode))
+        var bar = await db.Items.SingleOrDefaultAsync(i => i.Code == CatalogService.BarItemCode);
+        if (bar is null)
         {
             db.Items.Add(new Item
             {
                 Code = CatalogService.BarItemCode, Kind = ItemKind.Bar, Name = "Φ40 圓棒",
-                DiameterMm = CatalogService.BarDiameterMm, LengthMm = CatalogService.DemoBarLengthMm,
+                DiameterMm = CatalogService.BarDiameterMm, LengthMm = CatalogService.DemoBarLengthMm, SafetyStock = DemoBarSafetyStock,
             });
+        }
+        else
+        {
+            // 舊資料庫升級：安全庫存是後來才加的。
+            bar.SafetyStock ??= DemoBarSafetyStock;
         }
 
         var specs = await db.PunchSpecs.Select(s => s.Code).ToListAsync();
