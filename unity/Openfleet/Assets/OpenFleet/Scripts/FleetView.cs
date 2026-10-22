@@ -141,17 +141,21 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            // 高度依行數計算，避免空白的背景擋住場景。
+            // 和操作面板一樣依介面縮放放大：字型與尺寸各自乘上倍數（不用 GUI.matrix，放大後字才不會糊）。
+            var scale = PresentationController.UiScale;
+            EnsureStyles(scale);
+
+            // 背景框跟著內容的高度（框是區域裡的垂直群組，不是整個區域），不會多出空白擋住場景。
             var cameraController = _presentation.CameraController;
-            var lines = _presentation.VehicleCount + (cameraController != null ? 2 : 1);
-            GUILayout.BeginArea(new Rect(10, 10, 520, 12 + lines * 25), GUI.skin.box);
-            GUILayout.Label(_status);
+            GUILayout.BeginArea(new Rect(10, 10, 520 * scale, Screen.height - 20));
+            GUILayout.BeginVertical(GUI.skin.box);
+            GUILayout.Label(_status, _labelStyle);
             foreach (var view in _presentation.Vehicles)
             {
                 var s = view.State;
                 GUILayout.BeginHorizontal();
-                GUILayout.Label($"{s.VehicleId}  {s.VehicleType}  {s.Connectivity}  v{s.Version}  ping: {(s.LastCommandEvent?.ToString() ?? "-")}");
-                if (GUILayout.Button("Ping", GUILayout.Width(50)))
+                GUILayout.Label($"{s.VehicleId}  {s.VehicleType}  {s.Connectivity}  v{s.Version}  ping: {(s.LastCommandEvent?.ToString() ?? "-")}", _labelStyle);
+                if (GUILayout.Button("Ping", _buttonStyle, GUILayout.Width(50 * scale)))
                 {
                     StartCoroutine(Ping(s.VehicleId));
                 }
@@ -159,7 +163,7 @@ namespace OpenFleet.Unity
                 if (cameraController != null)
                 {
                     var following = cameraController.Following == view.transform;
-                    if (GUILayout.Button(following ? "Unfollow" : "Follow", GUILayout.Width(70)))
+                    if (GUILayout.Button(following ? "Unfollow" : "Follow", _buttonStyle, GUILayout.Width(70 * scale)))
                     {
                         cameraController.Follow(following ? null : view.transform);
                     }
@@ -170,10 +174,29 @@ namespace OpenFleet.Unity
 
             if (cameraController != null)
             {
-                GUILayout.Label("Camera: right-drag rotate, middle-drag / WASD pan, wheel zoom, F reset");
+                GUILayout.Label("Camera: right-drag rotate, middle-drag / WASD pan, wheel zoom, F reset", _labelStyle);
             }
 
+            GUILayout.EndVertical();
             GUILayout.EndArea();
+        }
+
+        private GUIStyle _labelStyle;
+        private GUIStyle _buttonStyle;
+        private float _styleScale;
+
+        /// <summary>預設的 IMGUI 字型約 12 像素；依介面縮放建立放大後的樣式，倍數變了才重建。</summary>
+        private void EnsureStyles(float scale)
+        {
+            if (_labelStyle != null && Mathf.Approximately(_styleScale, scale))
+            {
+                return;
+            }
+
+            _styleScale = scale;
+            var size = Mathf.RoundToInt(12 * scale);
+            _labelStyle = new GUIStyle(GUI.skin.label) { fontSize = size };
+            _buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = size };
         }
     }
 }

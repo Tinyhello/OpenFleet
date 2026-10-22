@@ -55,6 +55,8 @@ namespace OpenFleet.Unity
         private string _attentionShown = string.Empty;
         private ProductionSettingsDto _settings;
         private Button _testMode;
+        private Label _uiSize;
+        private Button _expand;
 
         /// <summary>滑鼠是否在面板上；攝影機用來避免捲動清單時同時縮放畫面。</summary>
         public static bool PointerOverPanel { get; private set; }
@@ -91,7 +93,14 @@ namespace OpenFleet.Unity
             // 螢幕座標原點在左下，面板座標原點在左上。
             var screen = mouse.position.ReadValue();
             var position = RuntimePanelUtils.ScreenToPanel(_root.panel, new Vector2(screen.x, Screen.height - screen.y));
-            PointerOverPanel = _panel.worldBound.Contains(position);
+            PointerOverPanel = _panel.resolvedStyle.display != DisplayStyle.None && _panel.worldBound.Contains(position);
+
+            // 用快捷鍵（Ctrl＋＝／－／0）調整時，面板上的數字跟著變。
+            var size = $"介面大小 {PresentationController.Instance.UiSizeText}";
+            if (_uiSize != null && _uiSize.text != size)
+            {
+                _uiSize.text = size;
+            }
         }
 
         /// <summary>
@@ -131,6 +140,39 @@ namespace OpenFleet.Unity
             panelScroll.horizontalScrollerVisibility = ScrollerVisibility.Hidden;
             _panel.Add(panelScroll);
             var content = panelScroll.contentContainer;
+
+            // 介面大小：面板、機台上的進度條與左上的車輛清單一起放大縮小（也可以按 Ctrl＋＝／Ctrl＋－，Ctrl＋0 回到預設），記在本機。
+            var sizeRow = Row();
+            sizeRow.style.marginTop = 0;
+            sizeRow.style.marginBottom = 6;
+            _uiSize = new Label { text = $"介面大小 {PresentationController.Instance.UiSizeText}" };
+            _uiSize.style.flexGrow = 1;
+            _uiSize.style.unityTextAlign = TextAnchor.MiddleLeft;
+            sizeRow.Add(_uiSize);
+            foreach (var (text, steps) in new[] { ("－", -1), ("＋", 1) })
+            {
+                var button = ActionButton(text, () => PresentationController.Instance.ChangeUiSize(steps));
+                button.style.flexGrow = 0;
+                button.style.width = 44;
+                sizeRow.Add(button);
+            }
+
+            // 放大後面板會蓋住較多場景：可以先收起來，右上角留一顆「展開面板」。
+            var collapse = ActionButton("收起", () => ShowPanel(false));
+            collapse.style.flexGrow = 0;
+            collapse.style.width = 56;
+            collapse.style.marginLeft = 6;
+            sizeRow.Add(collapse);
+            content.Add(sizeRow);
+
+            _expand = ActionButton("展開面板", () => ShowPanel(true));
+            _expand.style.position = Position.Absolute;
+            _expand.style.top = 10;
+            _expand.style.right = 10;
+            _expand.style.width = 96;
+            _expand.style.flexGrow = 0;
+            _expand.style.display = DisplayStyle.None;
+            _root.Add(_expand);
 
             // 設定預設收合，平常只留批次清單，不擋住場景；點標題展開。
             var settings = new Foldout { text = "示範設定（點此展開）", value = false };
@@ -766,6 +808,13 @@ namespace OpenFleet.Unity
             {
                 return null;
             }
+        }
+
+        /// <summary>收起或展開整個面板；收起時只留右上角的「展開面板」，不擋住場景。</summary>
+        private void ShowPanel(bool visible)
+        {
+            _panel.style.display = visible ? DisplayStyle.Flex : DisplayStyle.None;
+            _expand.style.display = visible ? DisplayStyle.None : DisplayStyle.Flex;
         }
 
         private void SetStatus(string message, Color color)

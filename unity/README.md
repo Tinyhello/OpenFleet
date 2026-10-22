@@ -19,7 +19,7 @@
 | 位置 | 用途 |
 | --- | --- |
 | `Assets/OpenFleet/Scripts/FleetMqttClient.cs` | 連線 Broker、訂閱 `state/vehicles/+`；背景執行緒解析 JSON 後放進佇列，由 `Update` 在主執行緒發出事件 |
-| `Assets/OpenFleet/Scripts/PresentationController.cs` | 表演用的控制器：從 Resources 載入 AGV Prefab 與 UI 設定、建立車輛與兩個 UI 面板、找到場景中的站點與攝影機；畫面上的顏色集中在它的 `Colors` |
+| `Assets/OpenFleet/Scripts/PresentationController.cs` | 表演用的控制器：從 Resources 載入 AGV Prefab 與 UI 設定、建立車輛與兩個 UI 面板、找到場景中的站點與攝影機；介面大小（依畫面高度與使用者調整的倍數）；畫面上的顏色集中在它的 `Colors` |
 | `Assets/OpenFleet/Scripts/FleetView.cs` | 每次連上 Broker 就取一次 HTTP 快照，把車輛狀態交給對應的車輛物件；簡易面板可送 Ping、跟隨車輛 |
 | `Assets/OpenFleet/Scripts/VehicleView.cs` | 單台車的顯示（掛在 Prefab 上）：依 `stateEpoch` + `version` 丟棄舊狀態，位置插值、燈條與警示燈依連線狀態變色。燈條、標籤、貨物依子物件名稱找到 |
 | `Assets/OpenFleet/Scripts/FactoryCameraController.cs` | 攝影機：右鍵旋轉、中鍵／WASD 平移、滾輪縮放、F 重設、跟隨車輛 |
@@ -47,6 +47,7 @@
 2. 在 Unity 開啟 `Assets/OpenFleet/Scenes/Factory.unity` 按 Play，或 build Windows 版後執行。
 3. 左上面板顯示每台車的車型、連線狀態、`version` 與最近一次指令的回報；車上燈條綠色為 online、灰色為 offline。
 4. 右上是操作面板：
+   - **介面大小**（最上面一列）：面板、機台上的進度條與左上的車輛清單會依畫面高度自動放大（畫面高 900 像素以下是 1 倍，1080p 約 1.2 倍、1440p 約 1.6 倍）；看不清楚時按「＋」再放大、「－」縮小，也可以按 Ctrl＋＝／Ctrl＋－，Ctrl＋0 回到預設，大小記在本機，下次開啟沿用。放大後面板會蓋住較多場景，按「收起」整個收起來，右上角留一顆「展開面板」。
    - **示範設定**（預設收合，點標題展開）：用滑桿（或輸入框）調整批量、機台取放每件秒數、AGV 交接一框的秒數、換刀時間、叫刀門檻、各站的每件加工秒數與刀具壽命，按「套用」存進後端。超出範圍時後端會拒絕，原因顯示在面板上。
    - **測試模式**：一顆開關，按下立刻生效。開啟時每一站依自己的「測試倍率」加快（倍率在示範設定裡每一站各一欄，預設都是 3000 倍），進度條上的時間仍是原本的長度，只是走得比較快。車輛的 AGV 交接（預設 3000 倍）與車速（空車、載貨預設都是 5 倍）也在測試模式下加快。這組預設讓面板預設的 30 組一張單約 2.5 分鐘從下單走到出貨。沒有整體的時間加速。
    - **需要人工處理**（平常不顯示）：搬運失敗、而且系統不能自己重派的任務（物料可能在車上）。到現場確認後按「已放回取料站」或「已送到卸料站」。

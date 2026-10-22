@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using OpenFleet.Contracts;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.UIElements;
 
 namespace OpenFleet.Unity
@@ -70,11 +71,33 @@ namespace OpenFleet.Unity
             public static readonly Color InputText = new Color(0.08f, 0.09f, 0.11f);
         }
 
+        /// <summary>
+        /// 介面大小的級距（使用者調整的部分）。實際的縮放＝依畫面高度的倍數 × 這個值：
+        /// 畫面高 900 像素時是 1 倍，1080p 約 1.2 倍、1440p 約 1.6 倍，比 900 像素小的畫面不再縮小。
+        /// </summary>
+        private static readonly float[] UiSizeSteps = { 0.8f, 0.9f, 1f, 1.15f, 1.3f, 1.5f, 1.75f, 2f, 2.5f };
+        private const int DefaultUiSizeStep = 2;
+        private const float UiReferenceHeight = 900f;
+        private const string UiSizeKey = "OpenFleet.UiSizeStep";
+
         private readonly SortedDictionary<string, VehicleView> _vehicles = new SortedDictionary<string, VehicleView>();
         private readonly Dictionary<string, StationAnchor> _stations = new Dictionary<string, StationAnchor>();
         private readonly Dictionary<VehicleType, VehicleView> _prefabs = new Dictionary<VehicleType, VehicleView>();
 
+        /// <summary>執行時用的 PanelSettings 複本：改縮放時不會改到專案裡的資產。</summary>
+        private PanelSettings _panelSettings;
+        private int _uiSizeStep = DefaultUiSizeStep;
+        private int _screenHeight;
+
         public static PresentationController Instance { get; private set; }
+
+        /// <summary>
+        /// 目前的介面縮放倍數：操作面板、機台上的進度條（UI Toolkit）與左上的車輛清單（IMGUI）都照這個倍數放大。
+        /// </summary>
+        public static float UiScale { get; private set; } = 1f;
+
+        /// <summary>使用者調整的介面大小（100% 是依畫面高度的預設）。</summary>
+        public string UiSizeText => $"{Mathf.RoundToInt(UiSizeSteps[_uiSizeStep] * 100f)}%";
 
         /// <summary>後端連線設定與車輛狀態的來源；面板共用它的 API 位址。</summary>
         public FleetView Fleet { get; private set; }
@@ -110,10 +133,44 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            CreateDocument<StatusOverlay>("Status Overlay", panelSettings, -1);
+            _panelSettings = Instantiate(panelSettings);
+            _panelSettings.scaleMode = PanelScaleMode.ConstantPixelSize;
+            _uiSizeStep = Mathf.Clamp(PlayerPrefs.GetInt(UiSizeKey, DefaultUiSizeStep), 0, UiSizeSteps.Length - 1);
+            ApplyUiScale();
+
+            CreateDocument<StatusOverlay>("Status Overlay", _panelSettings, -1);
             if (!PanelsHidden)
             {
-                CreateDocument<ProductionPanel>("Production Panel", panelSettings, 0);
+                CreateDocument<ProductionPanel>("Production Panel", _panelSettings, 0);
+            }
+        }
+
+        private void Update()
+        {
+            // 視窗大小改了就重新依畫面高度計算。
+            if (Screen.height != _screenHeight)
+            {
+                ApplyUiScale();
+            }
+
+            // Ctrl＋＝／Ctrl＋－ 調整介面大小，Ctrl＋0 回到預設。
+            var keyboard = Keyboard.current;
+            if (keyboard == null || !keyboard.ctrlKey.isPressed)
+            {
+                return;
+            }
+
+            if (keyboard.equalsKey.wasPressedThisFrame || keyboard.numpadPlusKey.wasPressedThisFrame)
+            {
+                ChangeUiSize(1);
+            }
+            else if (keyboard.minusKey.wasPressedThisFrame || keyboard.numpadMinusKey.wasPressedThisFrame)
+            {
+                ChangeUiSize(-1);
+            }
+            else if (keyboard.digit0Key.wasPressedThisFrame || keyboard.numpad0Key.wasPressedThisFrame)
+            {
+                ChangeUiSize(DefaultUiSizeStep - _uiSizeStep);
             }
         }
 
@@ -122,6 +179,36 @@ namespace OpenFleet.Unity
             if (Instance == this)
             {
                 Instance = null;
+            }
+
+            if (_panelSettings != null)
+            {
+                Destroy(_panelSettings);
+            }
+        }
+
+        /// <summary>介面大小調大（正數）或調小（負數）幾級；記在本機，下次開啟沿用。</summary>
+        public void ChangeUiSize(int steps)
+        {
+            var step = Mathf.Clamp(_uiSizeStep + steps, 0, UiSizeSteps.Length - 1);
+            if (step == _uiSizeStep)
+            {
+                return;
+            }
+
+            _uiSizeStep = step;
+            PlayerPrefs.SetInt(UiSizeKey, step);
+            PlayerPrefs.Save();
+            ApplyUiScale();
+        }
+
+        private void ApplyUiScale()
+        {
+            _screenHeight = Screen.height;
+            UiScale = Mathf.Max(1f, Screen.height / UiReferenceHeight) * UiSizeSteps[_uiSizeStep];
+            if (_panelSettings != null)
+            {
+                _panelSettings.scale = UiScale;
             }
         }
 
