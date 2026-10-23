@@ -236,6 +236,56 @@ public sealed class BackEndProcessTests(PostgresFixture postgres) : IAsyncLifeti
     }
 
     [Fact]
+    public async Task In_test_mode_a_waiting_load_runs_after_one_minute_even_while_more_material_is_coming()
+    {
+        // 使用者 2026-10-23：測試模式下爐前有料、等超過 1 分鐘就直接開爐，不管有沒有湊到 150 支、後面還有沒有料要來。
+        await ConfigureAsync(settings => settings.TestMode = true);
+        await ArriveAsync("heat", 3, "B-A", 30);
+        await ArriveAsync("fine", 2, "B-B", 10);
+        await AdvanceAsync(0);
+        var heat = await StationAsync("heat");
+        Assert.False(heat.Batch!.Running);
+        Assert.True(heat.Batch.TestWaiting);
+
+        // 等了一半：進度條一半，還要 30 秒左右（兩次放料各前進了 0.1 秒）。
+        await AdvanceAsync(29.9);
+        heat = await StationAsync("heat");
+        Assert.False(heat.Batch!.Running);
+        Assert.Equal(0.5, heat.Batch.TestWaitProgress, 2);
+        Assert.Equal(30, heat.Batch.TestWaitRemainingSeconds, 0);
+
+        await AdvanceAsync(30);
+        heat = await StationAsync("heat");
+        Assert.Equal((true, 30, false), (heat.Batch!.Running, heat.Batch.Quantity, heat.Batch.TestWaiting));
+    }
+
+    [Fact]
+    public async Task Test_mode_wait_restarts_when_the_previous_run_comes_out_and_does_not_apply_outside_test_mode()
+    {
+        await ConfigureAsync(settings => settings.TestMode = true);
+        await ArriveAsync("heat", 3, "B-A", 30);
+        await ArriveAsync("fine", 2, "B-B", 10);
+        await AdvanceAsync(60);
+        Assert.True((await StationAsync("heat")).Batch!.Running);
+
+        // 爐在跑的時候又到了一框；出爐（10 秒後推進的那一刻）之後才重新起算 60 秒。
+        await ArriveAsync("heat", 3, "B-C", 30);
+        await AdvanceAsync(10);
+        Assert.False((await StationAsync("heat")).Batch!.Running);
+        await AdvanceAsync(59);
+        Assert.False((await StationAsync("heat")).Batch!.Running);
+        await AdvanceAsync(1);
+        Assert.True((await StationAsync("heat")).Batch!.Running);
+
+        // 測試模式關閉時不適用：同樣等了很久也不開，也不顯示等待的進度。
+        await ConfigureAsync(settings => settings.TestMode = false);
+        await ArriveAsync("temper", 4, "B-D", 30);
+        await AdvanceAsync(3600);
+        var temper = await StationAsync("temper");
+        Assert.Equal((false, false), (temper.Batch!.Running, temper.Batch.TestWaiting));
+    }
+
+    [Fact]
     public async Task Plating_rework_waits_for_thirty_pieces_and_then_runs_like_any_other_load()
     {
         // 回來重鍍的 20 支在電鍍站等；還有一框在拋光（之後可能也會被判鍍層不良），所以不到 30 支先不開。

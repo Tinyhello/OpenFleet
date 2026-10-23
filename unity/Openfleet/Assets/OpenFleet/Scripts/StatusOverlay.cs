@@ -423,6 +423,7 @@ namespace OpenFleet.Unity
             private readonly BarRow _inbound = new BarRow("備料", Colors.Inbound, TrackWidth);
             private readonly BarRow _outbound = new BarRow("成品", Colors.Outbound, TrackWidth);
             private readonly BarRow _furnace = new BarRow("爐內", Colors.Machining, TrackWidth);
+            private readonly BarRow _testWait = new BarRow("等待", Colors.TestWait, TrackWidth);
             private readonly VisualElement _machineRows = new VisualElement { pickingMode = PickingMode.Ignore };
             private readonly VisualElement _toolRows = new VisualElement { pickingMode = PickingMode.Ignore };
             private readonly List<BarRow> _machines = new List<BarRow>();
@@ -444,6 +445,7 @@ namespace OpenFleet.Unity
                 Root.Add(_inbound.Root);
                 Root.Add(_outbound.Root);
                 Root.Add(_furnace.Root);
+                Root.Add(_testWait.Root);
                 Root.Add(_machineRows);
 
                 // 只有這顆按鈕會攔截滑鼠，其餘部分讓滑鼠穿透到場景。
@@ -473,6 +475,7 @@ namespace OpenFleet.Unity
                 _inbound.SetVisible(_isMachine);
                 _outbound.SetVisible(_isMachine);
                 _furnace.SetVisible(isFurnace);
+                _testWait.SetVisible(false);
                 _machineRows.style.display = _isMachine && !isFurnace ? DisplayStyle.Flex : DisplayStyle.None;
                 _summary.style.display = _isMachine ? DisplayStyle.None : DisplayStyle.Flex;
 
@@ -622,7 +625,8 @@ namespace OpenFleet.Unity
 
             /// <summary>
             /// 整爐工序的站：第一列是站內累積的支數對開爐下限（滿了才開），第二列是做完等搬走的支數，
-            /// 第三列是這一爐的工序名稱（淬火、回火、電鍍）、進度與剩下的時間。
+            /// 第三列是這一爐的工序名稱（淬火、回火、電鍍）、進度與剩下的時間；
+            /// 測試模式下爐前有料在等時多一列「等待」，等滿就開爐。
             /// </summary>
             private void ShowBatch(StationStatusDto status)
             {
@@ -636,6 +640,13 @@ namespace OpenFleet.Unity
                 else
                 {
                     _furnace.Set("爐內", 0f, "待機", Colors.Machining);
+                }
+
+                // 測試模式專用：爐空著、爐前有料時，等滿設定的秒數就直接開爐（不管有沒有湊到下限）。
+                _testWait.SetVisible(batch.TestWaiting);
+                if (batch.TestWaiting)
+                {
+                    _testWait.Set("等待", (float)batch.TestWaitProgress, $"{Mathf.CeilToInt((float)batch.TestWaitRemainingSeconds)}s", Colors.TestWait);
                 }
             }
 

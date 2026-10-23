@@ -287,6 +287,9 @@ namespace OpenFleet.Contracts
         /// <summary>測試模式下貨車間隔加快的倍率。</summary>
         public double TestTruckSpeed { get; set; } = 1;
 
+        /// <summary>測試模式下，爐空著、爐前有料等了這麼久（實際秒數）就直接開爐，不管有沒有湊到下限。</summary>
+        public double TestFurnaceWaitSeconds { get; set; } = 60;
+
         /// <summary>PUT 時採用 Sequence 與該種工序自己的數值（時間、刀具壽命、開爐條件、TestSpeed）。</summary>
         public List<ProcessStepDto> Steps { get; set; } = new List<ProcessStepDto>();
     }
@@ -452,6 +455,17 @@ namespace OpenFleet.Contracts
 
         /// <summary>整爐還剩多久（秒，原本的工序時間）。測試模式下會走得比實際時鐘快。</summary>
         public double RemainingSeconds { get; set; }
+
+        /// <summary>
+        /// 測試模式下爐空著、爐前有料在等：等滿設定的秒數就直接開爐（使用者 2026-10-23）。測試模式關閉、爐在跑或沒有料時是 false。
+        /// </summary>
+        public bool TestWaiting { get; set; }
+
+        /// <summary>等待的進度，0～1（滿了就開爐）。</summary>
+        public double TestWaitProgress { get; set; }
+
+        /// <summary>還要等多久才開爐（實際秒數）。</summary>
+        public double TestWaitRemainingSeconds { get; set; }
     }
 
     /// <summary>機台正在加工的批次與進度。</summary>

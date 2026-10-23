@@ -47,6 +47,9 @@ public sealed partial class ProductionService(
     public const double MaxTestEmptyVehicleSpeed = 5;
 
     public const int MaxReworkLimit = 3;
+
+    /// <summary>測試模式下爐前等多久就開爐的上限（秒）。</summary>
+    public const double MaxTestFurnaceWaitSeconds = 3600;
     public const double MinTruckIntervalSeconds = 60;
     public const double MaxTruckIntervalSeconds = 24 * 3600;
 
@@ -101,6 +104,7 @@ public sealed partial class ProductionService(
             ReworkBatchMinPieces = settings.ReworkBatchMinPieces,
             TruckIntervalSeconds = settings.TruckIntervalSeconds,
             TestTruckSpeed = settings.TestTruckSpeed,
+            TestFurnaceWaitSeconds = settings.TestFurnaceWaitSeconds,
             Steps = steps.Select(s => new ProcessStepDto
             {
                 Sequence = s.Sequence,
@@ -147,6 +151,7 @@ public sealed partial class ProductionService(
         ValidateRange(request.ReworkBatchMinPieces, 1, MaxBatchRunPieces, "reworkBatchMinPieces");
         ValidateRange(request.TruckIntervalSeconds, MinTruckIntervalSeconds, MaxTruckIntervalSeconds, "truckIntervalSeconds");
         ValidateRange(request.TestTruckSpeed, 1, MaxTestSpeed, "testTruckSpeed");
+        ValidateRange(request.TestFurnaceWaitSeconds, 1, MaxTestFurnaceWaitSeconds, "testFurnaceWaitSeconds");
 
         settings.LotQuantity = request.LotQuantity;
         settings.PieceHandlingSeconds = request.PieceHandlingSeconds;
@@ -162,6 +167,7 @@ public sealed partial class ProductionService(
         settings.MaxReworkCount = request.MaxReworkCount;
         settings.ReworkBatchMinPieces = request.ReworkBatchMinPieces;
         settings.TestTruckSpeed = request.TestTruckSpeed;
+        settings.TestFurnaceWaitSeconds = request.TestFurnaceWaitSeconds;
         if (settings.TruckIntervalSeconds != request.TruckIntervalSeconds)
         {
             // 間隔改了：下一班從現在用新的間隔重新倒數。
@@ -1071,6 +1077,8 @@ public sealed partial class ProductionService(
     /// 補做的料：等的料裡有補做品、而且已經沒有其他料會再來這一站（前面的工序都空了），不滿下限也開爐。
     /// 反工品（回來重鍍的）：另外累積，滿 <see cref="ProductionSettings.ReworkBatchMinPieces"/> 支才放行；
     /// 廠內已經沒有其他料會再進電鍍（品管之前的工序除了這些反工品都空了）時，不足的尾料也放行。放行後和一般的料一樣裝爐。
+    /// 測試模式另有等待的上限（使用者 2026-10-23）：爐空著、爐前有料等超過 <see cref="ProductionSettings.TestFurnaceWaitSeconds"/>
+    /// 就直接開爐，反工品也一起放行（見 <see cref="FurnaceWaitStart"/>）。
     /// </summary>
     private async Task<bool> StartBatchRunsAsync(
         IReadOnlyList<ProcessStep> steps, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
@@ -1094,6 +1102,7 @@ public sealed partial class ProductionService(
         }
 
         var priorities = await SchedulePriorities.ForLotsAsync(db, queued.Select(o => o.Lot), cancellationToken);
+        var lastRuns = await LastRunCompletionsAsync(stationCodes, cancellationToken);
 
         // 還在製程中的每一框目前在哪一道工序（走完的、報廢的、出貨箱沒有工序）。
         var active = await db.Lots.AsNoTracking()
@@ -1112,12 +1121,18 @@ public sealed partial class ProductionService(
             var reworkIds = rework.Select(o => o.LotId).ToHashSet();
             var reworkReleased = rework.Sum(o => o.Quantity) >= settings.ReworkBatchMinPieces
                 || !active.Any(l => l.Step <= inspection && !reworkIds.Contains(l.Id));
-            var waiting = reworkReleased ? arrived : arrived.Except(rework).ToList();
+
+            // 測試模式：爐前的料等太久就直接開爐（使用者 2026-10-23），反工品也一起放行。
+            var waitedOut = settings.TestMode && arrived.Count > 0
+                && now - FurnaceWaitStart(arrived.Min(o => o.QueuedAt), lastRuns.GetValueOrDefault(step.StationCode))
+                    >= TimeSpan.FromSeconds(settings.TestFurnaceWaitSeconds);
+            var waiting = reworkReleased || waitedOut ? arrived : arrived.Except(rework).ToList();
 
             var moreComing = active.Any(l => l.Step <= step.Sequence && !arrivedIds.Contains(l.Id));
             // 湊不到下限：只有補做的料可以先開（使用者 2026-10-10）；測試模式下一般的料也可以，示範的小單才看得到後段（使用者 2026-10-22）。
             // 兩種都要等到已經沒有其他料會再來這一站。
-            var enough = waiting.Sum(o => o.Quantity) >= step.BatchMinPieces
+            var enough = waitedOut
+                || waiting.Sum(o => o.Quantity) >= step.BatchMinPieces
                 || (waiting.Count > 0 && !moreComing && (settings.TestMode || waiting.Any(o => o.Lot.IsMakeup)));
             if (!enough)
             {
@@ -1159,6 +1174,22 @@ public sealed partial class ProductionService(
         await db.SaveChangesAsync(cancellationToken);
         return started;
     }
+
+    /// <summary>
+    /// 測試模式下爐前的料從什麼時候開始算等待（使用者 2026-10-23）：最早到的那一框與上一爐出爐，取較晚的那一刻。
+    /// 爐在跑的時候料本來就得等，所以出爐之後才重新起算。
+    /// </summary>
+    internal static DateTimeOffset FurnaceWaitStart(DateTimeOffset firstQueuedAt, DateTimeOffset? lastRunCompletedAt) =>
+        lastRunCompletedAt > firstQueuedAt ? lastRunCompletedAt.Value : firstQueuedAt;
+
+    /// <summary>每一站最近一爐出爐的時間（只看 <paramref name="stationCodes"/>）；還沒出過爐的站不在結果裡。</summary>
+    internal async Task<Dictionary<string, DateTimeOffset?>> LastRunCompletionsAsync(
+        IReadOnlyCollection<string> stationCodes, CancellationToken cancellationToken) =>
+        await db.BatchRuns.AsNoTracking()
+            .Where(r => r.CompletedAt != null && stationCodes.Contains(r.StationCode))
+            .GroupBy(r => r.StationCode)
+            .Select(g => new { Station = g.Key, CompletedAt = g.Max(r => r.CompletedAt) })
+            .ToDictionaryAsync(x => x.Station, x => x.CompletedAt, cancellationToken);
 
     /// <summary>新刀已送到就從送到的時間開始換刀（不會早於開始等待的時間）；還沒到回傳 false。</summary>
     private bool TryStartChangeAfterWaiting(MachineTool tool, ProductionSettings settings, double speed)
@@ -1307,6 +1338,15 @@ public sealed partial class ProductionService(
             .Select(g => new { g.Key.StationCode, g.Key.Status, Quantity = g.Sum(l => l.Quantity) })
             .ToListAsync(cancellationToken);
 
+        // 測試模式下爐前等待的進度：每座爐最早到的那一框與上一爐出爐的時間。
+        var batchStations = steps.Values.Where(s => s.Kind == ProcessStepKind.Batch).Select(s => s.StationCode).ToList();
+        var firstQueued = await db.Operations.AsNoTracking()
+            .Where(o => o.Status == OperationStatus.Queued && batchStations.Contains(o.StationCode))
+            .GroupBy(o => o.StationCode)
+            .Select(g => new { Station = g.Key, QueuedAt = g.Min(o => o.QueuedAt) })
+            .ToDictionaryAsync(x => x.Station, x => x.QueuedAt, cancellationToken);
+        var lastRuns = await LastRunCompletionsAsync(batchStations, cancellationToken);
+
         var shortages = await db.MachineDelays.AsNoTracking()
             .Where(d => d.EndedAt == null)
             .ToDictionaryAsync(d => d.MachineCode, d => new { d.Cause, d.Reason }, cancellationToken);
@@ -1371,8 +1411,15 @@ public sealed partial class ProductionService(
             if (step is { Kind: ProcessStepKind.Batch })
             {
                 var run = runs.GetValueOrDefault(station.Code);
+                DateTimeOffset? waitStart = settings.TestMode && run is null && firstQueued.TryGetValue(station.Code, out var first)
+                    ? FurnaceWaitStart(first, lastRuns.GetValueOrDefault(station.Code))
+                    : null;
+                var waited = waitStart is { } start ? Math.Max(0, (now - start).TotalSeconds) : 0;
                 status.Batch = new BatchStatusDto
                 {
+                    TestWaiting = waitStart is not null,
+                    TestWaitProgress = waitStart is null ? 0 : Math.Clamp(waited / settings.TestFurnaceWaitSeconds, 0, 1),
+                    TestWaitRemainingSeconds = waitStart is null ? 0 : Math.Max(0, settings.TestFurnaceWaitSeconds - waited),
                     MinPieces = step.BatchMinPieces,
                     MaxPieces = step.BatchMaxPieces,
                     Running = run is not null,

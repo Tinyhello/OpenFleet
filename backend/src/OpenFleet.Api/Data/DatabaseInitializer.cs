@@ -93,6 +93,9 @@ public static class DatabaseInitializer
     /// <summary>測試模式下車輛的倍率：空車與載貨都快 5 倍（使用者 2026-10-22；5 是交通控制的上限）。</summary>
     public const double DemoTestVehicleSpeed = 5;
 
+    /// <summary>測試模式下爐前有料、等超過 1 分鐘就開爐（使用者 2026-10-23）。</summary>
+    public const double DemoTestFurnaceWaitSeconds = 60;
+
     /// <summary>包好的出貨箱送到出貨站等貨車。</summary>
     private const string DemoBufferStation = "shipping";
 
@@ -250,6 +253,7 @@ public static class DatabaseInitializer
                 ReworkBatchMinPieces = 30,
                 TruckIntervalSeconds = DemoTruckIntervalSeconds,
                 TestTruckSpeed = DemoTestSpeed,
+                TestFurnaceWaitSeconds = DemoTestFurnaceWaitSeconds,
             });
         }
 

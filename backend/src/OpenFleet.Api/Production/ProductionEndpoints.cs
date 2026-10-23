@@ -23,6 +23,9 @@ public static class ProductionEndpoints
         // 備料區、成品區、加工與刀具的即時狀態；顯示端每秒輪詢數次。
         api.MapGet("/stations/status", (ProductionService production, CancellationToken ct) => production.GetStationStatusAsync(ct));
 
+        // 排程預估：每台機台、每座爐接下來的安排，每張訂單預估什麼時候做完、出貨，趕不趕得上交期（正常速度；測試模式另附加速後的預估）。
+        api.MapGet("/schedule", (ScheduleService schedule, CancellationToken ct) => schedule.GetAsync(ct));
+
         api.MapGet("/settings", (ProductionService production, CancellationToken ct) => production.GetSettingsAsync(ct));
 
         api.MapPut("/settings", (ProductionSettingsDto request, ProductionService production, CancellationToken ct) =>

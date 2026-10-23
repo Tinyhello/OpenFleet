@@ -46,6 +46,9 @@ namespace OpenFleet.Unity
             public static readonly Color ToolChange = new Color(0.98f, 0.45f, 0.4f);
             public static readonly Color Handover = new Color(0.35f, 0.85f, 0.9f);
 
+            /// <summary>測試模式專用：爐前等待的進度（等滿就開爐，使用者 2026-10-23）。和排程頁的加速配色同一色系。</summary>
+            public static readonly Color TestWait = new Color(0.35f, 0.85f, 0.95f);
+
             /// <summary>機台因缺車（車都在忙）停下來。</summary>
             public static readonly Color Shortage = new Color(0.95f, 0.3f, 0.55f);
 
@@ -69,6 +72,63 @@ namespace OpenFleet.Unity
             /// <summary>急單（排在所有訂單前面）的標示。</summary>
             public static readonly Color Rush = new Color(1f, 0.62f, 0.3f);
             public static readonly Color InputText = new Color(0.08f, 0.09f, 0.11f);
+
+            /// <summary>
+            /// 排程頁的配色。正常速度與加速的預估各一組，切換時整頁一起換色（使用者 2026-10-23），一眼看得出看的是哪一份。
+            /// </summary>
+            public static readonly SchedulePalette ScheduleNormal = new SchedulePalette(
+                back: new Color(1f, 1f, 1f, 0.04f),
+                border: new Color(1f, 1f, 1f, 0.18f),
+                heading: Color.white,
+                text: new Color(0.92f, 0.94f, 0.96f),
+                muted: Muted,
+                rush: Rush,
+                onTime: new Color(0.55f, 0.9f, 0.6f),
+                late: new Color(1f, 0.45f, 0.4f),
+                blocked: new Color(0.95f, 0.8f, 0.35f));
+
+            public static readonly SchedulePalette ScheduleAccelerated = new SchedulePalette(
+                back: new Color(0.1f, 0.32f, 0.42f, 0.55f),
+                border: new Color(0.35f, 0.85f, 0.95f, 0.9f),
+                heading: new Color(0.5f, 0.92f, 1f),
+                text: new Color(0.85f, 0.97f, 1f),
+                muted: new Color(0.55f, 0.78f, 0.85f),
+                rush: new Color(1f, 0.7f, 0.4f),
+                onTime: new Color(0.5f, 0.95f, 0.8f),
+                late: new Color(1f, 0.55f, 0.6f),
+                blocked: new Color(1f, 0.85f, 0.45f));
+        }
+
+        /// <summary>排程頁的一組配色。</summary>
+        public sealed class SchedulePalette
+        {
+            public SchedulePalette(Color back, Color border, Color heading, Color text, Color muted, Color rush, Color onTime, Color late, Color blocked)
+            {
+                Back = back;
+                Border = border;
+                Heading = heading;
+                Text = text;
+                Muted = muted;
+                Rush = rush;
+                OnTime = onTime;
+                Late = late;
+                Blocked = blocked;
+            }
+
+            /// <summary>整頁的底色與外框。</summary>
+            public Color Back { get; }
+            public Color Border { get; }
+            public Color Heading { get; }
+            public Color Text { get; }
+            public Color Muted { get; }
+            public Color Rush { get; }
+
+            /// <summary>趕得上交期／趕不上交期。</summary>
+            public Color OnTime { get; }
+            public Color Late { get; }
+
+            /// <summary>算不出來（等料、爐湊不滿）。</summary>
+            public Color Blocked { get; }
         }
 
         /// <summary>

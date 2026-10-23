@@ -12,7 +12,7 @@ using Colors = OpenFleet.Unity.PresentationController.Colors;
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// 操作面板（UI Toolkit，介面全部用程式建立）：修改示範設定（批量、各站加工時間與開爐條件、品管的不良率、貨車間隔）、開關測試模式、
+    /// 操作面板（UI Toolkit，介面全部用程式建立），分「操作」與「排程」（ProductionPanel.Schedule.cs）兩頁。「操作」頁：修改示範設定（批量、各站加工時間與開爐條件、品管的不良率、貨車間隔）、開關測試模式、
     /// 下單與訂單的進度（ProductionPanel.Orders.cs）、查看缺車耽誤的時間、品管的累計結果與出貨的現況。
     /// 面板只透過 HTTP 讀寫後端，自己不保存任何業務狀態；訂單與缺車統計以輪詢更新。
     /// 由 PresentationController 在執行時建立。
@@ -46,6 +46,7 @@ namespace OpenFleet.Unity
         private Label _inspection;
         private SliderInt _truckMinutes;
         private SliderInt _testTruckSpeed;
+        private SliderInt _testFurnaceWait;
         private Label _shipping;
         private Label _quantityHint;
         private Label _status;
@@ -57,6 +58,7 @@ namespace OpenFleet.Unity
         private Button _testMode;
         private Label _uiSize;
         private Button _expand;
+        private ScrollView _panelScroll;
 
         /// <summary>滑鼠是否在面板上；攝影機用來避免捲動清單時同時縮放畫面。</summary>
         public static bool PointerOverPanel { get; private set; }
@@ -136,7 +138,7 @@ namespace OpenFleet.Unity
 
             // 展開示範設定後內容比畫面高：整個面板在最大高度內捲動，各區塊不會被擠在一起。
             // 捲軸只在內容超過高度時出現；面板的寬度已經把捲軸算進去，出現時文字不會因此多換行。
-            var panelScroll = new ScrollView(ScrollViewMode.Vertical);
+            var panelScroll = _panelScroll = new ScrollView(ScrollViewMode.Vertical);
             panelScroll.horizontalScrollerVisibility = ScrollerVisibility.Hidden;
             _panel.Add(panelScroll);
             var content = panelScroll.contentContainer;
@@ -174,6 +176,23 @@ namespace OpenFleet.Unity
             _expand.style.display = DisplayStyle.None;
             _root.Add(_expand);
 
+            // 兩頁（P6）：「操作」是示範設定、下單與訂單；「排程」是排程預估。
+            var tabs = Row();
+            tabs.style.marginTop = 0;
+            tabs.style.marginBottom = 6;
+            _operationsTab = ActionButton("操作", () => ShowPage(false));
+            tabs.Add(_operationsTab);
+            _scheduleTab = ActionButton("排程", () => ShowPage(true));
+            tabs.Add(_scheduleTab);
+            content.Add(tabs);
+
+            var operations = _operationsPage = new VisualElement();
+            content.Add(operations);
+            _schedulePage = new VisualElement();
+            content.Add(_schedulePage);
+            BuildSchedulePage(_schedulePage);
+            ShowPage(false);
+
             // 設定預設收合，平常只留批次清單，不擋住場景；點標題展開。
             var settings = new Foldout { text = "示範設定（點此展開）", value = false };
             settings.RegisterValueChangedCallback(e =>
@@ -189,7 +208,7 @@ namespace OpenFleet.Unity
             title.style.fontSize = 16;
             title.style.unityFontStyleAndWeight = FontStyle.Bold;
             title.style.color = Color.white;
-            content.Add(settings);
+            operations.Add(settings);
 
             settings.Add(Hint("暫用數值，尚未定案；套用後存進後端資料庫。"));
 
@@ -234,6 +253,9 @@ namespace OpenFleet.Unity
             settings.Add(_truckMinutes);
             _testTruckSpeed = NumberField("測試：貨車（×）", 1, MaxTestSpeed);
             settings.Add(_testTruckSpeed);
+            // 測試模式下爐前有料、等超過這麼久（實際秒數）就直接開爐，不管有沒有湊到下限（使用者 2026-10-23）。
+            _testFurnaceWait = NumberField("測試：爐等待（秒）", 1, 600);
+            settings.Add(_testFurnaceWait);
 
             _stepRows = new VisualElement();
             settings.Add(_stepRows);
@@ -248,8 +270,8 @@ namespace OpenFleet.Unity
             var testRow = Row();
             _testMode = ActionButton("測試模式", () => StartCoroutine(ToggleTestMode()));
             testRow.Add(_testMode);
-            content.Add(testRow);
-            content.Add(Hint("開啟後各站依自己的倍率加快；AGV 交接與車速（空車、載貨）也依設定加快。"));
+            operations.Add(testRow);
+            operations.Add(Hint("開啟後各站依自己的倍率加快；AGV 交接與車速（空車、載貨）也依設定加快。"));
 
             // 重大事故：某個車型全部離線。平常隱藏，發生時用紅字顯示在最上面。
             _incident = new Label();
@@ -258,43 +280,43 @@ namespace OpenFleet.Unity
             _incident.style.unityFontStyleAndWeight = FontStyle.Bold;
             _incident.style.marginTop = 6;
             _incident.style.display = DisplayStyle.None;
-            content.Add(_incident);
+            operations.Add(_incident);
 
             // 需要人工處理的搬運：失敗而且系統不能自己重派（物料可能在車上）。平常是空的。
             _attention = new VisualElement();
-            content.Add(_attention);
+            operations.Add(_attention);
 
 
             // 下單與訂單（P5）：建立批次改成下客戶訂單。
-            BuildOrderForm(content);
+            BuildOrderForm(operations);
 
             _status = Hint(string.Empty);
             _status.style.whiteSpace = WhiteSpace.Normal;
-            content.Add(_status);
+            operations.Add(_status);
 
-            BuildOrderList(content);
+            BuildOrderList(operations);
 
             // 缺車統計：車都在忙、叫不到車時，機台真的停下來的時間，按工序列出。
-            content.Add(Heading("缺車耽誤"));
+            operations.Add(Heading("缺車耽誤"));
             _shortage = Hint("尚未讀到資料。");
             _shortage.style.whiteSpace = WhiteSpace.Normal;
-            content.Add(_shortage);
+            operations.Add(_shortage);
 
             // 品管的累計結果：合格、反工（表面回拋光、鍍層回電鍍）、報廢（尺寸不良，或反工次數用完）。
-            content.Add(Heading("品管"));
+            operations.Add(Heading("品管"));
             _inspection = Hint("尚未讀到資料。");
             _inspection.style.whiteSpace = WhiteSpace.Normal;
-            content.Add(_inspection);
+            operations.Add(_inspection);
 
             // 包裝與出貨：整張訂單做完才裝箱送到出貨站（或負責人同意的那一次分批）；貨車定時來，把出貨單的箱子都到齊的載走。
-            content.Add(Heading("出貨"));
+            operations.Add(Heading("出貨"));
             _shipping = Hint("尚未讀到資料。");
             _shipping.style.whiteSpace = WhiteSpace.Normal;
-            content.Add(_shipping);
+            operations.Add(_shipping);
 
             var resetRow = Row();
             resetRow.Add(ActionButton("清除示範資料", () => StartCoroutine(Post("/api/demo/reset", null, "已清除訂單、批次與搬運資料"))));
-            content.Add(resetRow);
+            operations.Add(resetRow);
         }
 
         /// <summary>
@@ -385,6 +407,7 @@ namespace OpenFleet.Unity
             _reworkBatchMin.value = settings.ReworkBatchMinPieces;
             SetValue(_truckMinutes, settings.TruckIntervalSeconds / 60d);
             SetValue(_testTruckSpeed, settings.TestTruckSpeed);
+            SetValue(_testFurnaceWait, settings.TestFurnaceWaitSeconds);
 
             _stepRows.Clear();
             _stepAppliers.Clear();
@@ -487,6 +510,7 @@ namespace OpenFleet.Unity
             _settings.ReworkBatchMinPieces = _reworkBatchMin.value;
             _settings.TruckIntervalSeconds = _truckMinutes.value * 60d;
             _settings.TestTruckSpeed = _testTruckSpeed.value;
+            _settings.TestFurnaceWaitSeconds = _testFurnaceWait.value;
             foreach (var apply in _stepAppliers)
             {
                 apply();
@@ -525,6 +549,12 @@ namespace OpenFleet.Unity
                 yield return RefreshInspection();
                 yield return RefreshShipping();
                 yield return RefreshAttention();
+                // 排程預估由後端推算，比其他查詢重：只在看排程頁時讀。
+                if (_scheduleVisible)
+                {
+                    yield return RefreshSchedule();
+                }
+
                 yield return new WaitForSecondsRealtime(RefreshSeconds);
             }
         }

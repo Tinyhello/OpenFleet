@@ -326,6 +326,12 @@ public sealed class ProductionSettings
     /// <summary>貨車倒數目前實際採用的倍率。</summary>
     public double TruckSpeed => TestMode ? TestTruckSpeed : 1;
 
+    /// <summary>
+    /// 測試模式下，爐空著、爐前有料等了這麼久（實際秒數）就直接開爐，不管有沒有湊到下限、後面還有沒有料要來
+    /// （使用者 2026-10-23：等超過 1 分鐘就開，淬火、回火、電鍍都套用）。從最早到的那一框與上一爐出爐較晚的那一刻算起。
+    /// </summary>
+    public double TestFurnaceWaitSeconds { get; set; } = 60;
+
     /// <summary>現在派出的搬運，交接一框要多久。</summary>
     public double EffectiveHandoverSeconds => TestMode ? AgvHandoverSeconds / TestHandoverSpeed : AgvHandoverSeconds;
 }
