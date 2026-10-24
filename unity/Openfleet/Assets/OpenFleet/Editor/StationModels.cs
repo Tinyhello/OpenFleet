@@ -7,7 +7,7 @@ namespace OpenFleet.Unity.Editor
     /// 各站點模型。區域座標：+Z 朝走道（交接點那側），占地約 X ±2.8、Z −2 ~ +2。
     /// 設備本體是 Blender 模型（Blender/Models/Station_*.blend，一種站一個檔）；
     /// 地面框線、執行時會切換的料箱、文字標籤在這裡產生。
-    /// 粗加工、精加工站畫出兩台車床，和後端的機台數相同；其他站的模型只表示「這裡是哪種站」，不代表實際設備規格。
+    /// 粗加工、精加工站畫出一台車床（一站一台，和後端的機台數相同）；其他站的模型只表示「這裡是哪種站」，不代表實際設備規格。
     /// </summary>
     internal static class StationModels
     {
@@ -38,26 +38,23 @@ namespace OpenFleet.Unity.Editor
         }
 
         /// <summary>
-        /// 兩台小型 CNC 車床加上兩台共用的機邊備料台、成品台（使用者 2026-10-22：粗加工、精加工各兩台車床）。
-        /// 粗加工與精加工共用模型，只換強調色。機台編號和後端的機台編號相同：-X 那台是 1 號機。
+        /// 一台小型 CNC 車床加上機邊的備料台、成品台（P7 第 1b 步：每台車床一站；使用者 2026-10-22 決定粗加工、精加工各兩台車床）。
+        /// 粗加工與精加工共用模型，只換強調色。備料台在 +X（+0.62 m），成品台在 -X（-0.62 m）。
         /// </summary>
         private static void Lathe(Transform root, Material accent)
         {
-            Model(root, "Station_CncLathePair", Vector3.zero, 0f, (Palette.RoughAccent, accent));
-            // 編號緊貼在車床頂上：從上方的攝影機看會落在車床上，不會和前方台子的「備料」「成品」疊在一起。
-            Label(root, "1號機", new Vector3(-1.2f, 2.12f, -0.55f), 0.04f, Color.white);
-            Label(root, "2號機", new Vector3(1.2f, 2.12f, -0.55f), 0.04f, Color.white);
+            Model(root, "Station_CncLathe", Vector3.zero, 0f, (Palette.RoughAccent, accent));
 
             // 備料區（待加工）與成品區（已加工、等待搬走）：台子在模型裡，台上的料箱只在有料時顯示（StationAnchor 切換）。
             // 容量與數量在後端，畫面上用進度條表示，沒有逐件的動畫。
-            var inbound = Group(root, "Inbound Table", new Vector3(2.1f, 0f, 1.3f));
+            var inbound = Group(root, "Inbound Table", new Vector3(0.62f, 0f, 1.3f));
             var inboundContents = Group(inbound, StationAnchor.InboundContentsName, Vector3.zero);
             Box(inboundContents, "Bin", new Vector3(0f, 0.83f, 0f), new Vector3(0.6f, 0.26f, 0.42f), Palette.Bin);
             Cylinder(inboundContents, "Blank", new Vector3(-0.12f, 0.99f, 0f), 0.1f, 0.34f, Palette.MachineDark, new Vector3(90f, 0f, 0f));
             Cylinder(inboundContents, "Blank", new Vector3(0.12f, 0.99f, 0f), 0.1f, 0.34f, Palette.MachineDark, new Vector3(90f, 0f, 0f));
             Label(inbound, "備料", new Vector3(0f, 1.25f, 0f), 0.045f, Color.white);
 
-            var outbound = Group(root, "Outbound Table", new Vector3(-2.1f, 0f, 1.3f));
+            var outbound = Group(root, "Outbound Table", new Vector3(-0.62f, 0f, 1.3f));
             var outboundContents = Group(outbound, StationAnchor.OutboundContentsName, Vector3.zero);
             Box(outboundContents, "Bin", new Vector3(0f, 0.83f, 0f), new Vector3(0.6f, 0.26f, 0.42f), Palette.Bin);
             Cylinder(outboundContents, "Part", new Vector3(-0.12f, 0.99f, 0f), 0.1f, 0.34f, Palette.Steel, new Vector3(90f, 0f, 0f));

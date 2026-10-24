@@ -241,7 +241,7 @@ namespace OpenFleet.Unity
             var palette = Palette;
             var machines = new List<MachineScheduleDto>(forecast.Machines);
             // 依製程的順序排（切料、粗加工……包裝）；讀不到設定時照後端的順序。
-            machines.Sort((a, b) => StepIndex(a.StationCode).CompareTo(StepIndex(b.StationCode)));
+            machines.Sort((a, b) => (a.StepSequence ?? int.MaxValue).CompareTo(b.StepSequence ?? int.MaxValue));
             var text = new StringBuilder();
             foreach (var machine in machines)
             {
@@ -303,22 +303,6 @@ namespace OpenFleet.Unity
             }
 
             return text.ToString();
-        }
-
-        private int StepIndex(string stationCode)
-        {
-            if (_settings != null)
-            {
-                foreach (var step in _settings.Steps)
-                {
-                    if (step.StationCode == stationCode)
-                    {
-                        return step.Sequence;
-                    }
-                }
-            }
-
-            return int.MaxValue;
         }
 
         /// <summary>

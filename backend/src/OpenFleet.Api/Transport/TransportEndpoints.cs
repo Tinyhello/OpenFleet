@@ -57,6 +57,7 @@ public static class TransportEndpoints
             LotNumber = t.Lot!.LotNumber,
             FromStationCode = t.FromStationCode,
             ToStationCode = t.ToStationCode,
+            ToStepName = db.ProcessSteps.Where(p => p.Sequence == t.ToStepSequence).Select(p => p.Name).FirstOrDefault(),
             Quantity = t.Quantity,
             Kind = t.Kind,
             Status = t.Status,

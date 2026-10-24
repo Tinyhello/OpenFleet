@@ -36,9 +36,9 @@ public sealed partial class CatalogService(OpenFleetDbContext db, TimeProvider t
     public const int DemoBarLengthMm = 1500;
     public const int DemoKerfMm = 3;
 
-    /// <summary>沖頭規格可以覆寫這兩站的每件加工時間。</summary>
-    public const string RoughStationCode = "rough";
-    public const string FinishStationCode = "fine";
+    /// <summary>沖頭規格可以覆寫這兩道工序的每件加工時間（工序代碼，P7 第 1a 步起和工站代碼分開）。</summary>
+    public const string RoughStepCode = "rough";
+    public const string FinishStepCode = "fine";
 
     public static string PartItemCode(string specCode, string partCode) => $"{specCode}-{ProductParts.Letter(partCode)}";
     public static string BlankItemCode(string specCode, string partCode) => $"{PartItemCode(specCode, partCode)}-BLK";
@@ -329,9 +329,9 @@ public sealed partial class CatalogService(OpenFleetDbContext db, TimeProvider t
     private async Task<(double Rough, double Finish)> StepDefaultsAsync(CancellationToken cancellationToken)
     {
         var steps = await db.ProcessSteps.AsNoTracking()
-            .Where(s => s.StationCode == RoughStationCode || s.StationCode == FinishStationCode)
-            .ToDictionaryAsync(s => s.StationCode, s => s.SecondsPerPiece, cancellationToken);
-        return (steps.GetValueOrDefault(RoughStationCode), steps.GetValueOrDefault(FinishStationCode));
+            .Where(s => s.Code == RoughStepCode || s.Code == FinishStepCode)
+            .ToDictionaryAsync(s => s.Code, s => s.SecondsPerPiece, cancellationToken);
+        return (steps.GetValueOrDefault(RoughStepCode), steps.GetValueOrDefault(FinishStepCode));
     }
 
     private static void ValidateBlankLength(int? value, string field)

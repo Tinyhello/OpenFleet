@@ -49,7 +49,7 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
         await using (var scope = _database.NewScope())
         {
             var task = await scope.Db.TransportTasks.SingleAsync(t => t.Kind == TransportTaskKind.ToolDelivery);
-            Assert.Equal(("tool-store", "rough", TransportTaskStatus.Pending, null), (task.FromStationCode, task.ToStationCode, task.Status, task.LotId));
+            Assert.Equal(("tool-store", "rough-1", TransportTaskStatus.Pending, null), (task.FromStationCode, TaskTarget.Of(task), task.Status, task.LotId));
         }
 
         // 同一把刀只叫一次。
@@ -192,7 +192,8 @@ public sealed class ToolDeliveryTests(PostgresFixture postgres) : IAsyncLifetime
     private async Task<StationStatusDto> RoughAsync()
     {
         await using var scope = _database.NewScope();
-        return (await scope.Production.GetStationStatusAsync(default)).Single(s => s.Code == "rough");
+        // 這一組測試用的是 1 號機（派工時第一個選到的）。
+        return (await scope.Production.GetStationStatusAsync(default)).Single(s => s.Code == "rough-1");
     }
 
     private async Task<VehicleShortageDto> SummaryAsync(params VehicleState[] vehicles)

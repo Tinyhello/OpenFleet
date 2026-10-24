@@ -149,10 +149,11 @@ public sealed class RoadNetwork
 public static class DemoRoadNetwork
 {
     /// <summary>
-    /// 車道中心線。廠房在 2026-10-22 往西加寬 8 m 放切料站（使用者選的），所以西側比東側遠：
-    /// 外圈 X 從 -30 到 22、內圈從 -28.2 到 20.2；兩條車道的間距（1.8 m）不變。
+    /// 車道中心線。廠房在 2026-10-22 往西加寬 8 m 放切料站（使用者選的），所以西側比東側遠；
+    /// P7 第 1b 步把車床拉寬到 8 m 間距（使用者 2026-10-24 選的），下排因此往東加長：外圈 X 從 -30 到 38、內圈從 -28.2 到 36.2。
+    /// 兩條車道的間距（1.8 m）不變。
     /// </summary>
-    private const double OuterZ = 7, OuterEastX = 22, OuterWestX = -30, InnerZ = 5.2, InnerEastX = 20.2, InnerWestX = -28.2, ParkingZ = 0.2;
+    private const double OuterZ = 7, OuterEastX = 38, OuterWestX = -30, InnerZ = 5.2, InnerEastX = 36.2, InnerWestX = -28.2, ParkingZ = 0.2;
 
     /// <summary>外圈站點的交接點離外圈車道 2.4 m：停在交接點上的車不會壓到車道。</summary>
     public const double HandoffZ = 9.4;
@@ -160,8 +161,11 @@ public static class DemoRoadNetwork
     /// <summary>刀具庫在走道內側的島區中央，交接點接在內圈車道下邊。</summary>
     public const double IslandX = 0, IslandHandoffZ = -3.2;
 
-    /// <summary>下排七站（切料、原料倉到電鍍）與上排五站（出貨、成品倉、包裝、品管、拋光）的位置；上排的 12 是雜物倉庫，沒有交接點。</summary>
-    private static readonly double[] BottomColumns = [-28, -20, -12, -4, 4, 12, 20];
+    /// <summary>
+    /// 下排九站（切料、原料倉、粗加工 1～2、精加工 1～2、淬火、回火、電鍍）與上排五站（出貨、成品倉、包裝、品管、拋光）的位置；
+    /// 上排的 12 是雜物倉庫，沒有交接點。下排的站都在 8 m 的格線上（P7 第 1b 步：粗加工、精加工各兩台車床之間拉寬到 8 m）。
+    /// </summary>
+    private static readonly double[] BottomColumns = [-28, -20, -12, -4, 4, 12, 20, 28, 36];
     private static readonly double[] TopColumns = [-20, -12, -4, 4, 20];
     /// <summary>
     /// 充電車位：示範車隊 4 台大型車加 1 台小型車（使用者 2026-10-22：大型車從 2 台加到 4 台），一台一格。
@@ -194,18 +198,19 @@ public static class DemoRoadNetwork
             }
         }
 
-        // 外圈車道：下邊與上邊每 4 m 一個節點，兩側各兩個。
-        double[] outerXs = [-28, -24, -20, -16, -12, -8, -4, 0, 4, 8, 12, 16, 20];
+        // 外圈車道：上下兩邊每 4 m 一個節點（站點的交接點都在節點上），兩側各兩個。
+        double[] outerXs = [-28, -24, -20, -16, -12, -8, -4, 0, 4, 8, 12, 16, 20, 24, 28, 32, 36];
+        double[] outerBottomXs = outerXs;
         var outer = new List<string> { Add(OuterWestX, -OuterZ) };
-        outer.AddRange(outerXs.Select(x => Add(x, -OuterZ)));
+        outer.AddRange(outerBottomXs.Select(x => Add(x, -OuterZ)));
         outer.AddRange([Add(OuterEastX, -OuterZ), Add(OuterEastX, -2), Add(OuterEastX, 2), Add(OuterEastX, OuterZ)]);
         outer.AddRange(outerXs.Reverse().Select(x => Add(x, OuterZ)));
         outer.AddRange([Add(OuterWestX, OuterZ), Add(OuterWestX, 2), Add(OuterWestX, -2)]);
         Ring(outer);
 
         // 內圈車道：轉角兼作最外側兩站的連接點；上邊多了三個充電車位的出入口。
-        double[] innerBottomXs = [-24, -20, -16, -12, -8, -4, 0, 4, 8, 12, 16];
-        double[] innerTopXs = [16, 12, 8, 4, 0, -5.7, -8, -10.3, -12.6, -14.4, -16, -20, -24];
+        double[] innerBottomXs = [-24, -20, -16, -12, -8, -4, 0, 4, 8, 12, 16, 20, 24, 28, 32];
+        double[] innerTopXs = [32, 28, 24, 20, 16, 12, 8, 4, 0, -5.7, -8, -10.3, -12.6, -14.4, -16, -20, -24];
         var inner = new List<string> { Add(InnerWestX, -InnerZ) };
         inner.AddRange(innerBottomXs.Select(x => Add(x, -InnerZ)));
         inner.AddRange([Add(InnerEastX, -InnerZ), Add(InnerEastX, 0), Add(InnerEastX, InnerZ)]);
@@ -218,14 +223,15 @@ public static class DemoRoadNetwork
         {
             foreach (var x in innerBottomXs)
             {
-                if (nodes.ContainsKey(Code(x, side * InnerZ)))
+                // 兩端的節點都要存在（外圈與內圈的 X 都有節點才連）。
+                if (nodes.ContainsKey(Code(x, side * InnerZ)) && nodes.ContainsKey(Code(x, side * OuterZ)))
                 {
                     Link(Code(x, side * OuterZ), Code(x, side * InnerZ));
                 }
             }
 
             Link(Code(-28, side * OuterZ), Code(InnerWestX, side * InnerZ));
-            Link(Code(20, side * OuterZ), Code(InnerEastX, side * InnerZ));
+            Link(Code(36, side * OuterZ), Code(InnerEastX, side * InnerZ));
         }
 
         // 站點交接點：接在外圈車道上的支線。

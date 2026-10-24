@@ -47,6 +47,25 @@ internal static class MachineQueries
         return blocked;
     }
 
+    /// <summary>
+    /// 現在不能接新框的機台：正在加工、刀具停機等刀或換刀、做完的那一框還沒被搬走（<see cref="BlockedMachinesAsync"/>）。
+    /// 只看 <paramref name="stationCodes"/> 這幾站。
+    /// </summary>
+    public static async Task<HashSet<string>> UnavailableMachinesAsync(
+        OpenFleetDbContext db, IReadOnlyCollection<string> stationCodes, IEnumerable<Machine> machines, CancellationToken cancellationToken)
+    {
+        var busy = await db.Operations.AsNoTracking()
+            .Where(o => o.Status == OperationStatus.Running && o.MachineCode != null)
+            .Select(o => o.MachineCode!)
+            .ToListAsync(cancellationToken);
+        var stopped = await db.MachineTools.AsNoTracking()
+            .Where(t => t.ChangeDueAt != null || t.WaitingSince != null)
+            .Select(t => t.MachineCode)
+            .ToListAsync(cancellationToken);
+        var blocked = await BlockedMachinesAsync(db, stationCodes, machines, cancellationToken);
+        return busy.Concat(stopped).Concat(blocked).ToHashSet(StringComparer.Ordinal);
+    }
+
     /// <summary>每一框最後是在哪一台機台做完的（只看有機台、已完成的逐件加工）；沒有做過的框不在結果裡。</summary>
     public static async Task<Dictionary<Guid, string>> FinishedOnAsync(
         OpenFleetDbContext db, IReadOnlyCollection<Guid> lotIds, CancellationToken cancellationToken)

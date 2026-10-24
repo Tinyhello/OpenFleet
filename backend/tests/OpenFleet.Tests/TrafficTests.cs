@@ -21,8 +21,8 @@ public class RoadNetworkTests
 
         Assert.All(Network.Nodes, node => Assert.NotNull(Network.FindPath(start, node.Code)));
 
-        // 13 個站點交接點（含切料站與成品倉；刀具庫在島區，接在內圈車道上）+ 5 個充電車位。
-        Assert.Equal(18, Network.Nodes.Count(n => Network.IsDeadEnd(n.Code)));
+        // 9 個下排站點（切料、原料倉、粗加工 1～2、精加工 1～2、淬火、回火、電鍍）+ 5 個上排站點 + 刀具庫（島區，接在內圈車道上）+ 5 個充電車位。
+        Assert.Equal(20, Network.Nodes.Count(n => Network.IsDeadEnd(n.Code)));
     }
 
     [Fact]
@@ -38,10 +38,10 @@ public class RoadNetworkTests
     [Fact]
     public void Shortest_path_can_use_either_lane_and_avoids_blocked_nodes()
     {
-        // 原料倉交接點到粗加工交接點：出來、沿外圈走 8 m、進去。
+        // 原料倉交接點到粗加工 1 號機交接點：出來、沿外圈走 4 + 4 m、進去。
         var direct = Network.FindPath("-20,-9.4", "-12,-9.4")!;
         Assert.Equal(new[] { "-20,-9.4", "-20,-7", "-16,-7", "-12,-7", "-12,-9.4" }, direct);
-        Assert.Equal(2.4 + 8 + 2.4, Network.PathLength("-20,-9.4", "-12,-9.4"), 6);
+        Assert.Equal(2.4 + 4 + 4 + 2.4, Network.PathLength("-20,-9.4", "-12,-9.4"), 6);
 
         // 外圈中間被占用：改走內圈繞過去。
         var detour = Network.FindPath("-20,-9.4", "-12,-9.4", blockedNodes: new HashSet<string> { "-16,-7" })!;
@@ -123,38 +123,38 @@ public class TrafficControllerTests
     public void Head_on_vehicles_in_the_same_lane_resolve_the_deadlock_and_both_arrive()
     {
         // 兩台車在外圈下邊相向而行，最短路徑互相穿過對方。
-        var east = Add("agv-01", "-16,-7", goal: "4,-9.4");
+        var east = Add("agv-01", "-16,-7", goal: "20,-9.4");
         var west = Add("agv-02", "12,-7", goal: "-12,-9.4");
 
-        RunUntil(() => east.Node == "4,-9.4" && west.Node == "-12,-9.4");
+        RunUntil(() => east.Node == "20,-9.4" && west.Node == "-12,-9.4");
     }
 
     [Fact]
     public void Vehicle_heading_for_an_occupied_handoff_waits_before_the_junction()
     {
         // 精加工的交接點上有車在作業（沒有要離開）。
-        var busy = Add("agv-01", "-4,-9.4", goal: null);
-        var car = Add("agv-02", "-20,-9.4", goal: "-4,-9.4");
+        var busy = Add("agv-01", "4,-9.4", goal: null);
+        var car = Add("agv-02", "-20,-9.4", goal: "4,-9.4");
 
         Run(seconds: 30);
 
         // 等在路口之前，路口 (-4,-7) 保持暢通，交接點上的車之後才出得來。
-        Assert.NotEqual("-4,-7", car.Node);
-        Assert.NotEqual("-4,-9.4", car.Node);
-        Assert.DoesNotContain("-4,-7", car.Visited);
+        Assert.NotEqual("4,-7", car.Node);
+        Assert.NotEqual("4,-9.4", car.Node);
+        Assert.DoesNotContain("4,-7", car.Visited);
 
         busy.Goal = "-10.3,0.2";
-        RunUntil(() => car.Node == "-4,-9.4" && busy.Node == "-10.3,0.2");
+        RunUntil(() => car.Node == "4,-9.4" && busy.Node == "-10.3,0.2");
     }
 
     [Fact]
     public void Vehicle_stuck_at_a_junction_yields_so_the_one_in_the_spur_can_leave()
     {
         // 最糟的情況：一台已經停在路口要進支線，支線裡的車要出來。誰也沒有別的路，只能有一台先退開。
-        var leaving = Add("agv-01", "-4,-9.4", goal: "4,-9.4");
-        var entering = Add("agv-02", "-4,-7", goal: "-4,-9.4");
+        var leaving = Add("agv-01", "4,-9.4", goal: "20,-9.4");
+        var entering = Add("agv-02", "4,-7", goal: "4,-9.4");
 
-        RunUntil(() => leaving.Node == "4,-9.4" && entering.Node == "-4,-9.4");
+        RunUntil(() => leaving.Node == "20,-9.4" && entering.Node == "4,-9.4");
     }
 
     [Fact]

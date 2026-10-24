@@ -163,25 +163,25 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.All(order.Lines.Single().Parts, p => Assert.Equal((20, 20, 0), (p.Ordered, p.Finished, p.InProgress)));
 
         var trace = await GetTraceAsync(lot.Id);
-        Assert.Equal((LotStatus.Boxed, "packing"), (trace.Lot.Status, trace.Lot.StationCode));
+        Assert.Equal((LotStatus.Boxed, "packing-1"), (trace.Lot.Status, trace.Lot.StationCode));
         Assert.Equal(
             new[]
             {
-                "station:raw-store", "vehicle:agv-t1", "station:rough", "vehicle:agv-t1", "station:fine", "vehicle:agv-t1", "station:heat",
-                "vehicle:agv-t1", "station:temper", "vehicle:agv-t1", "station:plating", "vehicle:agv-t1", "station:polish", "vehicle:agv-t1", "station:qc",
-                "vehicle:agv-t1", "station:packing",
+                "station:raw-store", "vehicle:agv-t1", "station:rough-1", "vehicle:agv-t1", "station:fine-1", "vehicle:agv-t1", "station:heat-1",
+                "vehicle:agv-t1", "station:temper-1", "vehicle:agv-t1", "station:plating-1", "vehicle:agv-t1", "station:polish-1", "vehicle:agv-t1", "station:qc-1",
+                "vehicle:agv-t1", "station:packing-1",
             },
             trace.Movements.Select(m => m.To));
-        Assert.Equal(new[] { "rough", "fine", "heat", "temper", "plating", "polish", "qc", "packing" }, trace.Operations.Select(o => o.StationCode));
+        Assert.Equal(new[] { "rough-1", "fine-1", "heat-1", "temper-1", "plating-1", "polish-1", "qc-1", "packing-1" }, trace.Operations.Select(o => o.StationCode));
         Assert.All(trace.Operations, o => Assert.Equal((Contracts.OperationStatus.Completed, 20, 20), (o.Status, o.PiecesCompleted, o.Quantity)));
         Assert.Equal(8, trace.Tasks.Count);
         Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
 
         // 站點狀態：粗加工、精加工的兩台車床刀具合計各 60 件，出貨站有 60 件在等貨車；車輛卸完料後是空車。
         var stations = (await _http.GetFromJsonAsync<List<StationStatusDto>>("/api/stations/status", JsonDefaults.Options))!;
-        Assert.Equal(60, stations.Single(s => s.Code == "rough").Machines.Sum(m => m.Tool!.PiecesUsed));
-        Assert.Equal(60, stations.Single(s => s.Code == "fine").Machines.Sum(m => m.Tool!.PiecesUsed));
-        Assert.Null(stations.Single(s => s.Code == "polish").Machine().Tool);
+        Assert.Equal(60, stations.Where(s => s.Code is "rough-1" or "rough-2").SelectMany(s => s.Machines).Sum(m => m.Tool!.PiecesUsed));
+        Assert.Equal(60, stations.Where(s => s.Code is "fine-1" or "fine-2").SelectMany(s => s.Machines).Sum(m => m.Tool!.PiecesUsed));
+        Assert.Null(stations.Single(s => s.Code == "polish-1").Machine().Tool);
         Assert.Equal(60, stations.Single(s => s.Code == "shipping").InboundQuantity);
         Assert.NotNull(stations.Single(s => s.Code == "shipping").Truck);
         await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });

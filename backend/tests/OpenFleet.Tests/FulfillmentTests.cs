@@ -245,7 +245,7 @@ public sealed class FulfillmentTests(PostgresFixture postgres) : IAsyncLifetime
         {
             var entry = db.Entry(lot);
             entry.Property(l => l.Status).CurrentValue = LotStatus.Packed;
-            entry.Property(l => l.StationCode).CurrentValue = "packing";
+            entry.Property(l => l.StationCode).CurrentValue = "packing-1";
             entry.Property(l => l.VehicleId).CurrentValue = null;
             entry.Property(l => l.CurrentStepSequence).CurrentValue = null;
         }
@@ -258,7 +258,7 @@ public sealed class FulfillmentTests(PostgresFixture postgres) : IAsyncLifetime
     {
         await using var db = _database.NewContext();
         var now = _database.Time.GetUtcNow();
-        var boxes = (await db.Lots.Where(l => l.IsBox && l.Status == LotStatus.AwaitingTransport && l.StationCode == "packing").ToListAsync()).Where(which);
+        var boxes = (await db.Lots.Where(l => l.IsBox && l.Status == LotStatus.AwaitingTransport && l.StationCode == "packing-1").ToListAsync()).Where(which);
         foreach (var box in boxes)
         {
             box.LoadOnto("agv-a", now);
@@ -285,8 +285,8 @@ public sealed class FulfillmentTests(PostgresFixture postgres) : IAsyncLifetime
         var qcStep = (await scope.Db.ProcessSteps.SingleAsync(s => s.IsInspection)).Sequence;
         var batch = await scope.Db.ProductionOrders.Where(o => o.Id == orderId).Select(o => o.Number).SingleAsync();
         var index = await scope.Db.Lots.CountAsync(l => l.BatchNumber == batch) + 1;
-        var lot = MaterialLot.Receive(ProductParts.UpperPunch, 1, "qc", qcStep, batch, 90 + index, 99, 30, now, "P30-RD12", productionOrderId: orderId);
-        lot.PlaceAt("qc", now);
+        var lot = MaterialLot.Receive(ProductParts.UpperPunch, 1, "qc-1", qcStep, batch, 90 + index, 99, 30, now, "P30-RD12", productionOrderId: orderId);
+        lot.PlaceAt("qc-1", now);
         scope.Db.Lots.Add(lot);
         scope.Production.OnLotArrived(lot, now);
         await scope.Db.SaveChangesAsync();

@@ -414,7 +414,7 @@ namespace OpenFleet.Unity
             foreach (var item in settings.Steps)
             {
                 var step = item;
-                _stepRows.Add(Hint($"{step.Sequence}. {step.StationName}"));
+                _stepRows.Add(Hint($"{step.Sequence}. {step.Name}"));
 
                 // 這一站的專用倍率，測試模式開啟時才有作用。
                 var testSpeed = NumberField("測試倍率（×）", 1, MaxTestSpeed);
@@ -602,7 +602,9 @@ namespace OpenFleet.Unity
                 {
                     var id = task.Id;
                     var what = task.Kind == TransportTaskKind.ToolDelivery ? "刀具" : $"{task.LotNumber} {task.Quantity} 件";
-                    var row = new Label($"{what}：{StationName(task.FromStationCode)} → {StationName(task.ToStationCode)}（{task.VehicleId}）\n{task.FailureReason}");
+                    // 還沒派車的搬運只指定到工序（派車時才定站），這時顯示工序名稱。
+                    var destination = task.ToStationCode is { } to ? StationName(to) : task.ToStepName ?? "未指定";
+                    var row = new Label($"{what}：{StationName(task.FromStationCode)} → {destination}（{task.VehicleId}）\n{task.FailureReason}");
                     row.style.whiteSpace = WhiteSpace.Normal;
                     row.style.fontSize = 12;
                     _attention.Add(row);
@@ -652,7 +654,7 @@ namespace OpenFleet.Unity
                 text.Append($"；累計等車 {Duration(shortage.WaitSeconds)}（{shortage.WaitCount} 次）");
                 foreach (var step in shortage.Steps)
                 {
-                    text.Append($"\n{step.Sequence}. {step.StationName}　停機 {Duration(step.DelaySeconds)}");
+                    text.Append($"\n{step.Sequence}. {step.StepName}　停機 {Duration(step.DelaySeconds)}");
                     text.Append($"（等料 {Duration(step.WaitingForMaterialSeconds)}／成品未搬走 {Duration(step.OutputNotRemovedSeconds)}／等刀 {Duration(step.WaitingForToolSeconds)}）");
                     if (step.CurrentCause.HasValue && step.CurrentReason == ShortageReason.VehiclesBusy)
                     {

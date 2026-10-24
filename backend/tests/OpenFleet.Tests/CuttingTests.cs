@@ -45,7 +45,7 @@ public sealed class CuttingTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal([1, 1, 0, 0, 0], bins.Select(b => b.CurrentStepSequence!.Value));
 
         await using var db = _database.NewContext();
-        var destinations = await db.TransportTasks.AsNoTracking().Select(t => t.ToStationCode).ToListAsync();
+        var destinations = (await db.TransportTasks.AsNoTracking().ToListAsync()).Select(TaskTarget.Of).ToList();
         Assert.Equal(["cutting", "cutting", "cutting", "rough", "rough"], destinations.Order());
 
         // 80 支、一根 13 支 → 7 根（91 支），多 11 支算在最後一框；圓棒依累計支數分到各框：3、2、2 根。
@@ -70,7 +70,7 @@ public sealed class CuttingTests(PostgresFixture postgres) : IAsyncLifetime
 
         // 20 支、一根 13 支：2 根、切 26 支、多 6 支。
         var lot = Assert.Single(bins);
-        await DeliverAsync(lot.LotNumber, "cutting");
+        await DeliverAsync(lot.LotNumber, "cutting-1");
         await AdvanceAsync(0);
         await using (var db = _database.NewContext())
         {
@@ -84,7 +84,7 @@ public sealed class CuttingTests(PostgresFixture postgres) : IAsyncLifetime
         {
             var cut = await db.Lots.AsNoTracking().SingleAsync(l => l.Id == lot.Id);
             Assert.Equal((LotStatus.AwaitingTransport, 1, 20), (cut.Status, cut.CurrentStepSequence!.Value, cut.Quantity));
-            Assert.True(await db.TransportTasks.AnyAsync(t => t.LotId == lot.Id && t.FromStationCode == "cutting" && t.ToStationCode == "rough"));
+            Assert.True(await db.TransportTasks.AnyAsync(t => t.LotId == lot.Id && t.FromStationCode == "cutting-1" && (t.ToStationCode == "rough-1" || t.ToStationCode == "rough-2" || t.ToStepSequence == 1)));
             Assert.NotNull((await db.CuttingJobs.AsNoTracking().SingleAsync(j => j.LotId == lot.Id)).CompletedAt);
         }
 
@@ -139,7 +139,7 @@ public sealed class CuttingTests(PostgresFixture postgres) : IAsyncLifetime
             Assert.Equal(
                 [LotStatus.AwaitingTransport, LotStatus.AwaitingTransport, LotStatus.AwaitingTransport, LotStatus.AwaitingMaterial],
                 statuses);
-            Assert.Equal(3, await db.TransportTasks.CountAsync(t => t.ToStationCode == "cutting"));
+            Assert.Equal(3, await db.TransportTasks.CountAsync(t => t.ToStationCode == "cutting-1" || t.ToStepSequence == 0));
         }
 
         var bar = await BalanceAsync(Bar);
@@ -202,8 +202,8 @@ public sealed class CuttingTests(PostgresFixture postgres) : IAsyncLifetime
     {
         await using var scope = _database.NewScope();
         var now = _database.Time.GetUtcNow();
-        var lot = MaterialLot.Receive(ProductParts.UpperPunch, 1, "qc", qcStep, batch, 1, 1, 30, now, spec);
-        lot.PlaceAt("qc", now);
+        var lot = MaterialLot.Receive(ProductParts.UpperPunch, 1, "qc-1", qcStep, batch, 1, 1, 30, now, spec);
+        lot.PlaceAt("qc-1", now);
         scope.Db.Lots.Add(lot);
         scope.Production.OnLotArrived(lot, now);
         await scope.Db.SaveChangesAsync();

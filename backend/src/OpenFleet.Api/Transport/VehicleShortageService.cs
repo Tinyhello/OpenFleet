@@ -69,11 +69,11 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
             if (reason == ShortageReason.FleetOffline)
             {
                 logger.LogError("Task {TaskId} ({From} -> {To}) cannot be dispatched: every vehicle of the required type is offline.",
-                    task.Id, task.FromStationCode, task.ToStationCode);
+                    task.Id, task.FromStationCode, DestinationOf(task));
             }
             else
             {
-                logger.LogInformation("Task {TaskId} ({From} -> {To}) is waiting: all vehicles are busy.", task.Id, task.FromStationCode, task.ToStationCode);
+                logger.LogInformation("Task {TaskId} ({From} -> {To}) is waiting: all vehicles are busy.", task.Id, task.FromStationCode, DestinationOf(task));
             }
         }
 
@@ -87,6 +87,9 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
     }
 
     private sealed record StoppedMachine(string Station, int Step, MachineDelayCause Cause, ShortageReason Reason, Guid TaskId);
+
+    /// <summary>記錄用的目的地：已定站的是站代碼，還沒定站的是工序。</summary>
+    private static string DestinationOf(TransportTask task) => task.ToStationCode ?? $"工序 {task.ToStepSequence}";
 
     /// <summary>
     /// 等車的任務讓哪些機台停了下來（以機台計，同一站的兩台車床各自算）。機台正在加工、換刀或停機等刀就不算閒置。
@@ -103,22 +106,52 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
             return stopped;
         }
 
-        // 只看逐件工序的機台。整爐工序本來就要等料累積到下限，站內沒有料不代表是缺車造成的停機。
+        // 只看逐件工序的站。整爐工序本來就要等料累積到下限，站內沒有料不代表是缺車造成的停機。
         var steps = await db.ProcessSteps.AsNoTracking()
             .Where(s => s.Kind == ProcessStepKind.Piece)
-            .ToDictionaryAsync(s => s.StationCode, s => s.Sequence, cancellationToken);
-        var stations = waiting.SelectMany(w => new[] { w.Task.FromStationCode, w.Task.ToStationCode }).Where(steps.ContainsKey).Distinct().ToList();
-        if (stations.Count == 0)
+            .ToDictionaryAsync(s => s.Sequence, cancellationToken);
+        var stationRows = await db.Stations.AsNoTracking().Where(s => s.StepSequence != null).ToListAsync(cancellationToken);
+        var stepOfStation = stationRows
+            .Where(s => steps.ContainsKey(s.StepSequence!.Value))
+            .ToDictionary(s => s.Code, s => s.StepSequence!.Value, StringComparer.Ordinal);
+        var stationsOfStep = stepOfStation
+            .GroupBy(p => p.Value)
+            .ToDictionary(g => g.Key, g => g.Select(p => p.Key).OrderBy(c => c, StringComparer.Ordinal).ToList());
+
+        // 任務的目的站：已經定站的是那一站；還沒定站（送到工序，派車時才選）的是那道工序的所有站。
+        IEnumerable<string> DestinationStations(TransportTask task)
+        {
+            if (task.ToStationCode is { } station)
+            {
+                return [station];
+            }
+
+            return task.ToStepSequence is { } sequence && stationsOfStep.TryGetValue(sequence, out var codes) ? codes : [];
+        }
+
+        var involved = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var w in waiting)
+        {
+            if (stepOfStation.ContainsKey(w.Task.FromStationCode))
+            {
+                involved.Add(w.Task.FromStationCode);
+            }
+
+            involved.UnionWith(DestinationStations(w.Task).Where(stepOfStation.ContainsKey));
+        }
+
+        if (involved.Count == 0)
         {
             return stopped;
         }
 
+        var stationCodes = involved.ToList();
         var machines = await db.Machines.AsNoTracking()
-            .Where(m => stations.Contains(m.StationCode))
+            .Where(m => stationCodes.Contains(m.StationCode))
             .OrderBy(m => m.Number)
             .ToListAsync(cancellationToken);
         var operations = await db.Operations.AsNoTracking()
-            .Where(o => stations.Contains(o.StationCode) && o.Status != OperationStatus.Completed)
+            .Where(o => stationCodes.Contains(o.StationCode) && o.Status != OperationStatus.Completed)
             .Select(o => new { o.StationCode, o.MachineCode, o.Status })
             .ToListAsync(cancellationToken);
         var running = operations.Where(o => o.Status == OperationStatus.Running && o.MachineCode != null)
@@ -130,23 +163,23 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
             .ToListAsync(cancellationToken);
         var changingTool = tools.Where(t => t.Changing).Select(t => t.MachineCode).ToHashSet(StringComparer.Ordinal);
         var waitingForTool = tools.Where(t => t.WaitingForTool).Select(t => t.MachineCode).ToHashSet(StringComparer.Ordinal);
-        var blocked = (await MachineQueries.BlockedMachinesAsync(db, stations, machines, cancellationToken)).ToHashSet(StringComparer.Ordinal);
+        var blocked = (await MachineQueries.BlockedMachinesAsync(db, stationCodes, machines, cancellationToken)).ToHashSet(StringComparer.Ordinal);
         var incoming = await db.TransportTasks.AsNoTracking()
-            .Where(t => stations.Contains(t.ToStationCode) && t.Kind != TransportTaskKind.ToolDelivery
+            .Where(t => t.ToStationCode != null && stationCodes.Contains(t.ToStationCode) && t.Kind != TransportTaskKind.ToolDelivery
                 && (t.Status == TransportTaskStatus.Assigned || t.Status == TransportTaskStatus.Executing))
-            .Select(t => t.ToStationCode)
+            .Select(t => t.ToStationCode!)
             .ToListAsync(cancellationToken);
 
         int Queued(string station) => operations.Count(o => o.StationCode == station && o.Status == OperationStatus.Queued);
         bool Idle(Machine machine) =>
             !running.Contains(machine.Code) && !changingTool.Contains(machine.Code) && !waitingForTool.Contains(machine.Code);
         void Stop(Machine machine, MachineDelayCause cause, ShortageReason reason, Guid taskId) =>
-            stopped.TryAdd(machine.Code, new StoppedMachine(machine.StationCode, steps[machine.StationCode], cause, reason, taskId));
+            stopped.TryAdd(machine.Code, new StoppedMachine(machine.StationCode, stepOfStation[machine.StationCode], cause, reason, taskId));
 
         // 機台停著等刀時，停機的原因是刀具，不是物料：先判斷。
         foreach (var (task, reason) in waiting.Where(w => w.Task.Kind == TransportTaskKind.ToolDelivery))
         {
-            var target = task.MachineCode ?? Machine.CodeOf(task.ToStationCode, 1);
+            var target = task.MachineCode!;
             if (waitingForTool.Contains(target) && machines.SingleOrDefault(m => m.Code == target) is { } machine)
             {
                 Stop(machine, MachineDelayCause.WaitingForTool, reason, task.Id);
@@ -157,7 +190,7 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
         var finishedOn = await MachineQueries.FinishedOnAsync(db, material.Select(w => w.Task.LotId).OfType<Guid>().ToList(), cancellationToken);
 
         // 成品沒被搬走：做完這一框的機台被它卡住，而站上還有框排隊、沒有空著的機台可以接（每一框只算一台）。
-        var work = stations.ToDictionary(
+        var work = stationCodes.ToDictionary(
             s => s, s => Queued(s) - machines.Count(m => m.StationCode == s && Idle(m) && !blocked.Contains(m.Code)), StringComparer.Ordinal);
         foreach (var (task, reason) in material)
         {
@@ -165,18 +198,22 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
             var maker = source.Count == 1 ? source[0]
                 : task.LotId is { } lotId && finishedOn.TryGetValue(lotId, out var code) ? source.SingleOrDefault(m => m.Code == code)
                 : null;
-            if (maker is not null && Idle(maker) && blocked.Contains(maker.Code) && !stopped.ContainsKey(maker.Code) && work[maker.StationCode] > 0)
+            if (maker is not null && Idle(maker) && blocked.Contains(maker.Code) && !stopped.ContainsKey(maker.Code) && work.GetValueOrDefault(maker.StationCode) > 0)
             {
                 Stop(maker, MachineDelayCause.OutputNotRemoved, reason, task.Id);
                 work[maker.StationCode]--;
             }
         }
 
-        // 等不到料：每一站閒置的機台扣掉排隊與正在送來的框，就是沒有東西可做的台數；叫不到車的框有幾框，最多就算幾台在等料。
-        foreach (var group in material.GroupBy(w => w.Task.ToStationCode).Where(g => steps.ContainsKey(g.Key)))
+        // 等不到料：每一道工序閒置的機台扣掉排隊與正在送來的框，就是沒有東西可做的台數；叫不到車的框有幾框，最多就算幾台在等料。
+        foreach (var group in material
+            .Where(w => w.Task.ToStationCode is not null || w.Task.ToStepSequence is not null)
+            .GroupBy(w => w.Task.ToStepSequence ?? (w.Task.ToStationCode is { } to && stepOfStation.TryGetValue(to, out var seq) ? seq : -1))
+            .Where(g => g.Key >= 0 && stationsOfStep.ContainsKey(g.Key)))
         {
-            var idle = machines.Where(m => m.StationCode == group.Key && Idle(m)).ToList();
-            var starving = idle.Count - Queued(group.Key) - incoming.Count(s => s == group.Key);
+            var stepStations = stationsOfStep[group.Key];
+            var idle = machines.Where(m => stepStations.Contains(m.StationCode) && Idle(m)).ToList();
+            var starving = idle.Count - stepStations.Sum(s => Queued(s)) - incoming.Count(s => stepStations.Contains(s));
             foreach (var (machine, (task, reason)) in idle.Where(m => !stopped.ContainsKey(m.Code)).Zip(group).Take(Math.Max(0, starving)))
             {
                 Stop(machine, MachineDelayCause.WaitingForMaterial, reason, task.Id);
@@ -192,7 +229,6 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
     /// </summary>
     public async Task<VehicleShortageDto> GetSummaryAsync(IReadOnlyCollection<VehicleState> vehicles, CancellationToken cancellationToken)
     {
-        var stations = await db.Stations.AsNoTracking().ToDictionaryAsync(s => s.Code, s => s.Name, cancellationToken);
         var steps = await db.ProcessSteps.AsNoTracking()
             .Where(s => s.Kind == ProcessStepKind.Piece)
             .OrderBy(s => s.Sequence)
@@ -205,9 +241,9 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
         var current = (await db.MachineDelays.AsNoTracking()
                 .Where(d => d.EndedAt == null)
                 .OrderBy(d => d.MachineCode)
-                .Select(d => new { d.StationCode, d.Cause, d.Reason })
+                .Select(d => new { d.StepSequence, d.Cause, d.Reason })
                 .ToListAsync(cancellationToken))
-            .GroupBy(d => d.StationCode)
+            .GroupBy(d => d.StepSequence)
             .ToDictionary(g => g.Key, g => g.First());
         var waits = await db.VehicleWaits.AsNoTracking()
             .GroupBy(w => w.Reason)
@@ -242,12 +278,12 @@ public sealed class VehicleShortageService(OpenFleetDbContext db, TimeProvider t
                 var material = Busy(step.Sequence, MachineDelayCause.WaitingForMaterial);
                 var output = Busy(step.Sequence, MachineDelayCause.OutputNotRemoved);
                 var tool = Busy(step.Sequence, MachineDelayCause.WaitingForTool);
-                var now = current.GetValueOrDefault(step.StationCode);
+                var now = current.GetValueOrDefault(step.Sequence);
                 return new StepDelayDto
                 {
                     Sequence = step.Sequence,
-                    StationCode = step.StationCode,
-                    StationName = stations[step.StationCode],
+                    StepCode = step.Code,
+                    StepName = step.Name,
                     DelaySeconds = material + output + tool,
                     WaitingForMaterialSeconds = material,
                     OutputNotRemovedSeconds = output,

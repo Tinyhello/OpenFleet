@@ -166,16 +166,16 @@ public sealed class OrderTests(PostgresFixture postgres) : IAsyncLifetime
         });
 
         // 六角 10 覆寫了精加工（90 秒），圓形 12 沒有（沿用製程設定的 60 秒）；粗加工兩個都沿用 30 秒。
-        Assert.Equal(90d, await StartAsync(hex.Lines[0].ProductionOrders[0].Id, "P30-HX10", "fine"));
-        Assert.Equal(60d, await StartAsync(round.Lines[0].ProductionOrders[0].Id, "P30-RD12", "fine"));
-        Assert.Equal(30d, await StartAsync(hex.Lines[0].ProductionOrders[0].Id, "P30-HX10", "rough"));
+        Assert.Equal(90d, await StartAsync(hex.Lines[0].ProductionOrders[0].Id, "P30-HX10", "fine-1"));
+        Assert.Equal(60d, await StartAsync(round.Lines[0].ProductionOrders[0].Id, "P30-RD12", "fine-1"));
+        Assert.Equal(30d, await StartAsync(hex.Lines[0].ProductionOrders[0].Id, "P30-HX10", "rough-1"));
 
         async Task<double> StartAsync(Guid orderId, string spec, string station)
         {
             int step;
             await using (var db = _database.NewContext())
             {
-                step = (await db.ProcessSteps.SingleAsync(s => s.StationCode == station)).Sequence;
+                step = (await db.Stations.SingleAsync(s => s.Code == station)).StepSequence!.Value;
             }
 
             var lotId = await ArriveAsync(orderId, spec, ProductParts.UpperPunch, station, step);
@@ -292,7 +292,7 @@ public sealed class OrderTests(PostgresFixture postgres) : IAsyncLifetime
             qcStep = (await db.ProcessSteps.SingleAsync(s => s.IsInspection)).Sequence;
         }
 
-        await ArriveAsync(orderId, spec, part, "qc", qcStep);
+        await ArriveAsync(orderId, spec, part, "qc-1", qcStep);
     }
 
     /// <summary>直接把一框屬於 <paramref name="orderId"/> 的料（1 支）放到 <paramref name="station"/> 排隊。</summary>

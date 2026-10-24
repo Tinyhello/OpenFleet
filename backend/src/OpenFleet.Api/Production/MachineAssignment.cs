@@ -29,10 +29,11 @@ public static class MachineAssignment
     /// 把排隊的框（<paramref name="waiting"/>，依到站順序）配給空著的機台，回傳配好的組合；機台或框用完就停。
     /// <paramref name="isLathe"/>：有刀具的工序（粗加工、精加工）才會換線，排序先看換線，其他站先看同批次。
     /// <paramref name="priority"/>：每一框的優先順序；沒給時都一樣。
+    /// <paramref name="canPair"/>：這台機台能不能接這一框（例如框已經排在另一座站前就不能給這台）；沒給時都能接。
     /// </summary>
     public static List<(FreeMachine Machine, T Item)> Assign<T>(
         IReadOnlyList<FreeMachine> machines, IReadOnlyList<T> waiting, Func<T, Setup> describe, bool isLathe,
-        Func<T, SchedulePriority>? priority = null)
+        Func<T, SchedulePriority>? priority = null, Func<FreeMachine, T, bool>? canPair = null)
     {
         var free = machines.ToList();
         var queue = waiting
@@ -41,7 +42,16 @@ public static class MachineAssignment
         var assigned = new List<(FreeMachine, T)>();
         while (free.Count > 0 && queue.Count > 0)
         {
-            var best = free.SelectMany(machine => queue.Select(entry => (Machine: machine, Entry: entry)))
+            var pairs = free.SelectMany(machine => queue
+                    .Where(entry => canPair is null || canPair(machine, entry.Item))
+                    .Select(entry => (Machine: machine, Entry: entry)))
+                .ToList();
+            if (pairs.Count == 0)
+            {
+                break;
+            }
+
+            var best = pairs
                 .OrderBy(pair => pair.Entry.Priority)
                 .ThenBy(pair => Rank(pair.Machine.Last, pair.Entry.Setup, isLathe))
                 .ThenBy(pair => pair.Entry.Index)
@@ -55,8 +65,10 @@ public static class MachineAssignment
         return assigned;
     }
 
-    /// <summary>越小越優先，對應類別說明的 1～5。</summary>
-    private static int Rank(Setup? last, Setup bin, bool isLathe)
+    /// <summary>
+    /// 越小越優先，對應類別說明的 1～5。同一站有好幾台機台時，站的排名取其中最好的（<see cref="StationSelector"/> 用）。
+    /// </summary>
+    internal static int Rank(Setup? last, Setup bin, bool isLathe)
     {
         var sameSetup = isLathe
             ? !NeedsChangeover(last, bin.PartCode, bin.RodDiameterMm)

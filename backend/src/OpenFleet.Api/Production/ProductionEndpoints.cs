@@ -18,6 +18,7 @@ public static class ProductionEndpoints
                 HandoffX = s.HandoffX,
                 HandoffZ = s.HandoffZ,
                 InboundCapacity = s.InboundCapacity,
+                StepSequence = s.StepSequence,
             }).ToListAsync(ct));
 
         // 備料區、成品區、加工與刀具的即時狀態；顯示端每秒輪詢數次。
@@ -91,6 +92,7 @@ public static class ProductionEndpoints
                        Kind = task.Kind,
                        FromStationCode = task.FromStationCode,
                        ToStationCode = task.ToStationCode,
+                       ToStepName = db.ProcessSteps.Where(p => p.Sequence == task.ToStepSequence).Select(p => p.Name).FirstOrDefault(),
                        StartedAt = wait.StartedAt,
                        EndedAt = wait.EndedAt,
                        SimulatedSeconds = wait.SimulatedSeconds,

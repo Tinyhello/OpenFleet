@@ -152,6 +152,9 @@ namespace OpenFleet.Contracts
 
         /// <summary>待加工料容量（件）；null 表示這個站的容量尚未建模，不代表無限。</summary>
         public int? InboundCapacity { get; set; }
+
+        /// <summary>這一站屬於哪一道工序（ProcessStepDto.Sequence）；倉儲站與出貨站沒有工序，為 null。</summary>
+        public int? StepSequence { get; set; }
     }
 
     /// <summary>工序的做法。</summary>
@@ -167,8 +170,12 @@ namespace OpenFleet.Contracts
     public sealed class ProcessStepDto
     {
         public int Sequence { get; set; }
-        public string StationCode { get; set; } = string.Empty;
-        public string StationName { get; set; } = string.Empty;
+
+        /// <summary>工序代碼（例如 rough、heat），和工站代碼分開；同一道工序可能有好幾站（P7 之後）。</summary>
+        public string Code { get; set; } = string.Empty;
+
+        /// <summary>工序名稱，顯示用（粗加工、淬火）。</summary>
+        public string Name { get; set; } = string.Empty;
 
         /// <summary>唯讀：逐件或整爐。PUT 時忽略。</summary>
         public ProcessStepKind Kind { get; set; }
@@ -387,7 +394,14 @@ namespace OpenFleet.Contracts
         public Guid? LotId { get; set; }
         public string? LotNumber { get; set; }
         public string FromStationCode { get; set; } = string.Empty;
-        public string ToStationCode { get; set; } = string.Empty;
+
+        /// <summary>
+        /// 目的站。送到某道工序的搬運，派車時才決定是哪一站，所以在待派工期間為 null（看 <see cref="ToStepName"/>）。
+        /// </summary>
+        public string? ToStationCode { get; set; }
+
+        /// <summary>送到某道工序的搬運，這道工序的名稱（粗加工、淬火）；送到指定站的為 null。</summary>
+        public string? ToStepName { get; set; }
         public int Quantity { get; set; }
         public TransportTaskKind Kind { get; set; }
         public TransportTaskStatus Status { get; set; }
@@ -544,6 +558,9 @@ namespace OpenFleet.Contracts
 
         /// <summary>出貨站才有：下一班貨車的倒數；其他站為 null。</summary>
         public TruckStatusDto? Truck { get; set; }
+
+        /// <summary>這一站屬於哪一道工序；倉儲站與出貨站為 null。</summary>
+        public int? StepSequence { get; set; }
     }
 
     /// <summary>一台機台（人工作業的站是一個工位）目前的狀態。</summary>
@@ -608,8 +625,8 @@ namespace OpenFleet.Contracts
     public sealed class StepDelayDto
     {
         public int Sequence { get; set; }
-        public string StationCode { get; set; } = string.Empty;
-        public string StationName { get; set; } = string.Empty;
+        public string StepCode { get; set; } = string.Empty;
+        public string StepName { get; set; } = string.Empty;
 
         /// <summary>因缺車（車都在忙）耽誤的總時間＝下面三項相加。不含離線事故。</summary>
         public double DelaySeconds { get; set; }
@@ -664,7 +681,12 @@ namespace OpenFleet.Contracts
         public string? LotNumber { get; set; }
         public TransportTaskKind Kind { get; set; }
         public string FromStationCode { get; set; } = string.Empty;
-        public string ToStationCode { get; set; } = string.Empty;
+
+        /// <summary>目的站；待派工的送到工序的搬運為 null（看 <see cref="ToStepName"/>）。</summary>
+        public string? ToStationCode { get; set; }
+
+        /// <summary>送到某道工序的搬運，這道工序的名稱；送到指定站的為 null。</summary>
+        public string? ToStepName { get; set; }
         public DateTimeOffset StartedAt { get; set; }
 
         /// <summary>還在等待時為 null。</summary>

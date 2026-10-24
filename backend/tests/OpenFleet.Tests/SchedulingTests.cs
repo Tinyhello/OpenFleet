@@ -28,11 +28,11 @@ public sealed class SchedulingTests(PostgresFixture postgres)
         var rush = await CreateAsync(database, "P30-RD12-L", 30);
         await RushAsync(database, rush.Id, "廠長");
 
-        // 到站順序：一般、一般、急單。粗加工兩台都空著：急單和最先到的一般訂單先做，第二張一般訂單排隊。
-        foreach (var order in new[] { first, second, rush })
-        {
-            await ArriveAsync(database, order, "rough", 1, 30);
-        }
+        // 到站順序：一般、一般、急單。粗加工 1 號機先做最先到的一般訂單，第二張一般訂單排在它後面；
+        // 2 號機是空的，急單直接上 2 號機，不用等比它早到的一般訂單。
+        await ArriveAsync(database, first, "rough-1", 1, 30);
+        await ArriveAsync(database, second, "rough-1", 1, 30);
+        await ArriveAsync(database, rush, "rough-2", 1, 30);
 
         await AdvanceAsync(database, 0);
         await using var db = database.NewContext();
@@ -52,17 +52,17 @@ public sealed class SchedulingTests(PostgresFixture postgres)
         // 拋光只有一台：沒有交期的最先到、交期晚的其次、交期早的最後到，先做交期早的。
         foreach (var order in new[] { none, later, soon })
         {
-            await ArriveAsync(database, order, "polish", 6, 1);
+            await ArriveAsync(database, order, "polish-1", 6, 1);
         }
 
         await AdvanceAsync(database, 0);
-        Assert.Equal(WorkOrder(soon), await RunningAtAsync(database, "polish"));
+        Assert.Equal(WorkOrder(soon), await RunningAtAsync(database, "polish-1"));
 
         // 做完、搬走之後，換交期晚的那張；沒有交期的最後。
-        await PickUpAsync(database, "polish", 60);
-        Assert.Equal(WorkOrder(later), await RunningAtAsync(database, "polish"));
-        await PickUpAsync(database, "polish", 60);
-        Assert.Equal(WorkOrder(none), await RunningAtAsync(database, "polish"));
+        await PickUpAsync(database, "polish-1", 60);
+        Assert.Equal(WorkOrder(later), await RunningAtAsync(database, "polish-1"));
+        await PickUpAsync(database, "polish-1", 60);
+        Assert.Equal(WorkOrder(none), await RunningAtAsync(database, "polish-1"));
     }
 
     [Fact]
@@ -76,18 +76,18 @@ public sealed class SchedulingTests(PostgresFixture postgres)
         // 淬火一爐最多 300 支：一般訂單的 10 框（300 支）先到，急單的一框最後到。急單的框裝進這一爐，一般訂單留一框到下一爐。
         for (var i = 0; i < 10; i++)
         {
-            await ArriveAsync(database, normal, "heat", 3, 30);
+            await ArriveAsync(database, normal, "heat-1", 3, 30);
         }
 
-        await ArriveAsync(database, rush, "heat", 3, 30);
+        await ArriveAsync(database, rush, "heat-1", 3, 30);
         await AdvanceAsync(database, 0);
 
         await using var db = database.NewContext();
-        var inFurnace = await db.Operations.Where(o => o.Status == OperationStatus.Running && o.StationCode == "heat")
+        var inFurnace = await db.Operations.Where(o => o.Status == OperationStatus.Running && o.StationCode == "heat-1")
             .Select(o => o.Lot.BatchNumber).ToListAsync();
         Assert.Equal(10, inFurnace.Count);
         Assert.Contains(WorkOrder(rush), inFurnace);
-        Assert.Equal(WorkOrder(normal), await db.Operations.Where(o => o.Status == OperationStatus.Queued && o.StationCode == "heat")
+        Assert.Equal(WorkOrder(normal), await db.Operations.Where(o => o.Status == OperationStatus.Queued && o.StationCode == "heat-1")
             .Select(o => o.Lot.BatchNumber).SingleAsync());
     }
 
@@ -131,10 +131,10 @@ public sealed class SchedulingTests(PostgresFixture postgres)
         await using (var db = database.NewContext())
         {
             var now = database.Time.GetUtcNow();
-            var finished = MaterialLot.Receive("upper-punch", 10, "rough", 2, WorkOrder(none), 9, 9, 30, now, "P30-RD12",
+            var finished = MaterialLot.Receive("upper-punch", 10, "rough-1", 2, WorkOrder(none), 9, 9, 30, now, "P30-RD12",
                 productionOrderId: none.Lines[0].ProductionOrders[0].Id);
             db.Lots.Add(finished);
-            db.TransportTasks.Add(TransportTask.Create(finished, "rough", "fine", TransportTaskKind.WipTransfer, now));
+            db.TransportTasks.Add(TransportTask.Create(finished, "rough-1", "fine-1", TransportTaskKind.WipTransfer, now));
             await db.SaveChangesAsync();
         }
 
@@ -172,7 +172,7 @@ public sealed class SchedulingTests(PostgresFixture postgres)
             {
                 var entry = db.Entry(lot);
                 entry.Property(l => l.Status).CurrentValue = LotStatus.Packed;
-                entry.Property(l => l.StationCode).CurrentValue = "packing";
+                entry.Property(l => l.StationCode).CurrentValue = "packing-1";
                 entry.Property(l => l.CurrentStepSequence).CurrentValue = null;
             }
 

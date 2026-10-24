@@ -17,7 +17,7 @@ namespace OpenFleet.Api.Transport;
 /// 搬運出問題時的恢復流程：物料還在取料站的可以自動重派；物料可能在車上的要等人工確認（<see cref="ResolveAsync"/>）。
 /// </summary>
 /// <summary>一台車目前的有效派工：交通控制用它決定車要去取料點還是卸料點。</summary>
-public sealed record MovementGoal(string VehicleId, AssignmentStatus Status, string FromStationCode, string ToStationCode);
+public sealed record MovementGoal(string VehicleId, AssignmentStatus Status, string FromStationCode, string? ToStationCode);
 
 public sealed class TransportService(
     OpenFleetDbContext db,
@@ -74,6 +74,7 @@ public sealed class TransportService(
         var available = online.Where(v => !busy.Contains(v.VehicleId)).ToList();
 
         var stations = await db.Stations.AsNoTracking().ToDictionaryAsync(s => s.Code, cancellationToken);
+        var steps = await db.ProcessSteps.AsNoTracking().ToDictionaryAsync(s => s.Sequence, cancellationToken);
         // 測試模式下交接時間依設定的倍率縮短；派出的那一刻決定，之後改設定不影響已派出的搬運。
         var handoverSeconds = (await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken)).EffectiveHandoverSeconds;
         var options = fleetOptions.Value;
@@ -82,10 +83,29 @@ public sealed class TransportService(
 
         foreach (var task in pending)
         {
-            if (task.Kind != TransportTaskKind.ToolDelivery
-                && !await HasRoomAsync(stations[task.ToStationCode], task.Quantity, cancellationToken))
+            // 目的站：送到指定站的（成品倉、出貨、刀具庫、機台所在的站）已經定好；送到工序的要從那道工序的站裡挑。
+            var destinations = new List<Station>();
+            if (task.ToStationCode is { } fixedStation)
             {
-                // 目的站放不下：任務繼續等待，不占用車輛，也不影響排在後面、目的地不同的任務。這不算缺車。
+                destinations.Add(stations[fixedStation]);
+            }
+            else if (task.ToStepSequence is { } step)
+            {
+                destinations.AddRange(stations.Values.Where(s => s.StepSequence == step).OrderBy(s => s.Code, StringComparer.Ordinal));
+            }
+
+            // 目的站放不下：任務繼續等待，不占用車輛，也不影響排在後面、目的地不同的任務。這不算缺車。
+            var roomy = new List<Station>();
+            foreach (var candidate in destinations)
+            {
+                if (task.Kind == TransportTaskKind.ToolDelivery || await HasRoomAsync(candidate, task.Quantity, cancellationToken))
+                {
+                    roomy.Add(candidate);
+                }
+            }
+
+            if (roomy.Count == 0)
+            {
                 continue;
             }
 
@@ -108,15 +128,23 @@ public sealed class TransportService(
                 .ThenBy(v => v.VehicleId, StringComparer.Ordinal)
                 .First();
 
+            // 目的站：只有一站可選就是那一站；有好幾站的從放得下的站裡挑（StationSelector）。
+            var destination = roomy.Count == 1 ? roomy[0] : await ChooseStationAsync(task, roomy, steps, pickupNode, cancellationToken);
+
             var now = time.GetUtcNow();
             var attempt = await db.Assignments.CountAsync(a => a.TaskId == task.Id, cancellationToken) + 1;
+            if (task.ToStationCode is null)
+            {
+                task.BindDestination(destination.Code);
+            }
+
             var assignment = task.Assign(vehicle.VehicleId, attempt, now, options.CommandTimeToLive);
             db.Assignments.Add(assignment);
-            db.OutboxMessages.Add(CreateCommandMessage(assignment, task, pickup, stations[task.ToStationCode], handoverSeconds, now));
+            db.OutboxMessages.Add(CreateCommandMessage(assignment, task, pickup, destination, handoverSeconds, now));
 
             try
             {
-                // 派工、任務狀態、歷史與待發送指令在同一筆交易寫入：要嘛全部成功，要嘛全部沒有。
+                // 派工、任務狀態（含目的站）、歷史與待發送指令在同一筆交易寫入：要嘛全部成功，要嘛全部沒有。
                 await db.SaveChangesAsync(cancellationToken);
             }
             catch (DbUpdateException ex)
@@ -130,11 +158,83 @@ public sealed class TransportService(
             available.Remove(vehicle);
             dispatched++;
             logger.LogInformation("Task {TaskId} ({Kind}, {From} -> {To}, lot {LotNumber}) assigned to {VehicleId}, attempt {Attempt}.",
-                task.Id, task.Kind, task.FromStationCode, task.ToStationCode, task.Lot?.LotNumber ?? "-", vehicle.VehicleId, attempt);
+                task.Id, task.Kind, task.FromStationCode, destination.Code, task.Lot?.LotNumber ?? "-", vehicle.VehicleId, attempt);
         }
 
         await shortage.RecordAsync(waitingForVehicle, cancellationToken);
         return dispatched;
+    }
+
+    /// <summary>
+    /// 送到某道工序、而且那道工序有好幾站：從放得下的站裡挑一站（<see cref="StationSelector"/>）。
+    /// 逐件工序看站上機台的換線與空閒；整爐工序看爐的排隊與是否在跑。路程是從取料站沿路網算的。
+    /// </summary>
+    private async Task<Station> ChooseStationAsync(
+        TransportTask task, IReadOnlyList<Station> rooms, IReadOnlyDictionary<int, ProcessStep> steps, string pickupNode,
+        CancellationToken cancellationToken)
+    {
+        var step = steps[task.ToStepSequence!.Value];
+        var codes = rooms.Select(r => r.Code).ToList();
+        var routes = rooms.ToDictionary(
+            r => r.Code, r => network.PathLength(pickupNode, network.Nearest(r.HandoffX, r.HandoffZ).Code), StringComparer.Ordinal);
+        string? chosen;
+
+        if (step.Kind == ProcessStepKind.Piece)
+        {
+            var machines = await db.Machines.AsNoTracking()
+                .Where(m => codes.Contains(m.StationCode))
+                .OrderBy(m => m.Number)
+                .ToListAsync(cancellationToken);
+            var unavailable = await MachineQueries.UnavailableMachinesAsync(db, codes, machines, cancellationToken);
+            var setup = new MachineAssignment.Setup(task.Lot!.BatchNumber, task.Lot.PartCode, task.Lot.RodDiameterMm);
+            var candidates = new List<StationSelector.PieceCandidate>();
+            foreach (var room in rooms)
+            {
+                var rank = int.MaxValue;
+                var ready = false;
+                foreach (var machine in machines.Where(m => m.StationCode == room.Code))
+                {
+                    // 這台機台上一框做的是什麼（還沒做過的機台不用換線），和 StartQueuedOperationsAsync 的規則相同。
+                    var last = await db.Operations.AsNoTracking()
+                        .Where(o => o.MachineCode == machine.Code && o.StartedAt != null)
+                        .OrderByDescending(o => o.StartedAt)
+                        .Select(o => new MachineAssignment.Setup(o.Lot.BatchNumber, o.Lot.PartCode, o.Lot.RodDiameterMm))
+                        .FirstOrDefaultAsync(cancellationToken);
+                    rank = Math.Min(rank, MachineAssignment.Rank(last, setup, step.UsesTool));
+                    ready |= !unavailable.Contains(machine.Code);
+                }
+
+                candidates.Add(new StationSelector.PieceCandidate(room.Code, rank, ready, routes[room.Code]));
+            }
+
+            chosen = StationSelector.PickPiece(candidates);
+        }
+        else
+        {
+            var running = await db.BatchRuns.AsNoTracking()
+                .Where(r => r.CompletedAt == null && codes.Contains(r.StationCode))
+                .Select(r => r.StationCode)
+                .ToListAsync(cancellationToken);
+            var queued = await db.Operations.AsNoTracking()
+                .Where(o => o.Status == OperationStatus.Queued && codes.Contains(o.StationCode))
+                .GroupBy(o => o.StationCode)
+                .Select(g => new { Station = g.Key, Pieces = g.Sum(o => o.Quantity) })
+                .ToListAsync(cancellationToken);
+            var inbound = await db.TransportTasks.AsNoTracking()
+                .Where(t => t.ToStationCode != null && codes.Contains(t.ToStationCode) && t.Kind != TransportTaskKind.ToolDelivery
+                    && (t.Status == TransportTaskStatus.Assigned || t.Status == TransportTaskStatus.Executing))
+                .GroupBy(t => t.ToStationCode!)
+                .Select(g => new { Station = g.Key, Pieces = g.Sum(t => t.Quantity) })
+                .ToListAsync(cancellationToken);
+            var candidates = rooms.Select(room => new StationSelector.FurnaceCandidate(
+                room.Code,
+                running.Contains(room.Code),
+                (queued.FirstOrDefault(q => q.Station == room.Code)?.Pieces ?? 0) + (inbound.FirstOrDefault(i => i.Station == room.Code)?.Pieces ?? 0),
+                routes[room.Code]));
+            chosen = StationSelector.PickFurnace(candidates);
+        }
+
+        return rooms.Single(r => r.Code == chosen);
     }
 
     /// <summary>每台有有效派工的車輛，以及那筆派工的狀態與起訖站。</summary>
@@ -248,7 +348,7 @@ public sealed class TransportService(
                 if (lot is not null)
                 {
                     var vehicleLocation = lot.Location;
-                    lot.UnloadAt(task.ToStationCode, now);
+                    lot.UnloadAt(task.ToStationCode ?? throw new InvalidOperationException($"Task {task.Id} has no destination."), now);
                     db.InventoryMovements.Add(InventoryMovement.Record(lot, vehicleLocation, "Unloaded", now));
                     production.OnLotArrived(lot, now);
                 }
@@ -406,16 +506,18 @@ public sealed class TransportService(
             {
                 lot.ReturnTo(task.FromStationCode, now);
                 db.InventoryMovements.Add(InventoryMovement.Record(lot, from, "ManualReturn", now));
-                db.TransportTasks.Add(TransportTask.Create(lot, task.FromStationCode, task.ToStationCode, task.Kind, now));
+                db.TransportTasks.Add(task.ToStepSequence is { } step
+                    ? TransportTask.CreateToStep(lot, task.FromStationCode, step, task.Kind, now)
+                    : TransportTask.Create(lot, task.FromStationCode, task.ToStationCode!, task.Kind, now));
             }
             else
             {
-                db.TransportTasks.Add(TransportTask.CreateToolDelivery(task.FromStationCode, task.ToStationCode, ToolMachine(task), now));
+                db.TransportTasks.Add(TransportTask.CreateToolDelivery(task.FromStationCode, task.ToStationCode!, ToolMachine(task), now));
             }
         }
         else if (lot is not null)
         {
-            lot.PlaceAt(task.ToStationCode, now);
+            lot.PlaceAt(task.ToStationCode ?? throw new InvalidOperationException($"Task {task.Id} has no destination."), now);
             db.InventoryMovements.Add(InventoryMovement.Record(lot, from, "ManualDelivery", now));
             production.OnLotArrived(lot, now);
         }
@@ -463,7 +565,7 @@ public sealed class TransportService(
     }
 
     /// <summary>送刀具的任務是給哪一台機台；P6 以前建立的任務（一站一台）是那一站的 1 號機。</summary>
-    private static string ToolMachine(TransportTask task) => task.MachineCode ?? Machine.CodeOf(task.ToStationCode, 1);
+    private static string ToolMachine(TransportTask task) => task.MachineCode!;
 
     private OutboxMessage CreateCommandMessage(
         Assignment assignment, TransportTask task, Station pickup, Station destination, double handoverSeconds, DateTimeOffset now)

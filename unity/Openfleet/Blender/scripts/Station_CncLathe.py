@@ -1,16 +1,21 @@
-"""粗加工、精加工站：兩台小型 CNC 車床（有外罩）並排，加上兩台共用的機邊備料台、成品台
-（使用者 2026-10-22：粗加工、精加工各兩台車床）。沖頭的料是 Φ24／Φ30 的短料，所以用小型車床，兩台放得進原本一站的位置。
-區域座標與 StationModels 相同：+Z 朝走道，占地約 X ±2.8、Z −2 ~ +2。-X（西側，預設視角畫面的左邊）是 1 號機、+X 是 2 號機。
+"""粗加工、精加工站：一台小型 CNC 車床（有外罩），前方兩張台子：備料台在 +X、成品台在 -X。
+P7 第 1b 步起每台車床一站，所以模型只畫一台車床；站的區域寬 3.2 m（FactorySceneBuilder）。
+區域座標與 StationModels 相同：+Z 朝走道，占地約 X ±1.6、Z −2.4 ~ +2.2。
 粗加工與精加工共用：強調色材質名稱為 AccentRough，精加工站由 Unity 換成 AccentFine。
-台上的料箱（有料時才顯示）、機台編號與文字標籤由 Unity 產生。"""
+台上的料箱（有料時才顯示）與文字標籤由 Unity 產生。"""
 from ofkit import *
 
-NAME = "Station_CncLathePair"
+NAME = "Station_CncLathe"
 ACCENT = "AccentRough"
 
-# 兩台車床的中心（與 StationModels 的機台編號標籤位置相同）。
-LATHES = (("Lathe 1", -1.2), ("Lathe 2", 1.2))
+# 車床的中心（站的原點在 X 0）；Z 往後退 0.55 m。
+LATHES = (("Lathe", 0.0),)
 LATHE_Z = -0.55
+
+# 備料台在 +X、成品台在 -X（與 StationModels 的台子位置相同）。
+TABLES = (("Inbound Table", 0.62), ("Outbound Table", -0.62))
+TABLE_Z = 1.3
+TABLE_SIZE = (0.95, 0.7, 0.8)
 
 
 def lathe(r, name, x):
@@ -35,7 +40,7 @@ def lathe(r, name, x):
     # 側面散熱孔
     for i in range(5):
         box(m, "Vent", (0.951, 0.4 + i * 0.07, -0.3), (0.006, 0.03, 0.5), "MachineDark", bevel=0.0)
-    # 後方的鐵屑車與冷卻液箱（靠牆，不占兩台之間的空間）
+    # 後方的鐵屑車與冷卻液箱（靠牆）
     cart = group(m, "Chip Cart", (-0.45, 0, -0.95))
     box(cart, "Bin", (0, 0.28, 0), (0.5, 0.34, 0.4), "Steel", bevel=0.01, taper=(1.1, 1.1))
     for cx in (-0.18, 0.18):
@@ -58,9 +63,9 @@ def build():
     r = root(NAME)
     for name, x in LATHES:
         lathe(r, name, x)
-    # 兩台共用的備料台、成品台：位置與 StationModels 相同（Unity 在同位置放料箱與標籤）。
-    for name, x in (("Inbound Table", 2.1), ("Outbound Table", -2.1)):
-        t = table(r, name, (x, 0, 1.3), (1.0, 0.7, 0.8), "Steel")
-        box(t, "Edge Stripe", (0, 0.672, 0.401), (1.0, 0.04, 0.005), ACCENT, bevel=0.0)
+    # 機邊的備料台、成品台：位置與 StationModels 相同（Unity 在同位置放料箱與標籤）。
+    for name, x in TABLES:
+        t = table(r, name, (x, 0, TABLE_Z), TABLE_SIZE, "Steel")
+        box(t, "Edge Stripe", (0, 0.672, 0.401), (TABLE_SIZE[0], 0.04, 0.005), ACCENT, bevel=0.0)
         merge(t)
     return save_and_export(NAME)

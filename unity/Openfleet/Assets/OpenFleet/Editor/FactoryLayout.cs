@@ -59,15 +59,15 @@ namespace OpenFleet.Unity.Editor
     /// </summary>
     internal static class FactoryLayout
     {
-        /// <summary>地面（公尺，X／Z）。牆貼著上下兩排站點的後方；西側比東側多 8 m 放切料站。</summary>
-        public static readonly Rect Floor = Rect.MinMaxRect(-34f, -15.2f, 26f, 15.2f);
+        /// <summary>地面（公尺，X／Z）。牆貼著上下兩排站點的後方；西端 -34、東端 42（西側多放切料站；P7 第 1b 步下排往東加長）。</summary>
+        public static readonly Rect Floor = Rect.MinMaxRect(-34f, -15.2f, 42f, 15.2f);
 
         /// <summary>
         /// 環狀走道有內外兩條車道（都不限方向）。數值是各車道中心線圍成的矩形，
         /// 必須與後端路網的節點座標相同（backend/src/OpenFleet.Api/Traffic/RoadNetwork.cs 的 DemoRoadNetwork）。
         /// </summary>
-        public static readonly Rect OuterLane = Rect.MinMaxRect(-30f, -7f, 22f, 7f);
-        public static readonly Rect InnerLane = Rect.MinMaxRect(-28.2f, -5.2f, 20.2f, 5.2f);
+        public static readonly Rect OuterLane = Rect.MinMaxRect(-30f, -7f, 38f, 7f);
+        public static readonly Rect InnerLane = Rect.MinMaxRect(-28.2f, -5.2f, 36.2f, 5.2f);
 
         /// <summary>車道中心線到鋪面邊緣的距離。</summary>
         public const float LaneEdge = 1.2f;
@@ -82,16 +82,18 @@ namespace OpenFleet.Unity.Editor
 
         public static readonly StationSpec[] Stations =
         {
-            new StationSpec("cutting", StationKind.Cutting, "切料", "Cutting", new Vector2(-28f, -12.8f), false),
+            new StationSpec("cutting-1", StationKind.Cutting, "切料", "Cutting", new Vector2(-28f, -12.8f), false),
             new StationSpec("raw-store", StationKind.RawMaterialStore, "原料倉", "Raw Material", new Vector2(-20f, -12.8f), false),
-            new StationSpec("rough", StationKind.RoughMachining, "粗加工", "Rough Machining", new Vector2(-12f, -12.8f), false),
-            new StationSpec("fine", StationKind.FineMachining, "精加工", "Fine Machining", new Vector2(-4f, -12.8f), false),
-            new StationSpec("heat", StationKind.HeatTreatment, "淬火", "Quench", new Vector2(4f, -12.8f), false),
-            new StationSpec("temper", StationKind.HeatTreatment, "回火", "Temper", new Vector2(12f, -12.8f), false),
-            new StationSpec("plating", StationKind.Plating, "電鍍", "Plating", new Vector2(20f, -12.8f), false),
-            new StationSpec("polish", StationKind.Polishing, "拋光", "Polishing", new Vector2(20f, 12.8f), true),
-            new StationSpec("qc", StationKind.QualityInspection, "品管", "Inspection", new Vector2(4f, 12.8f), true),
-            new StationSpec("packing", StationKind.Packing, "包裝", "Packing", new Vector2(-4f, 12.8f), true),
+            new StationSpec("rough-1", StationKind.RoughMachining, "粗加工 1 號機", "Rough #1", new Vector2(-12f, -12.8f), false),
+            new StationSpec("rough-2", StationKind.RoughMachining, "粗加工 2 號機", "Rough #2", new Vector2(-4f, -12.8f), false),
+            new StationSpec("fine-1", StationKind.FineMachining, "精加工 1 號機", "Fine #1", new Vector2(4f, -12.8f), false),
+            new StationSpec("fine-2", StationKind.FineMachining, "精加工 2 號機", "Fine #2", new Vector2(12f, -12.8f), false),
+            new StationSpec("heat-1", StationKind.HeatTreatment, "淬火", "Quench", new Vector2(20f, -12.8f), false),
+            new StationSpec("temper-1", StationKind.HeatTreatment, "回火", "Temper", new Vector2(28f, -12.8f), false),
+            new StationSpec("plating-1", StationKind.Plating, "電鍍", "Plating", new Vector2(36f, -12.8f), false),
+            new StationSpec("polish-1", StationKind.Polishing, "拋光", "Polishing", new Vector2(20f, 12.8f), true),
+            new StationSpec("qc-1", StationKind.QualityInspection, "品管", "Inspection", new Vector2(4f, 12.8f), true),
+            new StationSpec("packing-1", StationKind.Packing, "包裝", "Packing", new Vector2(-4f, 12.8f), true),
             new StationSpec("finished-store", StationKind.FinishedGoodsStore, "成品倉", "Finished Goods", new Vector2(-12f, 12.8f), true),
             new StationSpec("shipping", StationKind.Shipping, "出貨", "Shipping", new Vector2(-20f, 12.8f), true),
             new StationSpec("tool-store", StationKind.ToolStore, "刀具庫", "Tool Store", new Vector2(0f, 0.2f), true),

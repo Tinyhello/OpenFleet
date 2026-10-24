@@ -16,7 +16,7 @@ namespace OpenFleet.Tests;
 public sealed class MachineTests(PostgresFixture postgres)
 {
     [Fact]
-    public async Task Demo_factory_has_two_lathes_at_rough_and_fine_and_one_machine_at_the_other_piece_stations()
+    public async Task Demo_factory_has_one_machine_per_station_and_a_tool_on_each_lathe()
     {
         var database = await TestDatabase.CreateAsync(postgres);
         await using (var db = database.NewContext())
@@ -25,9 +25,9 @@ public sealed class MachineTests(PostgresFixture postgres)
             Assert.Equal(
                 new[]
                 {
-                    ("cutting-1", "cutting", 1, "切料"), ("fine-1", "fine", 1, "精加工 1 號機"), ("fine-2", "fine", 2, "精加工 2 號機"),
-                    ("packing-1", "packing", 1, "包裝"), ("polish-1", "polish", 1, "拋光"), ("qc-1", "qc", 1, "品管"),
-                    ("rough-1", "rough", 1, "粗加工 1 號機"), ("rough-2", "rough", 2, "粗加工 2 號機"),
+                    ("cutting-1", "cutting-1", 1, "切料"), ("fine-1", "fine-1", 1, "精加工 1 號機"), ("fine-2", "fine-2", 1, "精加工 2 號機"),
+                    ("packing-1", "packing-1", 1, "包裝"), ("polish-1", "polish-1", 1, "拋光"), ("qc-1", "qc-1", 1, "品管"),
+                    ("rough-1", "rough-1", 1, "粗加工 1 號機"), ("rough-2", "rough-2", 1, "粗加工 2 號機"),
                 },
                 machines.Select(m => (m.Code, m.StationCode, m.Number, m.Name)));
 
@@ -35,19 +35,20 @@ public sealed class MachineTests(PostgresFixture postgres)
             Assert.Equal(new[] { "fine-1", "fine-2", "rough-1", "rough-2" },
                 await db.MachineTools.OrderBy(t => t.MachineCode).Select(t => t.MachineCode).ToListAsync());
 
-            // 一台車床的備料台 30 支：兩台車床的站共 60 支，切料站一台 30 支。
+            // 每一站（車床、切料）的備料台 30 支：粗加工、精加工各兩站，各自 30 件。
             var capacities = await db.Stations.Where(s => s.InboundCapacity != null).OrderBy(s => s.Code)
                 .Select(s => new { s.Code, s.InboundCapacity }).ToListAsync();
-            Assert.Equal(new[] { ("cutting", 30), ("fine", 60), ("rough", 60) }, capacities.Select(c => (c.Code, c.InboundCapacity!.Value)));
+            Assert.Equal(new[] { ("cutting-1", 30), ("fine-1", 30), ("fine-2", 30), ("rough-1", 30), ("rough-2", 30) }, capacities.Select(c => (c.Code, c.InboundCapacity!.Value)));
         }
 
         // 站點狀態：每台機台各一筆，依編號排列；整爐工序沒有機台。
         await using var scope = database.NewScope();
         var stations = await scope.Production.GetStationStatusAsync(default);
-        Assert.Equal(new[] { "粗加工 1 號機", "粗加工 2 號機" }, stations.Single(s => s.Code == "rough").Machines.Select(m => m.Name));
-        Assert.All(stations.Single(s => s.Code == "rough").Machines, m => Assert.Equal((0, 500), (m.Tool!.PiecesUsed, m.Tool.LifePieces)));
-        Assert.Null(stations.Single(s => s.Code == "polish").Machine().Tool);
-        Assert.Empty(stations.Single(s => s.Code == "heat").Machines);
+        Assert.Equal(new[] { "粗加工 1 號機" }, stations.Single(s => s.Code == "rough-1").Machines.Select(m => m.Name));
+        Assert.Equal(new[] { "粗加工 2 號機" }, stations.Single(s => s.Code == "rough-2").Machines.Select(m => m.Name));
+        Assert.All(stations.Single(s => s.Code == "rough-1").Machines.Concat(stations.Single(s => s.Code == "rough-2").Machines), m => Assert.Equal((0, 500), (m.Tool!.PiecesUsed, m.Tool.LifePieces)));
+        Assert.Null(stations.Single(s => s.Code == "polish-1").Machine().Tool);
+        Assert.Empty(stations.Single(s => s.Code == "heat-1").Machines);
         Assert.Empty(stations.Single(s => s.Code == "raw-store").Machines);
     }
 
@@ -70,12 +71,12 @@ public sealed class MachineTests(PostgresFixture postgres)
         // 第 12 秒：1 號機做了 6 件（剩 4 件）要叫刀；2 號機做了 4 件，還不用。
         await AdvanceAsync(database, 8);
         var rough = await RoughAsync(database);
-        Assert.Equal((6, 4), (rough.Machine(1).Machining!.PiecesCompleted, rough.Machine(2).Machining!.PiecesCompleted));
-        Assert.Equal((ToolSpareStatus.Requested, ToolSpareStatus.None), (rough.Machine(1).Tool!.Spare, rough.Machine(2).Tool!.Spare));
+        Assert.Equal((6, 4), (rough.One.Machine().Machining!.PiecesCompleted, rough.Two.Machine().Machining!.PiecesCompleted));
+        Assert.Equal((ToolSpareStatus.Requested, ToolSpareStatus.None), (rough.One.Machine().Tool!.Spare, rough.Two.Machine().Tool!.Spare));
         await using (var scope = database.NewScope())
         {
             var task = await scope.Db.TransportTasks.SingleAsync(t => t.Kind == TransportTaskKind.ToolDelivery);
-            Assert.Equal(("tool-store", "rough", "rough-1"), (task.FromStationCode, task.ToStationCode, task.MachineCode));
+            Assert.Equal(("tool-store", "rough-1", "rough-1"), (task.FromStationCode, TaskTarget.Of(task), task.MachineCode));
         }
 
         // 小型車送到：新刀是給 1 號機的。
@@ -86,13 +87,13 @@ public sealed class MachineTests(PostgresFixture postgres)
 
         await database.CompleteDeliveryAsync("agv-s");
         rough = await RoughAsync(database);
-        Assert.Equal((ToolSpareStatus.Delivered, ToolSpareStatus.None), (rough.Machine(1).Tool!.Spare, rough.Machine(2).Tool!.Spare));
+        Assert.Equal((ToolSpareStatus.Delivered, ToolSpareStatus.None), (rough.One.Machine().Tool!.Spare, rough.Two.Machine().Tool!.Spare));
 
         // 第 20 秒：1 號機做滿 10 件、新刀已到，換刀；2 號機做了 8 件，換它叫刀。
         await AdvanceAsync(database, 8);
         rough = await RoughAsync(database);
-        Assert.Equal((true, false), (rough.Machine(1).Tool!.Changing, rough.Machine(2).Tool!.Changing));
-        Assert.Equal((8, ToolSpareStatus.Requested), (rough.Machine(2).Tool!.PiecesUsed, rough.Machine(2).Tool!.Spare));
+        Assert.Equal((true, false), (rough.One.Machine().Tool!.Changing, rough.Two.Machine().Tool!.Changing));
+        Assert.Equal((8, ToolSpareStatus.Requested), (rough.Two.Machine().Tool!.PiecesUsed, rough.Two.Machine().Tool!.Spare));
         await using (var scope = database.NewScope())
         {
             Assert.Equal(new[] { "rough-1", "rough-2" },
@@ -102,12 +103,12 @@ public sealed class MachineTests(PostgresFixture postgres)
         // 換刀 20 秒後完成，紀錄記在 1 號機。2 號機的刀在第 24 秒到壽命、它的新刀還沒送：只有 2 號機停機等刀。
         await AdvanceAsync(database, 20);
         rough = await RoughAsync(database);
-        Assert.Equal((false, 0, false), (rough.Machine(1).Tool!.Changing, rough.Machine(1).Tool!.PiecesUsed, rough.Machine(1).Tool!.WaitingForTool));
-        Assert.Equal((true, 10), (rough.Machine(2).Tool!.WaitingForTool, rough.Machine(2).Machining!.PiecesCompleted));
+        Assert.Equal((false, 0, false), (rough.One.Machine().Tool!.Changing, rough.One.Machine().Tool!.PiecesUsed, rough.One.Machine().Tool!.WaitingForTool));
+        Assert.Equal((true, 10), (rough.Two.Machine().Tool!.WaitingForTool, rough.Two.Machine().Machining!.PiecesCompleted));
         await using (var scope = database.NewScope())
         {
             var change = await scope.Db.ToolChanges.SingleAsync();
-            Assert.Equal(("rough", "rough-1", 10), (change.StationCode, change.MachineCode, change.PiecesUsed));
+            Assert.Equal(("rough-1", "rough-1", 10), (change.StationCode, change.MachineCode, change.PiecesUsed));
         }
     }
 
@@ -140,7 +141,8 @@ public sealed class MachineTests(PostgresFixture postgres)
                     ('rough', 1, 'WaitingForTool', 'VehiclesBusy', '11111111-1111-1111-1111-111111111111', '2026-10-09 08:00:00+00', '2026-10-09 08:00:05+00', 5);
                 """);
 
-            await db.Database.MigrateAsync();
+            // 先升到 1a（工序與工站分開）的結構：P6 的升級結果要看得到。1b 的遷移會清掉生產資料，放在後面。
+            await db.GetService<IMigrator>().MigrateAsync("20261024064559_SeparateStepsFromStations");
         }
 
         await using (var db = new OpenFleetDbContext(options))
@@ -157,7 +159,14 @@ public sealed class MachineTests(PostgresFixture postgres)
             Assert.Equal("rough-1", (await db.TransportTasks.SingleAsync()).MachineCode);
             Assert.Equal("rough-1", (await db.MachineDelays.SingleAsync()).MachineCode);
 
-            // 啟動時的示範資料補上其他站與機台，並把名稱改成「粗加工 1 號機」這樣的命名。
+        }
+
+        // 1b 的遷移（MachinePerStation）：清掉生產資料，舊的站與機台（倉庫除外）拿掉；啟動時的示範資料再補上每台機台一站的新結構。
+        await using (var db = new OpenFleetDbContext(options))
+        {
+            await db.Database.MigrateAsync();
+            Assert.Equal(0, await db.Machines.CountAsync());
+            Assert.Equal(new[] { "tool-store" }, await db.Stations.Select(s => s.Code).OrderBy(c => c).ToListAsync());
             await DatabaseInitializer.SeedAsync(db, new FleetOptions());
         }
 
@@ -195,9 +204,11 @@ public sealed class MachineTests(PostgresFixture postgres)
         await scope.Production.UpdateSettingsAsync(settings, default);
     }
 
-    private static async Task<StationStatusDto> RoughAsync(TestDatabase database)
+    /// <summary>粗加工 1 號機、2 號機各自的站（P7 第 1b 步：每台車床一站）。</summary>
+    private static async Task<(StationStatusDto One, StationStatusDto Two)> RoughAsync(TestDatabase database)
     {
         await using var scope = database.NewScope();
-        return (await scope.Production.GetStationStatusAsync(default)).Single(s => s.Code == "rough");
+        var stations = await scope.Production.GetStationStatusAsync(default);
+        return (stations.Single(s => s.Code == "rough-1"), stations.Single(s => s.Code == "rough-2"));
     }
 }

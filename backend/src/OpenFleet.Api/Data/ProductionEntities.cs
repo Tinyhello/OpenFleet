@@ -17,27 +17,31 @@ public sealed class Station
     /// 完工件容量（件），目前只用來畫成品區的進度條。完工件容量依桿徑分 30／45 的對照還沒定，先用 30。
     /// </summary>
     public int? OutboundCapacity { get; set; }
+
+    /// <summary>
+    /// 這一站做哪一道工序（<see cref="ProcessStep.Sequence"/>）。工序與工站分開（P7）：同一道工序可以有好幾站，
+    /// 搬到某道工序的框，派車時才從這些站裡挑。倉儲站與出貨站沒有工序，是 null。
+    /// </summary>
+    public int? StepSequence { get; set; }
 }
 
 /// <summary>
-/// 逐件工序的機台（人工作業的品管、包裝是一個工位）。使用者 2026-10-22：粗加工、精加工各兩台車床，其他站一台；
-/// 同一站的機台都能做所有規格。同一站的機台共用一個交接點、備料區與成品區：AGV 把框送到站上，
-/// 哪一台空下來就由它接下一框（<see cref="Production.MachineAssignment"/>）。每台各有自己的刀具、換線狀態與加工進度。
+/// 逐件工序的機台（人工作業的品管、包裝是一個工位）。P7 第 1b 步起每台機台一站：機台代碼等於站點代碼
+/// （粗加工 1 號機是 rough-1），所以這台機台的交接點、備料區與成品區都是它自己的。
+/// 每台各有自己的刀具、換線狀態與加工進度；送到工序的框派車時從同一道工序的站裡挑（<see cref="Production.StationSelector"/>）。
 /// 整爐工序（淬火、回火、電鍍）一站一座爐，不用這張表。
 /// </summary>
 public sealed class Machine
 {
-    /// <summary>站點代碼加編號，例如 rough-1。</summary>
+    /// <summary>機台代碼，與它的站點代碼相同，例如 rough-1。</summary>
     public required string Code { get; set; }
     public required string StationCode { get; set; }
 
-    /// <summary>這一站的第幾台，從 1 起。</summary>
+    /// <summary>這一站的第幾台；每台機台一站，目前一律是 1。</summary>
     public int Number { get; set; }
 
-    /// <summary>例如「粗加工 1 號機」；一站只有一台時就是站名。</summary>
+    /// <summary>例如「粗加工 1 號機」；單台工序的站就是站名（例如「拋光」）。</summary>
     public required string Name { get; set; }
-
-    public static string CodeOf(string stationCode, int number) => $"{stationCode}-{number}";
 }
 
 /// <summary>
@@ -47,7 +51,12 @@ public sealed class Machine
 public sealed class ProcessStep
 {
     public int Sequence { get; set; }
-    public required string StationCode { get; set; }
+
+    /// <summary>工序代碼（rough、heat…），不隨工站變動；工站與工序的對應在 <see cref="Station.StepSequence"/>。</summary>
+    public required string Code { get; set; }
+
+    /// <summary>工序名稱，顯示用（粗加工、淬火）。</summary>
+    public required string Name { get; set; }
     public ProcessStepKind Kind { get; set; }
 
     /// <summary>逐件工序：每加工一件的時間（秒）。示範設定，可由面板修改。</summary>

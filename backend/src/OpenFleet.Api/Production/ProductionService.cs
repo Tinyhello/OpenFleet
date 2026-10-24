@@ -57,7 +57,7 @@ public sealed partial class ProductionService(
     /// 不良原因 → 回哪一站重做；null 表示不能反工，直接報廢（使用者 2026-10-10 選定的三種原因）。
     /// 回電鍍的料之後照路線再經過拋光與品管。
     /// </summary>
-    private static readonly (DefectReason Reason, string? StationCode, string Suffix)[] ReworkRoutes =
+    private static readonly (DefectReason Reason, string? StepCode, string Suffix)[] ReworkRoutes =
     [
         (DefectReason.Surface, "polish", "RS"),
         (DefectReason.Plating, "plating", "RP"),
@@ -80,7 +80,6 @@ public sealed partial class ProductionService(
     public async Task<ProductionSettingsDto> GetSettingsAsync(CancellationToken cancellationToken)
     {
         var settings = await db.ProductionSettings.AsNoTracking().SingleAsync(cancellationToken);
-        var stations = await db.Stations.AsNoTracking().ToDictionaryAsync(s => s.Code, cancellationToken);
         var steps = await db.ProcessSteps.AsNoTracking().OrderBy(s => s.Sequence).ToListAsync(cancellationToken);
 
         return new ProductionSettingsDto
@@ -108,8 +107,8 @@ public sealed partial class ProductionService(
             Steps = steps.Select(s => new ProcessStepDto
             {
                 Sequence = s.Sequence,
-                StationCode = s.StationCode,
-                StationName = stations[s.StationCode].Name,
+                Code = s.Code,
+                Name = s.Name,
                 Kind = s.Kind,
                 SecondsPerPiece = s.SecondsPerPiece,
                 UsesTool = s.UsesTool,
@@ -436,8 +435,8 @@ public sealed partial class ProductionService(
             productionOrderId: productionOrderId);
         db.Lots.Add(bin);
         db.InventoryMovements.Add(InventoryMovement.Record(bin, from: null, "Received", now));
-        db.TransportTasks.Add(TransportTask.Create(
-            bin, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+        db.TransportTasks.Add(TransportToStep(
+            bin, settings.SourceStationCode, first, settings.BufferStationCode, TransportTaskKind.Replenishment, now));
         return bin;
     }
 
@@ -454,7 +453,7 @@ public sealed partial class ProductionService(
         if (job.IsReady)
         {
             lot.MaterialArrived(cutting.Sequence, now);
-            db.TransportTasks.Add(TransportTask.Create(lot, settings.SourceStationCode, cutting.StationCode, TransportTaskKind.Replenishment, now));
+            db.TransportTasks.Add(TransportTask.CreateToStep(lot, settings.SourceStationCode, cutting.Sequence, TransportTaskKind.Replenishment, now));
         }
     }
 
@@ -515,7 +514,7 @@ public sealed partial class ProductionService(
                     var blanks = (await inventory.ReserveAsync(blankItem, InventoryService.StoreStation, lot.Quantity, lot.LotNumber, cancellationToken))!;
                     await inventory.ConsumeAsync(blanks, lot.Quantity, cancellationToken);
                     lot.MaterialArrived(first!.Sequence, now);
-                    db.TransportTasks.Add(TransportTask.Create(lot, settings.SourceStationCode, first.StationCode, TransportTaskKind.Replenishment, now));
+                    db.TransportTasks.Add(TransportTask.CreateToStep(lot, settings.SourceStationCode, first.Sequence, TransportTaskKind.Replenishment, now));
                     logger.LogInformation("Lot {LotNumber}: {Quantity} blank(s) taken from stock.", lot.LotNumber, lot.Quantity);
                     continue;
                 }
@@ -620,6 +619,8 @@ public sealed partial class ProductionService(
         var allocated = await AllocateWaitingMaterialAsync(steps, settings, now, cancellationToken);
         var machines = await db.Machines.AsNoTracking().ToDictionaryAsync(m => m.Code, cancellationToken);
         var tools = await db.MachineTools.ToDictionaryAsync(t => t.MachineCode, cancellationToken);
+        var stations = await db.Stations.AsNoTracking().ToListAsync(cancellationToken);
+        var stepOfStation = StepsByStation(steps, stations);
         var running = await db.Operations.Include(o => o.Lot)
             .Where(o => o.Status == OperationStatus.Running)
             .ToListAsync(cancellationToken);
@@ -717,7 +718,7 @@ public sealed partial class ProductionService(
             var station = machines[tool.MachineCode].StationCode;
             if (tool.IsWaitingForSpare)
             {
-                TryStartChangeAfterWaiting(tool, settings, settings.SpeedOf(steps.Single(s => s.StationCode == station)));
+                TryStartChangeAfterWaiting(tool, settings, settings.SpeedOf(stepOfStation[station]));
             }
 
             if (tool.ChangeDueAt <= now)
@@ -728,7 +729,7 @@ public sealed partial class ProductionService(
 
         if (settings.ToolDeliveryEnabled)
         {
-            RequestSpareTools(steps, machines, tools, settings, now);
+            RequestSpareTools(stepOfStation, machines, tools, settings, now);
         }
 
         var changed = db.ChangeTracker.HasChanges();
@@ -737,7 +738,7 @@ public sealed partial class ProductionService(
         changed |= await BoxOrdersAsync(settings, now, cancellationToken);
         changed |= await ReceiveSurplusAsync(now, cancellationToken);
         changed |= await AdvanceTruckAsync(settings, now, cancellationToken);
-        var started = await StartQueuedOperationsAsync(steps, machines, tools, settings, now, cancellationToken);
+        var started = await StartQueuedOperationsAsync(steps, stations, machines, tools, settings, now, cancellationToken);
         return await StartBatchRunsAsync(steps, settings, now, cancellationToken) || started || changed || allocated;
     }
 
@@ -839,14 +840,31 @@ public sealed partial class ProductionService(
                 && !(other.IsBox && other.Status == LotStatus.Staged && other.StationCode == shippingStation)));
 
     /// <summary>整框（或整爐）完成才放行：改為等待搬運，並建立送往下一站（或暫存點）的任務。</summary>
+    /// <summary>
+    /// 搬到下一道工序：有工序就送到那道工序（派車時才定站）；沒有工序（流程走完）就送到指定的站。
+    /// </summary>
+    private static TransportTask TransportToStep(
+        MaterialLot lot, string from, ProcessStep? step, string fallbackStation, TransportTaskKind kind, DateTimeOffset now) =>
+        step is null
+            ? TransportTask.Create(lot, from, fallbackStation, kind, now)
+            : TransportTask.CreateToStep(lot, from, step.Sequence, kind, now);
+
+    /// <summary>工站 → 它做的工序（沒有工序的站，例如倉儲站，不在結果裡）。</summary>
+    internal static Dictionary<string, ProcessStep> StepsByStation(IReadOnlyList<ProcessStep> steps, IReadOnlyList<Station> stations)
+    {
+        var byStep = steps.ToDictionary(s => s.Sequence);
+        return stations
+            .Where(s => s.StepSequence is { } sequence && byStep.ContainsKey(sequence))
+            .ToDictionary(s => s.Code, s => byStep[s.StepSequence!.Value], StringComparer.Ordinal);
+    }
+
     private void Release(OperationExecution operation, IReadOnlyList<ProcessStep> steps, ProductionSettings settings, DateTimeOffset now)
     {
         var next = steps.FirstOrDefault(s => s.Sequence > operation.StepSequence);
-        var destination = next?.StationCode ?? settings.BufferStationCode;
         operation.Lot.FinishProcessing(next?.Sequence, now);
-        db.TransportTasks.Add(TransportTask.Create(operation.Lot, operation.StationCode, destination, TransportTaskKind.WipTransfer, now));
+        db.TransportTasks.Add(TransportToStep(operation.Lot, operation.StationCode, next, settings.BufferStationCode, TransportTaskKind.WipTransfer, now));
         logger.LogInformation("Lot {LotNumber} finished step {Step} at {Station}; transport to {Next} requested.",
-            operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, destination);
+            operation.Lot.LotNumber, operation.StepSequence, operation.StationCode, next?.Code ?? settings.BufferStationCode);
     }
 
     /// <summary>
@@ -874,9 +892,9 @@ public sealed partial class ProductionService(
         var canRework = lot.ReworkCount < settings.MaxReworkCount;
         var rework = new List<(int Quantity, ProcessStep Step, string Suffix)>();
         var scrapped = 0;
-        foreach (var (reason, stationCode, suffix) in ReworkRoutes)
+        foreach (var (reason, stepCode, suffix) in ReworkRoutes)
         {
-            var target = stationCode is null ? null : steps.FirstOrDefault(s => s.StationCode == stationCode);
+            var target = stepCode is null ? null : steps.FirstOrDefault(s => s.Code == stepCode);
             if (counts[reason] == 0)
             {
                 continue;
@@ -938,8 +956,8 @@ public sealed partial class ProductionService(
                 db.InventoryMovements.Add(InventoryMovement.Record(makeup, from: null, "MakeupReceived", now));
                 if (!needsMaterial)
                 {
-                    db.TransportTasks.Add(TransportTask.Create(
-                        makeup, settings.SourceStationCode, first?.StationCode ?? settings.BufferStationCode, TransportTaskKind.Replenishment, now));
+                    db.TransportTasks.Add(TransportToStep(
+                        makeup, settings.SourceStationCode, first, settings.BufferStationCode, TransportTaskKind.Replenishment, now));
                 }
 
                 logger.LogInformation("Lot {LotNumber}: {Scrapped} piece(s) scrapped; make-up lot {Makeup} of {Quantity} received at {Station}.",
@@ -953,7 +971,7 @@ public sealed partial class ProductionService(
         if (passed > 0)
         {
             lot.FinishInspection(passed, next?.Sequence, rework: false, now);
-            db.TransportTasks.Add(TransportTask.Create(lot, station, next?.StationCode ?? settings.BufferStationCode, TransportTaskKind.WipTransfer, now));
+            db.TransportTasks.Add(TransportToStep(lot, station, next, settings.BufferStationCode, TransportTaskKind.WipTransfer, now));
             keptByLot = true;
         }
 
@@ -972,7 +990,7 @@ public sealed partial class ProductionService(
                 keptByLot = true;
             }
 
-            db.TransportTasks.Add(TransportTask.Create(bin, station, target.StationCode, TransportTaskKind.WipTransfer, now));
+            db.TransportTasks.Add(TransportTask.CreateToStep(bin, station, target.Sequence, TransportTaskKind.WipTransfer, now));
         }
 
         if (!keptByLot)
@@ -1029,8 +1047,8 @@ public sealed partial class ProductionService(
     /// </summary>
     private async Task<double> SecondsPerPieceAsync(ProcessStep step, MaterialLot lot, CancellationToken cancellationToken)
     {
-        var isRough = step.StationCode == CatalogService.RoughStationCode;
-        if (lot.ProductionOrderId is not { } orderId || !(isRough || step.StationCode == CatalogService.FinishStationCode))
+        var isRough = step.Code == CatalogService.RoughStepCode;
+        if (lot.ProductionOrderId is not { } orderId || !(isRough || step.Code == CatalogService.FinishStepCode))
         {
             return step.SecondsPerPiece;
         }
@@ -1089,10 +1107,16 @@ public sealed partial class ProductionService(
             return false;
         }
 
-        var stationCodes = batchSteps.Select(s => s.StationCode).ToList();
+        // 每座爐是一個工站（同一道工序可能有好幾座，P7 第 1a 步起）：各座的排隊與開爐分開算。
+        var stations = await db.Stations.AsNoTracking().Where(s => s.StepSequence != null).ToListAsync(cancellationToken);
+        var furnaces = stations
+            .Where(s => batchSteps.Any(step => step.Sequence == s.StepSequence))
+            .OrderBy(s => s.Code, StringComparer.Ordinal)
+            .ToList();
+        var furnaceCodes = furnaces.Select(f => f.Code).ToList();
         var busy = await db.BatchRuns.Where(r => r.CompletedAt == null).Select(r => r.StationCode).ToListAsync(cancellationToken);
         var queued = await db.Operations.Include(o => o.Lot)
-            .Where(o => o.Status == OperationStatus.Queued && stationCodes.Contains(o.StationCode))
+            .Where(o => o.Status == OperationStatus.Queued && furnaceCodes.Contains(o.StationCode))
             .OrderBy(o => o.QueuedAt)
             .ToListAsync(cancellationToken);
         var started = false;
@@ -1102,19 +1126,33 @@ public sealed partial class ProductionService(
         }
 
         var priorities = await SchedulePriorities.ForLotsAsync(db, queued.Select(o => o.Lot), cancellationToken);
-        var lastRuns = await LastRunCompletionsAsync(stationCodes, cancellationToken);
+        var lastRuns = await LastRunCompletionsAsync(furnaceCodes, cancellationToken);
 
-        // 還在製程中的每一框目前在哪一道工序（走完的、報廢的、出貨箱沒有工序）。
+        // 還在製程中的每一框目前在哪一道工序；搬運中的框另外看它的目的站（還沒定的為 null）。
         var active = await db.Lots.AsNoTracking()
             .Where(l => l.CurrentStepSequence != null)
-            .Select(l => new { l.Id, Step = l.CurrentStepSequence!.Value })
+            .Select(l => new { l.Id, Step = l.CurrentStepSequence!.Value, l.Status })
             .ToListAsync(cancellationToken);
+        var destinationOf = (await db.TransportTasks.AsNoTracking()
+                .Where(t => t.LotId != null && t.Kind != TransportTaskKind.ToolDelivery
+                    && (t.Status == TransportTaskStatus.Pending || t.Status == TransportTaskStatus.Assigned || t.Status == TransportTaskStatus.Executing))
+                .Select(t => new { LotId = t.LotId!.Value, t.ToStationCode })
+                .ToListAsync(cancellationToken))
+            .GroupBy(t => t.LotId)
+            .ToDictionary(g => g.Key, g => g.First().ToStationCode);
         var inspection = steps.FirstOrDefault(s => s.IsInspection)?.Sequence ?? int.MaxValue;
 
-        foreach (var step in batchSteps.Where(s => !busy.Contains(s.StationCode)))
+        // 這一座爐之後還會有料進來：工序在這道工序之前的（都會來），或這道工序還在搬運中、還沒決定要去哪座爐、
+        // 或決定的就是這座爐。已經排在別座爐前、或已經在爐裡的，不算會再來（P7 第 1a 步）。
+        bool MoreComing(ProcessStep step, string furnace) => active.Any(l =>
+            l.Step < step.Sequence
+            || (l.Step == step.Sequence && (l.Status == LotStatus.AwaitingTransport || l.Status == LotStatus.InTransit)
+                && (destinationOf.GetValueOrDefault(l.Id) is not { } to || to == furnace)));
+
+        foreach (var furnace in furnaces.Where(f => !busy.Contains(f.Code)))
         {
-            var arrived = queued.Where(o => o.StepSequence == step.Sequence).ToList();
-            var arrivedIds = arrived.Select(o => o.LotId).ToHashSet();
+            var step = batchSteps.Single(s => s.Sequence == furnace.StepSequence);
+            var arrived = queued.Where(o => o.StationCode == furnace.Code).ToList();
 
             // 反工品先扣住，累積夠了或沒有其他料會再進來才放行。
             var rework = arrived.Where(o => o.Lot.ReworkCount > 0).ToList();
@@ -1124,13 +1162,13 @@ public sealed partial class ProductionService(
 
             // 測試模式：爐前的料等太久就直接開爐（使用者 2026-10-23），反工品也一起放行。
             var waitedOut = settings.TestMode && arrived.Count > 0
-                && now - FurnaceWaitStart(arrived.Min(o => o.QueuedAt), lastRuns.GetValueOrDefault(step.StationCode))
+                && now - FurnaceWaitStart(arrived.Min(o => o.QueuedAt), lastRuns.GetValueOrDefault(furnace.Code))
                     >= TimeSpan.FromSeconds(settings.TestFurnaceWaitSeconds);
             var waiting = reworkReleased || waitedOut ? arrived : arrived.Except(rework).ToList();
 
-            var moreComing = active.Any(l => l.Step <= step.Sequence && !arrivedIds.Contains(l.Id));
+            var moreComing = MoreComing(step, furnace.Code);
             // 湊不到下限：只有補做的料可以先開（使用者 2026-10-10）；測試模式下一般的料也可以，示範的小單才看得到後段（使用者 2026-10-22）。
-            // 兩種都要等到已經沒有其他料會再來這一站。
+            // 兩種都要等到已經沒有其他料會再來這一座爐。
             var enough = waitedOut
                 || waiting.Sum(o => o.Quantity) >= step.BatchMinPieces
                 || (waiting.Count > 0 && !moreComing && (settings.TestMode || waiting.Any(o => o.Lot.IsMakeup)));
@@ -1158,7 +1196,7 @@ public sealed partial class ProductionService(
             }
 
             var pieces = load.Sum(o => o.Quantity);
-            var run = BatchRun.Start(step.StationCode, step.Sequence, pieces, step.BatchSeconds, now);
+            var run = BatchRun.Start(furnace.Code, step.Sequence, pieces, step.BatchSeconds, now);
             db.BatchRuns.Add(run);
             foreach (var operation in load)
             {
@@ -1168,7 +1206,7 @@ public sealed partial class ProductionService(
 
             started = true;
             logger.LogInformation("Station {Station}: batch run started with {Quantity} piece(s) in {Bins} bin(s), {Seconds}s.",
-                step.StationCode, pieces, load.Count, run.TotalSeconds);
+                furnace.Code, pieces, load.Count, run.TotalSeconds);
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -1209,13 +1247,13 @@ public sealed partial class ProductionService(
     /// 每台機台的刀各自算；一把刀只叫一次，換刀完成後備用刀用掉了，下一輪再依門檻判斷。
     /// </summary>
     private void RequestSpareTools(
-        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, Machine> machines, IReadOnlyDictionary<string, MachineTool> tools,
-        ProductionSettings settings, DateTimeOffset now)
+        IReadOnlyDictionary<string, ProcessStep> stepOfStation, IReadOnlyDictionary<string, Machine> machines,
+        IReadOnlyDictionary<string, MachineTool> tools, ProductionSettings settings, DateTimeOffset now)
     {
         foreach (var tool in tools.Values.OrderBy(t => t.MachineCode, StringComparer.Ordinal))
         {
             var machine = machines[tool.MachineCode];
-            if (steps.FirstOrDefault(s => s.StationCode == machine.StationCode && s.UsesTool) is not { } step)
+            if (stepOfStation.GetValueOrDefault(machine.StationCode) is not { UsesTool: true } step)
             {
                 continue;
             }
@@ -1238,10 +1276,11 @@ public sealed partial class ProductionService(
     /// 不能接新框的機台：正在做一框、刀具停機等刀或換刀中、自己做完的那一框還沒被搬走（機邊的成品台只放一框）。
     /// </summary>
     private async Task<bool> StartQueuedOperationsAsync(
-        IReadOnlyList<ProcessStep> steps, IReadOnlyDictionary<string, Machine> machines, IReadOnlyDictionary<string, MachineTool> tools,
-        ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
+        IReadOnlyList<ProcessStep> steps, IReadOnlyList<Station> stations, IReadOnlyDictionary<string, Machine> machines,
+        IReadOnlyDictionary<string, MachineTool> tools, ProductionSettings settings, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var pieceStations = steps.Where(s => s.Kind == ProcessStepKind.Piece).Select(s => s.StationCode).ToList();
+        var stepOfStation = StepsByStation(steps, stations);
+        var pieceStations = stepOfStation.Where(p => p.Value.Kind == ProcessStepKind.Piece).Select(p => p.Key).ToList();
         var queued = await db.Operations.Include(o => o.Lot)
             .Where(o => o.Status == OperationStatus.Queued && pieceStations.Contains(o.StationCode))
             .OrderBy(o => o.QueuedAt)
@@ -1285,7 +1324,7 @@ public sealed partial class ProductionService(
             }
 
             // 「機床」以有刀具的工序判斷（粗加工、精加工）；拋光、品管、包裝、切料不換線。
-            var step = steps.Single(s => s.StationCode == station);
+            var step = stepOfStation[station];
             var waiting = queued.Where(o => o.StationCode == station).ToList();
             var assigned = MachineAssignment.Assign(
                 free, waiting, o => new MachineAssignment.Setup(o.Lot.BatchNumber, o.Lot.PartCode, o.Lot.RodDiameterMm), step.UsesTool,
@@ -1322,7 +1361,7 @@ public sealed partial class ProductionService(
     {
         var now = time.GetUtcNow();
         var stations = await db.Stations.AsNoTracking().OrderBy(s => s.Code).ToListAsync(cancellationToken);
-        var steps = await db.ProcessSteps.AsNoTracking().ToDictionaryAsync(s => s.StationCode, cancellationToken);
+        var steps = StepsByStation(await db.ProcessSteps.AsNoTracking().ToListAsync(cancellationToken), stations);
         var machines = await db.Machines.AsNoTracking().OrderBy(m => m.Number).ToListAsync(cancellationToken);
         var tools = await db.MachineTools.AsNoTracking().ToDictionaryAsync(t => t.MachineCode, cancellationToken);
         var running = await db.Operations.AsNoTracking()
@@ -1339,7 +1378,7 @@ public sealed partial class ProductionService(
             .ToListAsync(cancellationToken);
 
         // 測試模式下爐前等待的進度：每座爐最早到的那一框與上一爐出爐的時間。
-        var batchStations = steps.Values.Where(s => s.Kind == ProcessStepKind.Batch).Select(s => s.StationCode).ToList();
+        var batchStations = steps.Where(p => p.Value.Kind == ProcessStepKind.Batch).Select(p => p.Key).ToList();
         var firstQueued = await db.Operations.AsNoTracking()
             .Where(o => o.Status == OperationStatus.Queued && batchStations.Contains(o.StationCode))
             .GroupBy(o => o.StationCode)
@@ -1364,6 +1403,7 @@ public sealed partial class ProductionService(
             {
                 Code = station.Code,
                 Name = station.Name,
+                StepSequence = station.StepSequence,
                 IsMachine = step is not null,
                 IsInspection = step is { IsInspection: true },
                 IsPacking = step is { IsPacking: true },

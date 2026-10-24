@@ -319,8 +319,9 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
         {
             e.HasKey(s => s.Sequence);
             e.Property(s => s.Sequence).ValueGeneratedNever();
-            e.Property(s => s.StationCode).HasMaxLength(32);
-            e.HasOne<Station>().WithMany().HasForeignKey(s => s.StationCode).OnDelete(DeleteBehavior.Restrict);
+            e.Property(s => s.Code).HasMaxLength(32);
+            e.HasIndex(s => s.Code).IsUnique();
+            e.Property(s => s.Name).HasMaxLength(64);
             e.Property(s => s.StageName).HasMaxLength(32);
             e.Ignore(s => s.IsManual);
             // 每種工序只檢查自己用到的欄位。
@@ -488,6 +489,8 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.Property(t => t.Id).ValueGeneratedNever();
             e.Property(t => t.FromStationCode).HasMaxLength(32);
             e.Property(t => t.ToStationCode).HasMaxLength(32);
+            // 送到工序的搬運在待派工時沒有目的站，其餘的一定有目的站（送到指定站）。
+            e.ToTable(t => t.HasCheckConstraint("CK_TransportTasks_Destination", "\"ToStationCode\" IS NOT NULL OR \"ToStepSequence\" IS NOT NULL"));
             e.Property(t => t.MachineCode).HasMaxLength(32);
             e.HasOne<Machine>().WithMany().HasForeignKey(t => t.MachineCode).OnDelete(DeleteBehavior.Restrict);
             e.Property(t => t.FailureReason).HasMaxLength(256);

@@ -43,7 +43,15 @@ public sealed class TransportTask
     public Guid? LotId { get; private set; }
     public MaterialLot? Lot { get; private set; }
     public string FromStationCode { get; private set; } = string.Empty;
-    public string ToStationCode { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// 目的站。送到指定站的（成品倉、出貨、刀具庫、送到機台所在的站）一開始就有；送到某道工序的，
+    /// 在待派工時是 null，派車時才從那道工序的站裡挑（<see cref="BindDestination"/>）。
+    /// </summary>
+    public string? ToStationCode { get; private set; }
+
+    /// <summary>送到某道工序的搬運（P7 第 1a 步）：要做的工序；送到指定站的是 null。</summary>
+    public int? ToStepSequence { get; private set; }
 
     /// <summary>送刀具的任務：新刀是給這一站的哪一台機台（同一站的兩台車床各有自己的刀）；物料搬運是 null。</summary>
     public string? MachineCode { get; private set; }
@@ -81,6 +89,43 @@ public sealed class TransportTask
         };
         task.Events.Add(new TaskEvent { ToStatus = TransportTaskStatus.Pending, OccurredAt = now });
         return task;
+    }
+
+    /// <summary>
+    /// 送到某道工序的搬運：目的站還沒定，派車時才從這道工序的站裡挑（<see cref="BindDestination"/>）。
+    /// 框的目的工序是 <paramref name="stepSequence"/>；搬運的 <see cref="Quantity"/> 與批次同 <see cref="Create"/>。
+    /// </summary>
+    public static TransportTask CreateToStep(MaterialLot lot, string from, int stepSequence, TransportTaskKind kind, DateTimeOffset now)
+    {
+        var task = new TransportTask
+        {
+            Id = Guid.NewGuid(),
+            LotId = lot.Id,
+            Lot = lot,
+            FromStationCode = from,
+            ToStationCode = null,
+            ToStepSequence = stepSequence,
+            Quantity = lot.Quantity,
+            Kind = kind,
+            Status = TransportTaskStatus.Pending,
+            CreatedAt = now,
+        };
+        task.Events.Add(new TaskEvent { ToStatus = TransportTaskStatus.Pending, OccurredAt = now });
+        return task;
+    }
+
+    /// <summary>
+    /// 派車時決定目的站（只能用在送到工序、待派工、還沒有目的站的任務）。之後派工與搬運都用這一站。
+    /// </summary>
+    public void BindDestination(string stationCode)
+    {
+        if (Status != TransportTaskStatus.Pending || ToStationCode is not null || ToStepSequence is null)
+        {
+            throw new InvalidOperationException(
+                $"Task {Id} cannot bind a destination in {Status} (station {ToStationCode ?? "-"}, step {ToStepSequence?.ToString() ?? "-"}).");
+        }
+
+        ToStationCode = stationCode;
     }
 
     /// <summary>把一把新刀從刀具庫送到機邊：送到 <paramref name="to"/> 這一站，給 <paramref name="machineCode"/> 這台機台。</summary>
@@ -127,9 +172,18 @@ public sealed class TransportTask
         CompletedAt = now;
     }
 
-    /// <summary>設備沒有接受指令（拒絕或過期），或還沒取料就失敗：物料還在原地，可以重新派工。</summary>
-    public void Requeue(Assignment assignment, string? reason, DateTimeOffset now) =>
+    /// <summary>
+    /// 設備沒有接受指令（拒絕或過期），或還沒取料就失敗：物料還在原地，可以重新派工。
+    /// 送到工序的任務要把目的站清掉：重新派工時再從那道工序的站裡挑（目的站是派車時才定的）。
+    /// </summary>
+    public void Requeue(Assignment assignment, string? reason, DateTimeOffset now)
+    {
         Transition(TransportTaskStatus.Pending, now, assignment, reason, TransportTaskStatus.Assigned, TransportTaskStatus.Executing);
+        if (ToStepSequence is not null)
+        {
+            ToStationCode = null;
+        }
+    }
 
     /// <summary>記錄人工處理的結果。物料的移動與後續的任務由呼叫端處理。</summary>
     public void Resolve(TaskResolution resolution, DateTimeOffset now)

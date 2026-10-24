@@ -69,8 +69,11 @@ public sealed class ScheduleForecaster
         /// <summary>Moving：要送到哪一站；null 表示 <see cref="Step"/> 那一站。</summary>
         public string? ToStation { get; init; }
 
-        /// <summary>逐件工序的每件加工秒數覆寫（工單規格的粗加工、精加工），以站點代碼查；沒有的用製程設定。</summary>
+        /// <summary>逐件工序的每件加工秒數覆寫（工單規格的粗加工、精加工），以工序代碼查；沒有的用製程設定。</summary>
         public IReadOnlyDictionary<string, double>? SecondsPerPiece { get; init; }
+
+        /// <summary>Queued：已經排在哪一座工站前。預估中才到站的框是 null，同一道工序任何一站都可以接（共用排隊區）。</summary>
+        public string? StationCode { get; init; }
 
         /// <summary>切料站實際要切的支數（整根圓棒切完，最後一框連多出來的一起切）；不經過切料、或還不知道時是 null。</summary>
         public int? CutQuantity { get; init; }
@@ -97,6 +100,9 @@ public sealed class ScheduleForecaster
         public required string Code { get; init; }
         public required string StationCode { get; init; }
         public int Number { get; init; }
+
+        /// <summary>這台機台所屬的工序（工站的 StepSequence）。</summary>
+        public int StepSequence { get; init; }
         public MachineAssignment.Setup? Last { get; init; }
 
         /// <summary>刀具上次換刀後做了幾件（正在換刀或等刀時是 0：換完就歸零）。</summary>
@@ -123,6 +129,9 @@ public sealed class ScheduleForecaster
     {
         public required IReadOnlyList<ProcessStep> Steps { get; init; }
         public required ProductionSettings Settings { get; init; }
+
+        /// <summary>全部工站：每一站屬於哪一道工序（StepSequence）。同一道工序可能有好幾站（P7 第 1a 步起）。</summary>
+        public required IReadOnlyList<Station> Stations { get; init; }
         public required IReadOnlyList<MachineInput> Machines { get; init; }
 
         /// <summary>排隊中的框依到站順序。</summary>
@@ -181,6 +190,9 @@ public sealed class ScheduleForecaster
     private readonly Dictionary<string, double> _furnaceWake = [];
     private readonly List<SimLot> _lots;
     private readonly Dictionary<(string, string), double> _distances = [];
+    private readonly Dictionary<string, int> _stepOfStation;
+    private readonly Dictionary<int, List<string>> _stationsOfStep;
+    private readonly Dictionary<string, string> _stationOfMachine;
     private long _seq;
     private double _now;
 
@@ -189,6 +201,12 @@ public sealed class ScheduleForecaster
         _input = input;
         _rates = rates;
         _machines = input.Machines.ToDictionary(m => m.Code, m => new SimMachine(m));
+        _stepOfStation = input.Stations.Where(st => st.StepSequence is not null)
+            .ToDictionary(st => st.Code, st => st.StepSequence!.Value, StringComparer.Ordinal);
+        _stationsOfStep = input.Stations.Where(st => st.StepSequence is not null)
+            .GroupBy(st => st.StepSequence!.Value)
+            .ToDictionary(g => g.Key, g => g.Select(st => st.Code).OrderBy(c => c, StringComparer.Ordinal).ToList());
+        _stationOfMachine = input.Machines.ToDictionary(m => m.Code, m => m.StationCode, StringComparer.Ordinal);
         _lots = input.Lots.Select(l => new SimLot(l)).ToList();
         _furnaceFreeAt = new Dictionary<string, double>(input.LastRunCompletedAt);
         _result.Hop = Hop;
@@ -240,9 +258,11 @@ public sealed class ScheduleForecaster
             _result.Blocked[lot.In.Id] = ForecastBlocker.WaitingForFurnaceFill;
             if (lot.Phase == LotPhase.Queued && StepOf(lot.Step) is { } step)
             {
-                if (!_result.Stranded.TryGetValue(step.StationCode, out var stranded))
+                // 已經排在某座爐前的記在那座爐；還沒到站的記在這道工序代碼最小的那一站。
+                var station = lot.QueuedStation ?? StationsOf(step.Sequence)[0];
+                if (!_result.Stranded.TryGetValue(station, out var stranded))
                 {
-                    _result.Stranded[step.StationCode] = stranded = [];
+                    _result.Stranded[station] = stranded = [];
                 }
 
                 stranded.Add(lot.In);
@@ -278,7 +298,7 @@ public sealed class ScheduleForecaster
                         break;
                     }
 
-                    var to = lot.In.ToStation ?? target.StationCode;
+                    var to = lot.In.ToStation ?? StationOf(target, lot.In.FromStation);
                     var from = lot.In.FromStation ?? to;
                     var travel = Travel(from, to) + _rates.HandoverSeconds;
                     At(lot.In.OnVehicle ? travel : travel + _rates.HandoverSeconds, () => Arrive(lot));
@@ -294,9 +314,9 @@ public sealed class ScheduleForecaster
 
         foreach (var run in _input.Runs)
         {
-            var step = Steps.Single(s => s.StationCode == run.StationCode);
+            var step = StepOfStation(run.StationCode);
             var lots = _lots.Where(l => run.LotIds.Contains(l.In.Id)).ToList();
-            StartFurnace(step, lots, run.StartedAt, run.RemainingSeconds / _rates.StepSpeed(step), running: true);
+            StartFurnace(step, run.StationCode, lots, run.StartedAt, run.RemainingSeconds / _rates.StepSpeed(step), running: true);
         }
     }
 
@@ -325,17 +345,21 @@ public sealed class ScheduleForecaster
             {
                 DispatchMachines(step, queue);
             }
-            else if (!_busyFurnaces.Contains(step.StationCode))
+            else
             {
-                DispatchFurnace(step, queue);
+                foreach (var furnace in StationsOf(step.Sequence))
+                {
+                    DispatchFurnace(step, furnace, queue);
+                }
             }
         }
     }
 
     private void DispatchMachines(ProcessStep step, List<SimLot> queue)
     {
-        var free = _machines.Values.Where(m => m.In.StationCode == step.StationCode && !m.Busy)
-            .OrderBy(m => m.In.Number)
+        var free = _machines.Values.Where(m => m.In.StepSequence == step.Sequence && !m.Busy)
+            .OrderBy(m => m.In.StationCode, StringComparer.Ordinal)
+            .ThenBy(m => m.In.Number)
             .Select(m => new MachineAssignment.FreeMachine(m.In.Code, m.In.Number, m.Last))
             .ToList();
         if (free.Count == 0)
@@ -343,14 +367,16 @@ public sealed class ScheduleForecaster
             return;
         }
 
-        var assigned = MachineAssignment.Assign(free, queue, l => SetupOf(l.In), step.UsesTool, l => l.In.Priority);
+        // 已經排在某座站前的框只能由那座站的機台接；還沒到站的框，同一道工序任何一台都可以接。
+        var assigned = MachineAssignment.Assign(free, queue, l => SetupOf(l.In), step.UsesTool, l => l.In.Priority,
+            canPair: (machine, lot) => lot.QueuedStation is null || lot.QueuedStation == _stationOfMachine[machine.Code]);
         foreach (var (picked, lot) in assigned)
         {
             queue.Remove(lot);
             var machine = _machines[picked.Code];
             var speed = _rates.StepSpeed(step);
             var quantity = step.IsCutting && lot.In.CutQuantity is { } cut ? cut : lot.In.Quantity;
-            var perPiece = lot.In.SecondsPerPiece is { } custom && custom.TryGetValue(step.StationCode, out var seconds) && seconds > 0
+            var perPiece = lot.In.SecondsPerPiece is { } custom && custom.TryGetValue(step.Code, out var seconds) && seconds > 0
                 ? seconds
                 : step.SecondsPerPiece;
             var cycle = perPiece + (step.IsManual ? 0 : 2 * Settings.PieceHandlingSeconds);
@@ -407,18 +433,29 @@ public sealed class ScheduleForecaster
     {
         machine.Busy = true;
         _result.Bins.Add(new BinPlan(machine.In.Code, lot.In, quantity, start, end, running, changeover));
-        At(end, () => Finish(lot, step, end));
+        At(end, () => Finish(lot, step, machine.In.StationCode, end));
         var pickup = step.IsPacking ? 0 : _rates.HandoverSeconds;
         At(end + Math.Max(toolAfter, pickup), () => machine.Busy = false);
     }
 
     /// <summary>
-    /// 整爐工序開爐，規則同 <see cref="ProductionService"/>：排隊的支數達到下限才開；反工品另外累積；
-    /// 湊不到下限時，補做的料（測試模式下任何料）在已經沒有其他料會再來時也開。急單、交期早的先裝，其餘照到站順序，裝到上限為止。
+    /// 整爐工序開爐（一座爐一次）：這一座爐沒有在跑，而且排隊中的支數達到下限。排隊的料是排在這座爐前的，
+    /// 或還沒決定去哪座爐的（同一道工序的爐共用排隊區，預估的簡化）。急單、交期早的框先裝（<see cref="SchedulePriority"/>），
+    /// 其餘照到站順序，裝到上限為止；一框不拆開，放不下的留到下一爐。規則同 <see cref="ProductionService"/>。
     /// </summary>
-    private void DispatchFurnace(ProcessStep step, List<SimLot> arrived)
+    private void DispatchFurnace(ProcessStep step, string furnace, List<SimLot> queue)
     {
-        var arrivedIds = arrived.Select(l => l.In.Id).ToHashSet();
+        if (_busyFurnaces.Contains(furnace))
+        {
+            return;
+        }
+
+        var arrived = queue.Where(l => l.QueuedStation is null || l.QueuedStation == furnace).ToList();
+        if (arrived.Count == 0)
+        {
+            return;
+        }
+
         var active = _lots.Where(l => l.Step is not null && l.Phase != LotPhase.Finished).ToList();
         var inspection = Steps.FirstOrDefault(s => s.IsInspection)?.Sequence ?? int.MaxValue;
 
@@ -426,10 +463,10 @@ public sealed class ScheduleForecaster
         var reworkIds = rework.Select(l => l.In.Id).ToHashSet();
         var reworkReleased = rework.Sum(l => l.In.Quantity) >= Settings.ReworkBatchMinPieces
             || !active.Any(l => l.Step <= inspection && !reworkIds.Contains(l.In.Id));
-        var waitedOut = WaitedOut(step, arrived);
+        var waitedOut = WaitedOut(step, furnace, arrived);
         var waiting = reworkReleased || waitedOut ? arrived : arrived.Except(rework).ToList();
 
-        var moreComing = active.Any(l => l.Step <= step.Sequence && !arrivedIds.Contains(l.In.Id));
+        var moreComing = MoreComing(step, furnace, active);
         var enough = waitedOut
             || waiting.Sum(l => l.In.Quantity) >= step.BatchMinPieces
             || (waiting.Count > 0 && !moreComing && (_rates.TestModeRules || waiting.Any(l => l.In.IsMakeup)));
@@ -457,17 +494,25 @@ public sealed class ScheduleForecaster
 
         foreach (var lot in load)
         {
-            arrived.Remove(lot);
+            queue.Remove(lot);
         }
 
-        StartFurnace(step, load, _now, _now + step.BatchSeconds / _rates.StepSpeed(step), running: false);
+        StartFurnace(step, furnace, load, _now, _now + step.BatchSeconds / _rates.StepSpeed(step), running: false);
     }
+
+    /// <summary>
+    /// 這一座爐之後還會有料進來：工序在這道工序之前的（都會來），或這道工序還在搬運中、而且還沒定要去哪座爐、或定的就是這座爐。
+    /// 已經排在別座爐前、或已經在爐裡的，不算會再來（P7 第 1a 步；和 ProductionService 的規則相同）。
+    /// </summary>
+    private static bool MoreComing(ProcessStep step, string furnace, IReadOnlyList<SimLot> active) => active.Any(l =>
+        l.Step < step.Sequence
+        || (l.Step == step.Sequence && l.Phase == LotPhase.Moving && (l.In.ToStation is null || l.In.ToStation == furnace)));
 
     /// <summary>
     /// 測試模式的規則：爐空著、爐前有料等超過設定的秒數就直接開爐（使用者 2026-10-23）。
     /// 從最早到的那一框與上一爐出爐較晚的那一刻算起；還沒到時，在到的那一刻再挑一次。
     /// </summary>
-    private bool WaitedOut(ProcessStep step, List<SimLot> arrived)
+    private bool WaitedOut(ProcessStep step, string furnace, List<SimLot> arrived)
     {
         if (!_rates.TestModeRules || arrived.Count == 0)
         {
@@ -475,7 +520,7 @@ public sealed class ScheduleForecaster
         }
 
         var start = arrived.Min(l => l.ArrivedAt);
-        if (_furnaceFreeAt.TryGetValue(step.StationCode, out var freeAt) && freeAt > start)
+        if (_furnaceFreeAt.TryGetValue(furnace, out var freeAt) && freeAt > start)
         {
             start = freeAt;
         }
@@ -486,38 +531,38 @@ public sealed class ScheduleForecaster
             return true;
         }
 
-        if (!_furnaceWake.TryGetValue(step.StationCode, out var wake) || wake != due)
+        if (!_furnaceWake.TryGetValue(furnace, out var wake) || wake != due)
         {
-            _furnaceWake[step.StationCode] = due;
+            _furnaceWake[furnace] = due;
             At(due, () => { });
         }
 
         return false;
     }
 
-    private void StartFurnace(ProcessStep step, List<SimLot> lots, double start, double end, bool running)
+    private void StartFurnace(ProcessStep step, string furnace, List<SimLot> lots, double start, double end, bool running)
     {
         end = Math.Max(end, 0);
-        _busyFurnaces.Add(step.StationCode);
+        _busyFurnaces.Add(furnace);
         foreach (var lot in lots)
         {
             lot.Phase = LotPhase.InFurnace;
         }
 
-        _result.Runs.Add(new RunPlan(step.StationCode, lots.Select(l => l.In).ToList(), lots.Sum(l => l.In.Quantity), start, end, running));
+        _result.Runs.Add(new RunPlan(furnace, lots.Select(l => l.In).ToList(), lots.Sum(l => l.In.Quantity), start, end, running));
         At(end, () =>
         {
-            _busyFurnaces.Remove(step.StationCode);
-            _furnaceFreeAt[step.StationCode] = end;
+            _busyFurnaces.Remove(furnace);
+            _furnaceFreeAt[furnace] = end;
             foreach (var lot in lots)
             {
-                Finish(lot, step, end);
+                Finish(lot, step, furnace, end);
             }
         });
     }
 
     /// <summary>一框做完這一道：包裝完就算完成；否則送往下一道（沒有下一道是送去暫存點，也算完成）。品管當作全部合格。</summary>
-    private void Finish(SimLot lot, ProcessStep step, double at)
+    private void Finish(SimLot lot, ProcessStep step, string station, double at)
     {
         if (step.IsPacking)
         {
@@ -532,13 +577,15 @@ public sealed class ScheduleForecaster
         {
             lot.Step = null;
             lot.Phase = LotPhase.Finished;
-            _result.FinishedAt[lot.In.Id] = at + Hop(step.StationCode, Settings.BufferStationCode);
+            _result.FinishedAt[lot.In.Id] = at + Hop(station, Settings.BufferStationCode);
             return;
         }
 
         lot.Step = next.Sequence;
         lot.Phase = LotPhase.Moving;
-        At(at + Hop(step.StationCode, next.StationCode), () => Arrive(lot));
+        lot.QueuedStation = null;
+        var to = StationOf(next, station);
+        At(at + Hop(station, to), () => Arrive(lot));
     }
 
     private void Arrive(SimLot lot)
@@ -564,7 +611,27 @@ public sealed class ScheduleForecaster
     private ProcessStep? StepOf(int? sequence) => sequence is { } s ? Steps.FirstOrDefault(step => step.Sequence == s) : null;
 
     private double SpeedAt(string stationCode) =>
-        Steps.FirstOrDefault(s => s.StationCode == stationCode) is { } step ? _rates.StepSpeed(step) : 1;
+        _stepOfStation.TryGetValue(stationCode, out var sequence) && StepOf(sequence) is { } step ? _rates.StepSpeed(step) : 1;
+
+    /// <summary>工序的工站（代碼由小到大）；沒有站的工序是空的。</summary>
+    private List<string> StationsOf(int sequence) => _stationsOfStep.GetValueOrDefault(sequence) ?? [];
+
+    private ProcessStep StepOfStation(string station) =>
+        StepOf(_stepOfStation[station]) ?? throw new InvalidOperationException($"Station {station} has no process step.");
+
+    /// <summary>送到某道工序的站：沒有來源站時取代碼最小的；有來源時取離來源最近的（距離相同時代碼小的）。</summary>
+    private string StationOf(ProcessStep step, string? from)
+    {
+        var candidates = StationsOf(step.Sequence);
+        if (candidates.Count == 0)
+        {
+            throw new InvalidOperationException($"Process step {step.Code} has no station.");
+        }
+
+        return from is null
+            ? candidates[0]
+            : candidates.OrderBy(c => Travel(from, c)).ThenBy(c => c, StringComparer.Ordinal).First();
+    }
 
     /// <summary>搬運一趟：取料交接、路程、卸料交接。</summary>
     private double Hop(string from, string to) => 2 * _rates.HandoverSeconds + Travel(from, to);
@@ -594,6 +661,9 @@ public sealed class ScheduleForecaster
 
         /// <summary>到站排隊的時間；一開始就在排隊的框是實際到站的時間。</summary>
         public double ArrivedAt { get; set; } = input.QueuedAt;
+
+        /// <summary>目前排在哪一座站前。只在這道工序的排隊中有；離開這道工序（送往下一道）就清掉，之後是共用排隊區。</summary>
+        public string? QueuedStation { get; set; } = input.StationCode;
     }
 
     private sealed class SimMachine(MachineInput input)

@@ -819,6 +819,11 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<double>("BatchSeconds")
                         .HasColumnType("double precision");
 
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<bool>("IsCutting")
                         .HasColumnType("boolean");
 
@@ -833,15 +838,15 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<double>("SecondsPerPiece")
                         .HasColumnType("double precision");
 
                     b.Property<string>("StageName")
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<string>("StationCode")
-                        .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
@@ -856,7 +861,8 @@ namespace OpenFleet.Api.Data.Migrations
 
                     b.HasKey("Sequence");
 
-                    b.HasIndex("StationCode");
+                    b.HasIndex("Code")
+                        .IsUnique();
 
                     b.ToTable("ProcessSteps", t =>
                         {
@@ -1405,6 +1411,9 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<int?>("OutboundCapacity")
                         .HasColumnType("integer");
 
+                    b.Property<int?>("StepSequence")
+                        .HasColumnType("integer");
+
                     b.HasKey("Code");
 
                     b.ToTable("Stations");
@@ -1728,9 +1737,11 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.Property<string>("ToStationCode")
-                        .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
+
+                    b.Property<int?>("ToStepSequence")
+                        .HasColumnType("integer");
 
                     b.Property<uint>("Version")
                         .IsConcurrencyToken()
@@ -1750,7 +1761,10 @@ namespace OpenFleet.Api.Data.Migrations
 
                     b.HasIndex("Status", "CreatedAt");
 
-                    b.ToTable("TransportTasks");
+                    b.ToTable("TransportTasks", t =>
+                        {
+                            t.HasCheckConstraint("CK_TransportTasks_Destination", "\"ToStationCode\" IS NOT NULL OR \"ToStepSequence\" IS NOT NULL");
+                        });
                 });
 
             modelBuilder.Entity("OpenFleet.Api.Data.TruckSchedule", b =>
@@ -2043,15 +2057,6 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Navigation("Lot");
                 });
 
-            modelBuilder.Entity("OpenFleet.Api.Data.ProcessStep", b =>
-                {
-                    b.HasOne("OpenFleet.Api.Data.Station", null)
-                        .WithMany()
-                        .HasForeignKey("StationCode")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-                });
-
             modelBuilder.Entity("OpenFleet.Api.Data.ProductionOrder", b =>
                 {
                     b.HasOne("OpenFleet.Api.Data.Item", null)
@@ -2325,8 +2330,7 @@ namespace OpenFleet.Api.Data.Migrations
                     b.HasOne("OpenFleet.Api.Data.Station", null)
                         .WithMany()
                         .HasForeignKey("ToStationCode")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("Lot");
                 });

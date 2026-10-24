@@ -191,7 +191,7 @@ public sealed class CatalogTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal([45, 45], bins.Select(b => b.Quantity));
 
         await using var db = _database.NewContext();
-        var plating = await db.ProcessSteps.AsNoTracking().SingleAsync(s => s.StationCode == "plating");
+        var plating = await db.ProcessSteps.AsNoTracking().SingleAsync(s => s.Code == "plating");
         Assert.Equal((56, 40), (plating.BatchCapacityFor(24), plating.BatchCapacityFor(30)));
     }
 }

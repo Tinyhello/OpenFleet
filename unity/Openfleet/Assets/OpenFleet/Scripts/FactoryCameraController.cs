@@ -9,8 +9,8 @@ namespace OpenFleet.Unity
     /// </summary>
     public sealed class FactoryCameraController : MonoBehaviour
     {
-        /// <summary>預設視角：場地中心稍微偏南。廠房往西加寬放切料站後，中心在 X = -4（Editor 建場景時也用這兩個值）。</summary>
-        public static readonly Vector3 DefaultTarget = new Vector3(-4f, 0f, -1.5f);
+        /// <summary>預設視角：稍微偏南。右邊有操作面板蓋住，中心在 X = 3，切料到精加工 2 號機都在畫面裡（Editor 建場景時也用這個值）。</summary>
+        public static readonly Vector3 DefaultTarget = new Vector3(3f, 0f, -1.5f);
         public const float DefaultDistance = 56f;
 
         [SerializeField] private Vector3 target = DefaultTarget;

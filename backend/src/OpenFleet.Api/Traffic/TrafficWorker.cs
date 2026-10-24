@@ -122,6 +122,13 @@ public sealed class TrafficWorker(
                 : (null, false);
         }
 
+        // 有效派工的目的站一定已經定好（派車時才定，P7 第 1a 步）；萬一沒有，這台車先不動，不替它規劃路徑。
+        if (assignment.ToStationCode is null)
+        {
+            logger.LogWarning("Vehicle {VehicleId} has an active assignment without a destination station; holding it in place.", vehicle.VehicleId);
+            return (null, false);
+        }
+
         var pickup = _stationNodes![assignment.FromStationCode];
         var destination = _stationNodes[assignment.ToStationCode];
 

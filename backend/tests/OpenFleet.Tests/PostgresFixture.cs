@@ -111,7 +111,7 @@ public sealed class TestDatabase
         await db.ProcessSteps.Where(s => s.Sequence > 2).ExecuteDeleteAsync();
         await db.ProcessSteps.ExecuteUpdateAsync(s => s.SetProperty(step => step.SecondsPerPiece, 2d));
         await db.ProductionSettings.ExecuteUpdateAsync(s => s
-            .SetProperty(x => x.BufferStationCode, "heat")
+            .SetProperty(x => x.BufferStationCode, "heat-1")
             .SetProperty(x => x.PieceHandlingSeconds, 0d)
             .SetProperty(x => x.ToolChangeSeconds, 20d)
             .SetProperty(x => x.ToolDeliveryEnabled, false));
@@ -122,8 +122,8 @@ public sealed class TestDatabase
     {
         await using var db = NewContext();
         var now = Time.GetUtcNow();
-        var lot = MaterialLot.Receive("occupied", 1, "packing", null, $"OCC-{Guid.NewGuid():N}"[..20], 1, 1, 30, now);
-        var task = TransportTask.Create(lot, "packing", "shipping", TransportTaskKind.WipTransfer, now);
+        var lot = MaterialLot.Receive("occupied", 1, "packing-1", null, $"OCC-{Guid.NewGuid():N}"[..20], 1, 1, 30, now);
+        var task = TransportTask.Create(lot, "packing-1", "shipping", TransportTaskKind.WipTransfer, now);
         db.Lots.Add(lot);
         db.TransportTasks.Add(task);
         db.Assignments.Add(task.Assign(vehicleId, 1, now, TimeSpan.FromHours(1)));
@@ -134,7 +134,7 @@ public sealed class TestDatabase
     public async Task ReleaseAsync(string vehicleId)
     {
         await using var db = NewContext();
-        await db.Assignments.Where(a => a.VehicleId == vehicleId && a.Task.FromStationCode == "packing").ExecuteDeleteAsync();
+        await db.Assignments.Where(a => a.VehicleId == vehicleId && a.Task.FromStationCode == "packing-1").ExecuteDeleteAsync();
     }
 
     /// <summary>車輛目前那筆剛派出的派工，走完接受、取料、卸料；過程中時間不前進。</summary>

@@ -91,7 +91,7 @@ public sealed class TransportRecoveryTests(PostgresFixture postgres) : IAsyncLif
 
         // 視同送達：批次在粗加工排隊，下一輪就開始加工。
         await using var scope = _database.NewScope();
-        Assert.Equal((LotStatus.Queued, "rough"), await LotAsync(scope));
+        Assert.Equal((LotStatus.Queued, "rough-1"), await LotAsync(scope));
         Assert.Equal(1, await scope.Db.TransportTasks.CountAsync());
         Assert.True(await scope.Production.AdvanceOperationsAsync(default));
         Assert.Equal(OperationStatus.Running, (await scope.Db.Operations.SingleAsync()).Status);

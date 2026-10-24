@@ -51,6 +51,9 @@ namespace OpenFleet.Contracts
         public string Name { get; set; } = string.Empty;
         public string StationCode { get; set; } = string.Empty;
 
+        /// <summary>這台機台所屬的工序（工站的 StepSequence），面板依製程順序排列用。</summary>
+        public int? StepSequence { get; set; }
+
         /// <summary>依開始時間排序；第一筆可能是正在做的那一框。</summary>
         public List<ScheduledBinDto> Bins { get; set; } = new List<ScheduledBinDto>();
     }

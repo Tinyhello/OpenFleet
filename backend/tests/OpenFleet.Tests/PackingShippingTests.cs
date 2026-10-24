@@ -30,19 +30,19 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
     public async Task Bins_of_a_batch_are_packed_one_by_one_then_boxed_together_and_shipped_by_the_truck()
     {
         var batch = NewBatch();
-        var first = await ArriveAsync("packing", Packing, 3, batch, 1);
-        var second = await ArriveAsync("packing", Packing, 2, batch, 2);
+        var first = await ArriveAsync("packing-1", Packing, 3, batch, 1);
+        var second = await ArriveAsync("packing-1", Packing, 2, batch, 2);
         await AdvanceAsync(0);
 
         // 逐支包裝，每支 2 秒，沒有機台取放的時間。
         await AdvanceAsync(4);
-        var packing = await StationAsync("packing");
+        var packing = await StationAsync("packing-1");
         Assert.Equal((true, 2, 3), (packing.IsPacking, packing.Machine().Machining!.PiecesCompleted, packing.Machine().Machining!.Quantity));
 
         // 第一框包完：留在包裝站等第二框，還沒有箱子、也沒有搬運。接著開始第二框。
         await AdvanceAsync(2);
-        Assert.Equal((3, LotStatus.Packed, "packing"), await StateAsync(first.Id));
-        Assert.Equal(3, (await StationAsync("packing")).OutboundQuantity);
+        Assert.Equal((3, LotStatus.Packed, "packing-1"), await StateAsync(first.Id));
+        Assert.Equal(3, (await StationAsync("packing-1")).OutboundQuantity);
         await using (var scope = _database.NewScope())
         {
             Assert.False(await scope.Db.Lots.AnyAsync(l => l.IsBox));
@@ -51,16 +51,16 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
 
         // 第二框也包完：整批併成一箱，兩個料框空了；箱子等待搬運到出貨站。
         await AdvanceAsync(4);
-        Assert.Equal((3, LotStatus.Boxed, "packing"), await StateAsync(first.Id));
-        Assert.Equal((2, LotStatus.Boxed, "packing"), await StateAsync(second.Id));
+        Assert.Equal((3, LotStatus.Boxed, "packing-1"), await StateAsync(first.Id));
+        Assert.Equal((2, LotStatus.Boxed, "packing-1"), await StateAsync(second.Id));
         MaterialLot box;
         await using (var scope = _database.NewScope())
         {
             box = await scope.Db.Lots.SingleAsync(l => l.IsBox);
-            Assert.Equal(($"{batch}-U-BOX", batch, 5, LotStatus.AwaitingTransport, "packing"),
+            Assert.Equal(($"{batch}-U-BOX", batch, 5, LotStatus.AwaitingTransport, "packing-1"),
                 (box.LotNumber, box.BatchNumber, box.Quantity, box.Status, box.StationCode));
             var task = await scope.Db.TransportTasks.SingleAsync();
-            Assert.Equal((box.Id, "packing", "shipping", 5), (task.LotId!.Value, task.FromStationCode, task.ToStationCode, task.Quantity));
+            Assert.Equal((box.Id, "packing-1", "shipping", 5), (task.LotId!.Value, task.FromStationCode, task.ToStationCode, task.Quantity));
         }
 
         // 送到出貨站：等貨車。
@@ -95,8 +95,8 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
     {
         // 同一個批次：一框已經到包裝站，另一框還在品管，而且兩支都會被判尺寸不良。
         var batch = NewBatch();
-        var packed = await ArriveAsync("packing", Packing, 1, batch, 1);
-        var late = await ArriveAsync("qc", Inspection, 2, batch, 2);
+        var packed = await ArriveAsync("packing-1", Packing, 1, batch, 1);
+        var late = await ArriveAsync("qc-1", Inspection, 2, batch, 2);
         _database.Defects.Enqueue(DefectReason.Dimension, DefectReason.Dimension);
         await AdvanceAsync(0);
 
@@ -126,7 +126,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
             await scope.Db.TransportTasks.Where(t => t.LotId == makeup.Id).ExecuteDeleteAsync();
             var lot = await scope.Db.Lots.SingleAsync(l => l.Id == makeup.Id);
             scope.Db.Entry(lot).Property(l => l.CurrentStepSequence).CurrentValue = Packing;
-            lot.PlaceAt("packing", _database.Time.GetUtcNow());
+            lot.PlaceAt("packing-1", _database.Time.GetUtcNow());
             scope.Production.OnLotArrived(lot, _database.Time.GetUtcNow());
             await scope.Db.SaveChangesAsync();
         }
@@ -136,7 +136,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
         await using (var scope = _database.NewScope())
         {
             var box = await scope.Db.Lots.SingleAsync(l => l.IsBox);
-            Assert.Equal((3, LotStatus.AwaitingTransport, "packing"), (box.Quantity, box.Status, box.StationCode));
+            Assert.Equal((3, LotStatus.AwaitingTransport, "packing-1"), (box.Quantity, box.Status, box.StationCode));
         }
     }
 
@@ -145,8 +145,8 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
     {
         // 同一個批次：上沖已經到包裝站，下沖還在品管。
         var batch = NewBatch();
-        await ArriveAsync("packing", Packing, 2, batch, 1, ProductParts.UpperPunch);
-        await ArriveAsync("qc", Inspection, 4, batch, 1, ProductParts.LowerPunch);
+        await ArriveAsync("packing-1", Packing, 2, batch, 1, ProductParts.UpperPunch);
+        await ArriveAsync("qc-1", Inspection, 4, batch, 1, ProductParts.LowerPunch);
         await AdvanceAsync(0);
 
         // 上沖包完：不用等下沖，這一種零件自己裝一箱送去出貨站。
@@ -168,7 +168,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal(0, (await ShippingAsync()).ShippedBoxes);
 
         // 下沖檢完、包完、裝箱、送到出貨站：整批到齊。
-        await DeliverAsync("packing");
+        await DeliverAsync("packing-1");
         await AdvanceAsync(0);
         await AdvanceAsync(8);
         await DeliverAsync("shipping");
@@ -186,8 +186,8 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
     public async Task Packed_bin_waits_for_a_bin_that_is_still_being_inspected()
     {
         var batch = NewBatch();
-        var packed = await ArriveAsync("packing", Packing, 1, batch, 1);
-        var late = await ArriveAsync("qc", Inspection, 3, batch, 2);
+        var packed = await ArriveAsync("packing-1", Packing, 1, batch, 1);
+        var late = await ArriveAsync("qc-1", Inspection, 3, batch, 2);
         await AdvanceAsync(0);
 
         // 包裝 2 秒就包完，但品管那一框還要 6 秒：先等。
@@ -209,7 +209,7 @@ public sealed class PackingShippingTests(PostgresFixture postgres) : IAsyncLifet
     public async Task Test_mode_speeds_up_the_truck_and_changing_the_interval_restarts_the_countdown()
     {
         var batch = NewBatch();
-        await ArriveAsync("packing", Packing, 1, batch, 1);
+        await ArriveAsync("packing-1", Packing, 1, batch, 1);
         await AdvanceAsync(0);
         await AdvanceAsync(2);
         await DeliverAsync();

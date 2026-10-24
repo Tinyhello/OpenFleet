@@ -73,7 +73,7 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         Assert.Equal((1, 1, 10d), (summary.OfflineWaitingTasks, summary.OfflineWaitCount, summary.OfflineWaitSeconds));
         Assert.Equal((0, 0, 0d), (summary.WaitingTasks, summary.WaitCount, summary.WaitSeconds));
         Assert.Equal((0d, 10d, ShortageReason.FleetOffline), (summary.Steps[1].DelaySeconds, summary.Steps[1].OfflineSeconds, summary.Steps[1].CurrentReason));
-        Assert.Equal(ShortageReason.FleetOffline, (await StationAsync("rough")).Machine().ShortageReason);
+        Assert.Equal(ShortageReason.FleetOffline, (await StationAsync("rough-1")).Machine().ShortageReason);
 
         // 有一台回到線上但在忙：事故結束，從這一刻起才算缺車。兩段時間各算各的。
         Assert.Equal(0, await DispatchAsync(Busy));
@@ -141,8 +141,10 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
 
         var summary = await SummaryAsync(Busy);
         Assert.Equal((10d, 10d, MachineDelayCause.WaitingForMaterial), (summary.Steps[1].DelaySeconds, summary.Steps[1].WaitingForMaterialSeconds, summary.Steps[1].CurrentCause));
-        var rough = await StationAsync("rough");
-        Assert.Equal((null, MachineDelayCause.WaitingForMaterial), (rough.Machine(1).ShortageCause, rough.Machine(2).ShortageCause));
+        // 1 號機在做第一批；2 號機沒有料可做，算它等料。
+        var rough1 = await StationAsync("rough-1");
+        var rough2 = await StationAsync("rough-2");
+        Assert.Equal((null, MachineDelayCause.WaitingForMaterial), (rough1.Machine().ShortageCause, rough2.Machine().ShortageCause));
         await using var scope = _database.NewScope();
         Assert.Equal("rough-2", (await scope.Db.MachineDelays.SingleAsync()).MachineCode);
     }
@@ -177,15 +179,17 @@ public sealed class VehicleShortageTests(PostgresFixture postgres) : IAsyncLifet
         var summary = await SummaryAsync(Busy);
         Assert.Equal((8d, MachineDelayCause.OutputNotRemoved), (summary.Steps[1].OutputNotRemovedSeconds, summary.Steps[1].CurrentCause));
         Assert.Equal((16d, MachineDelayCause.WaitingForMaterial), (summary.Steps[2].WaitingForMaterialSeconds, summary.Steps[2].CurrentCause));
-        var rough = await StationAsync("rough");
-        Assert.Equal((MachineDelayCause.OutputNotRemoved, null), (rough.Machine(1).ShortageCause, rough.Machine(2).ShortageCause));
+        var rough1 = await StationAsync("rough-1");
+        var rough2 = await StationAsync("rough-2");
+        Assert.Equal((MachineDelayCause.OutputNotRemoved, null), (rough1.Machine().ShortageCause, rough2.Machine().ShortageCause));
 
         // 兩台車都派出去之後全部結束。
         Assert.Equal(2, await DispatchAsync(Busy, Online("agv-a"), Online("agv-b")));
         summary = await SummaryAsync(Busy);
         Assert.Equal((0, 8d, 16d), (summary.WaitingTasks, summary.Steps[1].DelaySeconds, summary.Steps[2].DelaySeconds));
         Assert.All(summary.Steps, step => Assert.Null(step.CurrentCause));
-        Assert.All((await StationAsync("rough")).Machines, machine => Assert.Null(machine.ShortageCause));
+        Assert.All((await StationAsync("rough-1")).Machines, machine => Assert.Null(machine.ShortageCause));
+        Assert.All((await StationAsync("rough-2")).Machines, machine => Assert.Null(machine.ShortageCause));
     }
 
     [Fact]

@@ -107,10 +107,10 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
 
         var runningMachines = operations.Where(o => o.Status == OperationStatus.Running && o.MachineCode != null)
             .Select(o => o.MachineCode!).ToHashSet(StringComparer.Ordinal);
-        var pieceStations = steps.Where(s => s.Kind == ProcessStepKind.Piece).Select(s => s.StationCode).ToList();
+        var pieceStations = stations.Keys.Where(code => StepAt(code) is { Kind: ProcessStepKind.Piece }).ToList();
         var holding = (await MachineQueries.BlockedMachinesAsync(db, pieceStations, machines, cancellationToken)).ToHashSet(StringComparer.Ordinal);
 
-        double SpeedAt(string stationCode) => steps.FirstOrDefault(s => s.StationCode == stationCode) is { } step ? settings.SpeedOf(step) : 1;
+        double SpeedAt(string stationCode) => StepAt(stationCode) is { } step ? settings.SpeedOf(step) : 1;
 
         // 換刀還剩多久，或停機等刀（當作新刀馬上到）要換多久；原本的秒數。
         double ToolStop(MachineTool? tool, double speed) =>
@@ -119,8 +119,14 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
             : tool.IsWaitingForSpare ? settings.ToolChangeSeconds
             : 0;
 
+        // 工站所屬的工序（倉儲站沒有工序，是 null）。
+        ProcessStep? StepAt(string stationCode) =>
+            stations.TryGetValue(stationCode, out var station) && station.StepSequence is { } sequence
+                ? steps.FirstOrDefault(s => s.Sequence == sequence)
+                : null;
+
         MachineTool? ToolOf(string machineCode, string stationCode) =>
-            steps.Any(s => s.StationCode == stationCode && s.UsesTool) ? tools.GetValueOrDefault(machineCode) : null;
+            StepAt(stationCode) is { UsesTool: true } ? tools.GetValueOrDefault(machineCode) : null;
 
         var machineInputs = new List<MachineInput>();
         foreach (var machine in machines)
@@ -137,6 +143,7 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
                 Code = machine.Code,
                 StationCode = machine.StationCode,
                 Number = machine.Number,
+                StepSequence = stations[machine.StationCode].StepSequence ?? 0,
                 Last = last,
                 ToolPieces = tool is null || tool.IsStopped ? 0 : tool.PiecesSinceChange,
                 StopSeconds = running ? 0 : ToolStop(tool, SpeedAt(machine.StationCode)),
@@ -153,12 +160,12 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
             var overrides = new Dictionary<string, double>();
             if (workOrder?.RoughSecondsPerPiece is { } rough)
             {
-                overrides[CatalogService.RoughStationCode] = rough;
+                overrides[CatalogService.RoughStepCode] = rough;
             }
 
             if (workOrder?.FinishSecondsPerPiece is { } finish)
             {
-                overrides[CatalogService.FinishStationCode] = finish;
+                overrides[CatalogService.FinishStepCode] = finish;
             }
 
             var phase = lot.Status switch
@@ -194,6 +201,7 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
                 QueuedAt = operation is null ? 0 : (operation.QueuedAt - now).TotalSeconds,
                 SecondsPerPiece = overrides,
                 CutQuantity = cutQuantities.TryGetValue(lot.Id, out var cut) ? cut : null,
+                StationCode = phase == LotPhase.Queued ? lot.StationCode : null,
             };
 
             lotInputs.Add(phase == LotPhase.Running ? WithRunning(lotInput, operation!) : lotInput);
@@ -204,7 +212,7 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
             var step = steps.Single(s => s.Sequence == operation.StepSequence);
             var speed = settings.SpeedOf(step);
             var cycle = (operation.SecondsPerPiece ?? step.SecondsPerPiece) + 2 * operation.HandlingSeconds;
-            var tool = ToolOf(operation.MachineCode!, step.StationCode);
+            var tool = ToolOf(operation.MachineCode!, operation.StationCode);
             double lead;
             if (tool is { IsStopped: true })
             {
@@ -270,6 +278,7 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
         {
             Steps = steps,
             Settings = settings,
+            Stations = stations.Values.OrderBy(st => st.Code, StringComparer.Ordinal).ToList(),
             Machines = machineInputs,
             Lots = lotInputs,
             Runs = runInputs,
@@ -304,7 +313,11 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
     {
         var input = snapshot.Input;
         var lotsByOrder = input.Lots.Where(l => l.SalesOrderId is not null).ToLookup(l => l.SalesOrderId!.Value);
-        var packing = input.Steps.FirstOrDefault(s => s.IsPacking)?.StationCode ?? input.Settings.BufferStationCode;
+        // 預估用第一座包裝站（目前只有一座）；包好的框從那裡送往出貨站。
+        var packing = input.Steps.FirstOrDefault(s => s.IsPacking) is { } packingStep
+            ? input.Stations.Where(st => st.StepSequence == packingStep.Sequence).Select(st => st.Code)
+                .OrderBy(c => c, StringComparer.Ordinal).FirstOrDefault() ?? input.Settings.BufferStationCode
+            : input.Settings.BufferStationCode;
 
         return new ScheduleForecastDto
         {
@@ -313,6 +326,7 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
                 Code = machine.Code,
                 Name = machine.Name,
                 StationCode = machine.StationCode,
+                StepSequence = snapshot.Stations.GetValueOrDefault(machine.StationCode)?.StepSequence,
                 Bins = result.Bins.Where(b => b.MachineCode == machine.Code).OrderBy(b => b.Start).Select(bin => new ScheduledBinDto
                 {
                     LotNumber = bin.Lot.LotNumber,
@@ -328,11 +342,15 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
                     EndAt = now.AddSeconds(bin.End),
                 }).ToList(),
             }).ToList(),
-            Furnaces = input.Steps.Where(s => s.Kind == ProcessStepKind.Batch).Select(step => new FurnaceScheduleDto
+            // 每座爐一筆（同一道工序可能有好幾座），依工序順序、再依代碼排列。
+            Furnaces = input.Stations
+                .Where(st => st.StepSequence is { } sequence && input.Steps.Any(step => step.Sequence == sequence && step.Kind == ProcessStepKind.Batch))
+                .OrderBy(st => st.StepSequence).ThenBy(st => st.Code, StringComparer.Ordinal)
+                .Select(station => new FurnaceScheduleDto
             {
-                StationCode = step.StationCode,
-                Name = snapshot.Stations.TryGetValue(step.StationCode, out var station) ? station.Name : step.StationCode,
-                Runs = result.Runs.Where(r => r.StationCode == step.StationCode).OrderBy(r => r.Start).Select(run => new ScheduledBatchRunDto
+                StationCode = station.Code,
+                Name = station.Name,
+                Runs = result.Runs.Where(r => r.StationCode == station.Code).OrderBy(r => r.Start).Select(run => new ScheduledBatchRunDto
                 {
                     Running = run.Running,
                     Pieces = run.Pieces,
@@ -340,8 +358,8 @@ public sealed class ScheduleService(OpenFleetDbContext db, RoadNetwork network, 
                     StartAt = now.AddSeconds(run.Start),
                     EndAt = now.AddSeconds(run.End),
                 }).ToList(),
-                StrandedLotNumbers = result.Stranded.GetValueOrDefault(step.StationCode)?.Select(l => l.LotNumber).ToList() ?? [],
-                StrandedPieces = result.Stranded.GetValueOrDefault(step.StationCode)?.Sum(l => l.Quantity) ?? 0,
+                StrandedLotNumbers = result.Stranded.GetValueOrDefault(station.Code)?.Select(l => l.LotNumber).ToList() ?? [],
+                StrandedPieces = result.Stranded.GetValueOrDefault(station.Code)?.Sum(l => l.Quantity) ?? 0,
             }).ToList(),
             Orders = snapshot.Orders.Select(order =>
             {

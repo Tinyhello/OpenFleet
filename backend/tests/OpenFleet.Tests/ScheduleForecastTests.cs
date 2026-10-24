@@ -27,10 +27,10 @@ public sealed class ScheduleForecastTests(PostgresFixture postgres)
         var lower = await CreateAsync(database, "P30-RD12-D", 30);
         var die = await CreateAsync(database, "P30-RD12-L", 30);
         await ClearSourceBinsAsync(database);
-        foreach (var order in new[] { upper, lower, die })
-        {
-            await ArriveAsync(database, order, "rough", 1, 30);
-        }
+        // 上沖和第三框排在 1 號機（第三框排在後面），下沖直接上 2 號機。
+        await ArriveAsync(database, upper, "rough-1", 1, 30);
+        await ArriveAsync(database, lower, "rough-2", 1, 30);
+        await ArriveAsync(database, die, "rough-1", 1, 30);
 
         await AdvanceAsync(database, 0);
         var now = database.Time.GetUtcNow();
@@ -52,7 +52,7 @@ public sealed class ScheduleForecastTests(PostgresFixture postgres)
         // 實際的加工在預估的時間做完。
         await AdvanceAsync(database, 60);
         await using var db = database.NewContext();
-        var completed = await db.Operations.Where(o => o.StationCode == "rough" && o.CompletedAt != null).Select(o => o.CompletedAt!.Value).ToListAsync();
+        var completed = await db.Operations.Where(o => (o.StationCode == "rough-1" || o.StationCode == "rough-2") && o.CompletedAt != null).Select(o => o.CompletedAt!.Value).ToListAsync();
         Assert.Equal(2, completed.Count);
         Assert.All(completed, at => AssertTime(rough1[0].EndAt, at));
     }
@@ -65,8 +65,8 @@ public sealed class ScheduleForecastTests(PostgresFixture postgres)
         var rush = await CreateAsync(database, "P30-RD12-D", 30);
         await ClearSourceBinsAsync(database);
         await RushAsync(database, rush.Id);
-        await ArriveAsync(database, normal, "polish", 6, 30);
-        await ArriveAsync(database, rush, "polish", 6, 30);
+        await ArriveAsync(database, normal, "polish-1", 6, 30);
+        await ArriveAsync(database, rush, "polish-1", 6, 30);
 
         var schedule = await ForecastAsync(database);
 
@@ -98,7 +98,7 @@ public sealed class ScheduleForecastTests(PostgresFixture postgres)
         Assert.Equal(ForecastBlocker.WaitingForFurnaceFill, normal.Blocker);
         Assert.Null(normal.FinishAt);
         Assert.Null(normal.OnTime);
-        var heat = schedule.Normal.Furnaces.Single(f => f.StationCode == "heat");
+        var heat = schedule.Normal.Furnaces.Single(f => f.StationCode == "heat-1");
         Assert.Empty(heat.Runs);
         Assert.Equal(90, heat.StrandedPieces);
         Assert.Equal(3, Machine(schedule.Normal, "rough-1").Bins.Count + Machine(schedule.Normal, "rough-2").Bins.Count);
@@ -133,7 +133,7 @@ public sealed class ScheduleForecastTests(PostgresFixture postgres)
         Assert.NotNull(late.FinishAt);
         Assert.False(late.OnTime);
         Assert.True(Order(schedule.Normal, later).OnTime);
-        Assert.True(schedule.Normal.Furnaces.Single(f => f.StationCode == "temper").Runs.Count > 0);
+        Assert.True(schedule.Normal.Furnaces.Single(f => f.StationCode == "temper-1").Runs.Count > 0);
     }
 
     [Fact]
@@ -142,8 +142,14 @@ public sealed class ScheduleForecastTests(PostgresFixture postgres)
         // 不經過資料庫：爐前一框 30 支已經等了 10 秒，另一框還在等料（會一直「還有料要來」）。
         var steps = new List<ProcessStep>
         {
-            new() { Sequence = 1, StationCode = "rough", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30 },
-            new() { Sequence = 3, StationCode = "heat", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300, BatchSeconds = 100 },
+            new() { Sequence = 1, Code = "rough", Name = "粗加工", Kind = ProcessStepKind.Piece, SecondsPerPiece = 30 },
+            new() { Sequence = 3, Code = "heat", Name = "淬火", Kind = ProcessStepKind.Batch, BatchMinPieces = 150, BatchMaxPieces = 300, BatchSeconds = 100 },
+        };
+        var stations = new List<Station>
+        {
+            new() { Code = "rough-1", Name = "粗加工 1 號機", StepSequence = 1 },
+            new() { Code = "rough-2", Name = "粗加工 2 號機", StepSequence = 1 },
+            new() { Code = "heat-1", Name = "淬火", StepSequence = 3 },
         };
         var settings = new ProductionSettings
         {
@@ -155,6 +161,7 @@ public sealed class ScheduleForecastTests(PostgresFixture postgres)
         {
             Steps = steps,
             Settings = settings,
+            Stations = stations,
             Machines = [],
             Runs = [],
             Lots = [waiting, ForecastLot("B-U02", ScheduleForecaster.LotPhase.WaitingForMaterial, 1)],
