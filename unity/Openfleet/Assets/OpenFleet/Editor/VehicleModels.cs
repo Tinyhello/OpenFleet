@@ -1,5 +1,6 @@
 using UnityEngine;
 using static OpenFleet.Unity.Editor.ModelKit;
+using static OpenFleet.Unity.Shapes;
 
 namespace OpenFleet.Unity.Editor
 {

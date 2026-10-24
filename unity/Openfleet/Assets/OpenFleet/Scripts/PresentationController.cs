@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using OpenFleet.Contracts;
 using UnityEngine;
@@ -8,7 +9,7 @@ namespace OpenFleet.Unity
 {
     /// <summary>
     /// 表演用的控制器：畫面上的物件與顏色都由這裡管理，其他腳本不在 Inspector 掛參考。
-    /// 1. 物件：AGV Prefab 與 UI 設定從 Resources 載入；場景裡的站點、攝影機用名稱或型別找到；操作面板與進度條在執行時建立。
+    /// 1. 物件：AGV Prefab、模組 Prefab、環境材質與 UI 設定從 Resources 載入；場景裡的站點由 LayoutController 依佈局建好後交給 <see cref="SetStations"/>，攝影機用型別找到；操作面板與進度條在執行時建立。
     /// 2. 顏色：連線狀態、進度條、路徑虛線、面板的顏色集中在 <see cref="Colors"/>。
     /// 這裡只管「怎麼顯示」，不保存也不推算業務狀態；狀態來自後端（FleetView、StatusOverlay、ProductionPanel 各自取得）。
     /// 掛在場景的 OpenFleet 物件上（由選單 OpenFleet/Build Factory Scene 產生），不需要設定任何欄位。
@@ -23,8 +24,13 @@ namespace OpenFleet.Unity
         public const string UnknownVehiclePrefab = "AGV_Unknown";
         public const string PanelSettingsPath = "UI/OpenFleetPanel";
 
-        /// <summary>場景中放站點的物件路徑；底下每個子物件的名稱就是後端的站點代碼。</summary>
-        public const string StationsPath = "Factory/Stations";
+        /// <summary>每種模組（<see cref="ModuleKind"/>）一個 Prefab，檔名是 <see cref="ModulePrefabName"/>。</summary>
+        public const string ModulePrefabFolder = "Prefabs/Modules";
+
+        /// <summary>執行時建立環境與路網要用的材質清單（<see cref="LayoutMaterials"/> 資產）。</summary>
+        public const string LayoutMaterialsPath = "Layout/LayoutMaterials";
+
+        public static string ModulePrefabName(ModuleKind kind) => "Module_" + kind;
 
         /// <summary>畫面上用到的顏色。要調整配色只改這裡。</summary>
         public static class Colors
@@ -143,6 +149,8 @@ namespace OpenFleet.Unity
         private readonly SortedDictionary<string, VehicleView> _vehicles = new SortedDictionary<string, VehicleView>();
         private readonly Dictionary<string, StationAnchor> _stations = new Dictionary<string, StationAnchor>();
         private readonly Dictionary<VehicleType, VehicleView> _prefabs = new Dictionary<VehicleType, VehicleView>();
+        private readonly Dictionary<ModuleKind, GameObject> _modulePrefabs = new Dictionary<ModuleKind, GameObject>();
+        private LayoutMaterials _layoutMaterials;
 
         /// <summary>執行時用的 PanelSettings 複本：改縮放時不會改到專案裡的資產。</summary>
         private PanelSettings _panelSettings;
@@ -169,8 +177,14 @@ namespace OpenFleet.Unity
 
         public int VehicleCount => _vehicles.Count;
 
-        /// <summary>場景中的站點，以後端的站點代碼為鍵。</summary>
+        /// <summary>場景中的站點，以後端的站點代碼為鍵。佈局還沒建好時是空的。</summary>
         public IReadOnlyDictionary<string, StationAnchor> Stations => _stations;
+
+        /// <summary>
+        /// 站點換了（佈局重建，或第一次建好）。依站點建立的畫面元件（進度條）要在這時丟掉舊的；
+        /// 事件發出時 <see cref="Stations"/> 已經是新的。
+        /// </summary>
+        public event Action StationsChanged;
 
         /// <summary>
         /// 以 <c>-hide-panels</c> 啟動時不顯示車輛面板與操作面板（錄影、截圖用）；機台與車輛上的進度條照常顯示。
@@ -182,8 +196,6 @@ namespace OpenFleet.Unity
             Instance = this;
             Fleet = GetComponent<FleetView>();
             CameraController = FindAnyObjectByType<FactoryCameraController>();
-
-            BindStations();
 
             // 兩個 UIDocument：進度條排在操作面板的下層。
             var panelSettings = Resources.Load<PanelSettings>(PanelSettingsPath);
@@ -317,22 +329,59 @@ namespace OpenFleet.Unity
             return prefab;
         }
 
-        private void BindStations()
+        /// <summary>執行時建立環境與路網要用的材質；資產不存在或欄位沒填滿時回傳 null 並記錄錯誤。</summary>
+        public LayoutMaterials LayoutMaterials
         {
-            var root = GameObject.Find(StationsPath);
-            if (root == null)
+            get
             {
-                Debug.LogError($"[OpenFleet] Scene object '{StationsPath}' not found; station overlays are disabled.");
-                return;
+                if (_layoutMaterials == null)
+                {
+                    _layoutMaterials = Resources.Load<LayoutMaterials>(LayoutMaterialsPath);
+                    if (_layoutMaterials == null || !_layoutMaterials.IsComplete)
+                    {
+                        Debug.LogError($"[OpenFleet] Resources/{LayoutMaterialsPath} is missing or incomplete; run OpenFleet/Build Factory Scene.");
+                        _layoutMaterials = null;
+                    }
+                }
+
+                return _layoutMaterials;
+            }
+        }
+
+        /// <summary>依模組種類從 Resources 載入 Prefab；找不到時記錄錯誤並回傳 null（每種只記一次）。</summary>
+        public GameObject ModulePrefab(ModuleKind kind)
+        {
+            if (_modulePrefabs.TryGetValue(kind, out var prefab))
+            {
+                return prefab;
             }
 
-            foreach (Transform station in root.transform)
+            var name = ModulePrefabName(kind);
+            prefab = Resources.Load<GameObject>($"{ModulePrefabFolder}/{name}");
+            if (prefab == null)
             {
-                var anchor = station.gameObject.AddComponent<StationAnchor>();
+                Debug.LogError($"[OpenFleet] Resources/{ModulePrefabFolder}/{name} not found; run OpenFleet/Build Factory Scene.");
+            }
+
+            _modulePrefabs[kind] = prefab;
+            return prefab;
+        }
+
+        /// <summary>
+        /// 佈局重建後換上新的站點（物件名稱＝後端的站點代碼），並通知 <see cref="StationsChanged"/>。
+        /// 舊的站點物件由呼叫端（LayoutScene）負責刪除。
+        /// </summary>
+        public void SetStations(IEnumerable<StationAnchor> anchors)
+        {
+            _stations.Clear();
+            foreach (var anchor in anchors)
+            {
                 _stations[anchor.StationCode] = anchor;
                 // 還沒收到後端狀態前先當作沒有料。
                 anchor.ShowContents(false, false);
             }
+
+            StationsChanged?.Invoke();
         }
 
         private void CreateDocument<T>(string objectName, PanelSettings panelSettings, int sortingOrder) where T : MonoBehaviour

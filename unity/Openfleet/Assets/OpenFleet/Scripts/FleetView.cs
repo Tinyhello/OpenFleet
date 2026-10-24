@@ -8,14 +8,16 @@ namespace OpenFleet.Unity
     /// <summary>
     /// 車隊顯示：每次連上 Broker 就取一次 HTTP 快照，之後以 MQTT 狀態更新；兩者都經過 Version 比對。
     /// 車輛物件由 PresentationController 依車型建立；這裡另提供簡易面板送出 Ping、讓攝影機跟隨車輛。
+    /// 套用佈局時被拿掉車位的車，state Topic 會被後端清掉（空的 retained 訊息），這裡收到就把那台車移除。
     /// </summary>
-    [RequireComponent(typeof(FleetMqttClient), typeof(PresentationController))]
+    [RequireComponent(typeof(FleetMqttClient), typeof(PresentationController), typeof(LayoutController))]
     public sealed class FleetView : MonoBehaviour
     {
         [SerializeField] private string apiBaseUrl = "http://localhost:5229";
 
         private PresentationController _presentation;
         private FleetMqttClient _mqtt;
+        private LayoutController _layout;
         private string _status = "Connecting...";
 
         /// <summary>後端 HTTP API 的位址；其他面板共用這一個設定。</summary>
@@ -25,11 +27,14 @@ namespace OpenFleet.Unity
         {
             _mqtt = GetComponent<FleetMqttClient>();
             _presentation = GetComponent<PresentationController>();
+            _layout = GetComponent<LayoutController>();
         }
 
         private void OnEnable()
         {
             _mqtt.VehicleStateReceived += Apply;
+            _mqtt.VehicleStateCleared += _presentation.RemoveVehicle;
+            _layout.LayoutBuilt += OnLayoutBuilt;
             _mqtt.Connected += OnConnected;
             _mqtt.Disconnected += OnDisconnected;
         }
@@ -37,6 +42,8 @@ namespace OpenFleet.Unity
         private void OnDisable()
         {
             _mqtt.VehicleStateReceived -= Apply;
+            _mqtt.VehicleStateCleared -= _presentation.RemoveVehicle;
+            _layout.LayoutBuilt -= OnLayoutBuilt;
             _mqtt.Connected -= OnConnected;
             _mqtt.Disconnected -= OnDisconnected;
         }
@@ -46,6 +53,15 @@ namespace OpenFleet.Unity
             _status = "MQTT connected";
             Debug.Log("[OpenFleet] MQTT connected.");
             // 先訂閱再取快照：兩者重疊的部分由 Version 比對去掉，不會漏掉中間的更新。
+            StartCoroutine(LoadSnapshot());
+        }
+
+        /// <summary>
+        /// 佈局建好（第一次、或換了版本）：重新取一次車輛快照。第一次是因為佈局建好之前收到的狀態都被丟掉了；
+        /// 之後是讓新加入的車馬上出現，不必等它的下一則狀態。
+        /// </summary>
+        private void OnLayoutBuilt()
+        {
             StartCoroutine(LoadSnapshot());
         }
 
@@ -79,6 +95,14 @@ namespace OpenFleet.Unity
 
         private void Apply(VehicleState state)
         {
+            // 佈局還沒建好時不顯示車輛（後端沒開時 Broker 上留著舊的 retained 狀態，車會浮在空地上）；
+            // 建好之後會重新取一次快照。已經不在佈局裡的車（套用佈局時被拿掉車位）也不理：
+            // 後端偶爾會在清掉 state Topic 之後多送一則舊狀態，不丟掉的話車會又冒出來。
+            if (_layout != null && (!_layout.HasLayout || !_layout.IsVehicleInLayout(state.VehicleId)))
+            {
+                return;
+            }
+
             if (_presentation.TryGetVehicle(state.VehicleId, out var view) && view.VehicleType != state.VehicleType && IsNewer(state, view.State))
             {
                 // 車型設定改變（後端重啟後才會發生）：換成對應的模型。
@@ -149,7 +173,9 @@ namespace OpenFleet.Unity
             var cameraController = _presentation.CameraController;
             GUILayout.BeginArea(new Rect(10, 10, 520 * scale, Screen.height - 20));
             GUILayout.BeginVertical(GUI.skin.box);
-            GUILayout.Label(_status, _labelStyle);
+            // 還沒有佈局時（後端沒開或還沒有使用中的佈局）在連線狀態後面接上「等待後端佈局…」。
+            var layoutStatus = _layout != null ? _layout.StatusText : string.Empty;
+            GUILayout.Label(layoutStatus.Length > 0 ? $"{_status}　{layoutStatus}" : _status, _labelStyle);
             foreach (var view in _presentation.Vehicles)
             {
                 var s = view.State;

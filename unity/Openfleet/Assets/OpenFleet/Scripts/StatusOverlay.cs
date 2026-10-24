@@ -13,6 +13,7 @@ namespace OpenFleet.Unity
     /// 機台的備料區、成品區、每台機台的加工進度與可收合的刀具進度；整爐工序（淬火、回火、電鍍）的集料與這一爐的進度；車輛與站點交接的進度。
     /// 站點狀態以 HTTP 輪詢取得，車輛狀態來自 FleetView 已經收到的 MQTT 更新；這裡不保存也不推算任何業務狀態。
     /// 由 PresentationController 在執行時建立；場景物件（站點、車輛）與顏色都向它取得。
+    /// 佈局重建時（StationsChanged）整批丟掉站點的進度條，下一次輪詢依新的站點重新建立。
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
     public sealed class StatusOverlay : MonoBehaviour
@@ -58,14 +59,34 @@ namespace OpenFleet.Unity
             _routeLayer.generateVisualContent += DrawRoutes;
             _root.Add(_routeLayer);
 
+            _presentation.StationsChanged += ClearStations;
             StartCoroutine(RefreshLoop());
         }
 
         private void OnDisable()
         {
+            if (_presentation != null)
+            {
+                _presentation.StationsChanged -= ClearStations;
+            }
+
             StopAllCoroutines();
             _stations.Clear();
             _vehicleBars.Clear();
+        }
+
+        /// <summary>
+        /// 站點換了：舊的進度條綁在已經刪除的站點物件上，全部移除；新的在下一次輪詢到狀態時依新的錨點建立。
+        /// 車輛的進度條不受影響。
+        /// </summary>
+        private void ClearStations()
+        {
+            foreach (var widget in _stations.Values)
+            {
+                widget.Root.RemoveFromHierarchy();
+            }
+
+            _stations.Clear();
         }
 
         private IEnumerator RefreshLoop()

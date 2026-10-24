@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0efa269e624dacf45a4e4070d1f85e69, type: 3}
+  m_Name: LayoutMaterials
+  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.LayoutMaterials
+  Floor: {fileID: 2100000, guid: 8ec92aaabd1293142a649a85097bda18, type: 2}
+  Wall: {fileID: 2100000, guid: 0f231cd461c7f3e4db86d7bfaa9bf0fe, type: 2}
+  Pillar: {fileID: 2100000, guid: 380a6e44571e9584e955c8d5e6f170b1, type: 2}
+  Aisle: {fileID: 2100000, guid: bb9f07481d5ab45408566c08d4b134da, type: 2}
+  LaneLine: {fileID: 2100000, guid: 3d4b01e34bd709d4b92f4967f0a8b466, type: 2}
+  ZoneLine: {fileID: 2100000, guid: d2bfd9dbb52b5404b814aea80e335916, type: 2}
+  Handoff: {fileID: 2100000, guid: 2fc7e329676069f48bdfceda15e3a0db, type: 2}
+  Pallet: {fileID: 2100000, guid: db4a755fb6a7a21429fc32c32de093e0, type: 2}
+  Cardboard: {fileID: 2100000, guid: 7ceb740730ed6f94fa752934d180ec15, type: 2}
+  Steel: {fileID: 2100000, guid: 1dddfaeac0081374188f117feb97c18c, type: 2}
+  MachineBody: {fileID: 2100000, guid: c545610d726ffc3469a6a9e79d156072, type: 2}

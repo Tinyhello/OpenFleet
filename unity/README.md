@@ -3,6 +3,7 @@
 - P1：Windows 桌面版透過 MQTT 收到後端的車輛狀態、斷線後自動重連，並把背景執行緒收到的訊息切回主執行緒更新場景。
 - P2：新增操作面板（UI Toolkit），可以修改示範設定、建立批次並查看批次目前的狀態與位置。
 - P3：兩條車道與路徑虛線；面板顯示缺車耽誤的時間；Prefab 與 UI 設定改由程式從 Resources 載入，場景裡的腳本不在 Inspector 掛參考。
+- P7（沙盒佈局）第 3 步：廠房、模組、路網與車位不再固定在 `Factory.unity` 裡，而是執行時向後端要使用中的佈局，自己建出來；佈局版本換了（MQTT）就自動重建。
 
 ## 環境
 
@@ -12,39 +13,45 @@
 | 目標平台 | Windows 桌面版（Mono） |
 | MQTT client | MQTTnet 4.3.7 + MQTTnet.Extensions.ManagedClient 4.3.7（netstandard2.1 DLL，放在 `Assets/OpenFleet/Plugins`） |
 | JSON | `com.unity.nuget.newtonsoft-json` 3.2.1，規則與後端相同（camelCase、enum 小寫字串） |
-| 共用契約 | `OpenFleet.Contracts.dll`，由 `backend/src/OpenFleet.Contracts` 建置 |
+| 共用契約與佈局程式庫 | `OpenFleet.Contracts.dll`、`OpenFleet.Layout.dll`（模組目錄、幾何、驗證、預設佈局），由 `backend/src/OpenFleet.Contracts`、`backend/src/OpenFleet.Layout` 建置 |
 
 ## 檔案
 
 | 位置 | 用途 |
 | --- | --- |
-| `Assets/OpenFleet/Scripts/FleetMqttClient.cs` | 連線 Broker、訂閱 `state/vehicles/+`；背景執行緒解析 JSON 後放進佇列，由 `Update` 在主執行緒發出事件 |
-| `Assets/OpenFleet/Scripts/PresentationController.cs` | 表演用的控制器：從 Resources 載入 AGV Prefab 與 UI 設定、建立車輛與兩個 UI 面板、找到場景中的站點與攝影機；介面大小（依畫面高度與使用者調整的倍數）；畫面上的顏色集中在它的 `Colors` |
-| `Assets/OpenFleet/Scripts/FleetView.cs` | 每次連上 Broker 就取一次 HTTP 快照，把車輛狀態交給對應的車輛物件；簡易面板可送 Ping、跟隨車輛 |
+| `Assets/OpenFleet/Scripts/FleetMqttClient.cs` | 連線 Broker、訂閱 `state/vehicles/+` 與佈局版本（`layout`）；背景執行緒解析 JSON 後放進佇列，由 `Update` 在主執行緒發出事件。車輛的 state Topic 被清掉（空的 retained 訊息，車被拿出佈局）時發出 `VehicleStateCleared` |
+| `Assets/OpenFleet/Scripts/PresentationController.cs` | 表演用的控制器：從 Resources 載入 AGV Prefab、模組 Prefab、環境材質與 UI 設定、建立車輛與兩個 UI 面板；收到新建好的站點時換上（`SetStations`、`StationsChanged`）；介面大小（依畫面高度與使用者調整的倍數）；畫面上的顏色集中在它的 `Colors` |
+| `Assets/OpenFleet/Scripts/FleetView.cs` | 每次連上 Broker 與每次佈局建好就取一次 HTTP 快照，把車輛狀態交給對應的車輛物件；簡易面板可送 Ping、跟隨車輛；左上狀態列在還沒有佈局時顯示「等待後端佈局…」 |
+| `Assets/OpenFleet/Scripts/Layout/LayoutController.cs` | 向後端要使用中的佈局（後端沒開就每 3 秒重試）、建場景；收到佈局版本和目前不同就重新要、重建；重建後換站點、移除不在車輛清單的車、更新攝影機預設視角 |
+| `Assets/OpenFleet/Scripts/Layout/LayoutScene.cs` | 依佈局文件建出 `Factory`：環境（地面、牆、柱子、大門）、路網（每條路段一片鋪面加中心線、節點補角的圓）、每個模組（載入 Prefab，物件名稱＝模組代碼） |
+| `Assets/OpenFleet/Scripts/Layout/LayoutClient.cs` | 佈局的 HTTP 呼叫（列出、取得、另存、覆蓋、刪除、驗證、套用）；coroutine 加 callback |
+| `Assets/OpenFleet/Scripts/Layout/LayoutMaterials.cs`、`Shapes.cs` | 執行時建環境用的材質清單（ScriptableObject）；基本幾何（方塊、圓柱、地面框線、文字標籤）的小工具，Editor 組 Prefab 與執行時建環境共用 |
 | `Assets/OpenFleet/Scripts/VehicleView.cs` | 單台車的顯示（掛在 Prefab 上）：依 `stateEpoch` + `version` 丟棄舊狀態，位置插值、燈條與警示燈依連線狀態變色。燈條、標籤、貨物依子物件名稱找到 |
-| `Assets/OpenFleet/Scripts/FactoryCameraController.cs` | 攝影機：右鍵旋轉、中鍵／WASD 平移、滾輪縮放、F 重設、跟隨車輛 |
+| `Assets/OpenFleet/Scripts/FactoryCameraController.cs` | 攝影機：右鍵旋轉、中鍵／WASD 平移、滾輪縮放、F 回到預設視角、跟隨車輛；預設視角依廠房大小（`SetHome`） |
 | `Assets/OpenFleet/Scripts/ProductionPanel.cs` | 操作面板（UI Toolkit，介面用程式建立）：示範設定、測試模式、缺車耽誤、品管、出貨。只呼叫後端 HTTP API |
 | `Assets/OpenFleet/Scripts/ProductionPanel.Orders.cs` | 操作面板的下單與訂單（P5）：建立客戶訂單、訂單與工單的進度、出貨單、料框位置、同意分批出貨 |
-| `Assets/OpenFleet/Scripts/StatusOverlay.cs` | 場景物件上的進度條（UI Toolkit，螢幕座標）：機台的備料、成品、每台機台的加工與可收合的刀具列；車輛與站點交接的進度；車輛前往目的地的流動虛線 |
-| `Assets/OpenFleet/Scripts/StationAnchor.cs` | 場景中的站點與後端站點代碼的對應（物件名稱＝站點代碼，執行時由控制器加上）；進度條的位置、備料區／成品區有料時要顯示的物件 |
+| `Assets/OpenFleet/Scripts/StatusOverlay.cs` | 場景物件上的進度條（UI Toolkit，螢幕座標）：機台的備料、成品、每台機台的加工與可收合的刀具列；車輛與站點交接的進度；車輛前往目的地的流動虛線；站點換了（佈局重建）時丟掉舊的進度條、依新的站點重建 |
+| `Assets/OpenFleet/Scripts/StationAnchor.cs` | 場景中的站點與後端站點代碼的對應（物件名稱＝站點代碼，由 `LayoutScene` 加上）；進度條的位置、備料區／成品區有料時要顯示的物件 |
 | `Assets/OpenFleet/Scripts/Billboard.cs` | 文字標籤面向攝影機 |
-| `Assets/OpenFleet/Editor/FactorySceneBuilder.cs` | 選單 **OpenFleet → Build Factory Scene**：產生材質、`Resources` 底下的 AGV Prefab 與 UI 設定、`Factory.unity`（會覆寫） |
+| `Assets/OpenFleet/Editor/FactorySceneBuilder.cs` | 選單 **OpenFleet → Build Factory Scene**：產生材質、`Resources` 底下的 AGV Prefab、模組 Prefab、環境材質清單與 UI 設定，以及只有 Sun、Main Camera、OpenFleet 三個物件的 `Factory.unity`（會覆寫） |
 | `Assets/OpenFleet/Editor/PlayerBuilder.cs` | 選單 **OpenFleet → Build Windows Player**：重建場景並建置 `Builds/Windows/OpenFleet.exe`（Development build）。**Build Windows Player (Release)** 輸出到同一個位置，畫面右下角沒有 Development Build 字樣，錄影、展示用 |
 | `Assets/OpenFleet/Resources/Prefabs/` | AGV Prefab（`AGV_Large`、`AGV_Small`、`AGV_Unknown`），執行時以 `Resources.Load` 載入 |
+| `Assets/OpenFleet/Resources/Prefabs/Modules/` | 每種模組（`ModuleKind`）一個 Prefab：`Module_<種類>.prefab`，共 17 個；內容是模型、占地框線、交接點方框、標籤文字（執行時才填） |
+| `Assets/OpenFleet/Resources/Layout/LayoutMaterials.asset` | 執行時建環境與路網用的材質清單（由 Build Factory Scene 依 `Palette` 填入） |
 | `Assets/OpenFleet/Resources/UI/` | UI Toolkit 的 PanelSettings 與主題（由 Build Factory Scene 產生），執行時以 `Resources.Load` 載入 |
-| `Assets/OpenFleet/Editor/FactoryLayout.cs` | 暫定佈局：站點位置、內外兩條車道（須與後端的示範路網 `DemoRoadNetwork` 相同） |
-| `Assets/OpenFleet/Editor/StationModels.cs`、`VehicleModels.cs` | 站點與 AGV：擺放 Blender 模型，並產生執行時會切換的物件（料箱、狀態燈、標籤） |
+| `Assets/OpenFleet/Editor/ModulePrefabs.cs` | 產生每種模組的 Prefab：占地、交接點、模型名稱來自共用程式庫的 `ModuleCatalog`（和後端驗證用同一份），這裡負責把它們畫出來 |
+| `Assets/OpenFleet/Editor/VehicleModels.cs`、`ModelKit.cs` | AGV：擺放 Blender 模型，並產生執行時會切換的物件（狀態燈、載貨、標籤）；`ModelKit` 只負責載入 FBX |
 | `Assets/OpenFleet/Models/*.fbx`、`Editor/ModelImport.cs` | Blender 匯出的模型與匯入設定；材質依名稱換成 `Palette` 的材質 |
 | `Blender/` | 模型的原始檔（`Models/*.blend`）與產生模型的腳本（`scripts/*.py`、`ofkit.py`）；不在 `Assets` 底下，Unity 不會匯入 |
 | `Assets/OpenFleet/Editor/Palette.cs` | 模型的材質顏色（建場景時使用）；執行時會變化的顏色在 `PresentationController.Colors` |
 | `Assets/OpenFleet/Scenes/Factory.unity` | 工廠場景（由選單產生，不要手動修改） |
 | `Assets/OpenFleet/Scripts/FleetJson.cs` | Newtonsoft 設定，對應後端 `JsonDefaults` |
-| `sync-contracts.ps1` | 修改契約後重新建置並複製 DLL 到 Unity |
+| `sync-contracts.ps1` | 修改契約或佈局程式庫後重新建置並複製兩個 DLL（`OpenFleet.Contracts.dll`、`OpenFleet.Layout.dll`）到 Unity |
 
 ## 執行
 
 1. 啟動 Broker、後端與模擬器（見 [backend/README.md](../backend/README.md)）。後端要用 `--launch-profile http`（`http://localhost:5229`）。
-2. 在 Unity 開啟 `Assets/OpenFleet/Scenes/Factory.unity` 按 Play，或 build Windows 版後執行。
+2. 在 Unity 開啟 `Assets/OpenFleet/Scenes/Factory.unity` 按 Play，或 build Windows 版後執行。場景裡只有攝影機、光源與 `OpenFleet` 物件，廠房要等後端的佈局：後端沒開時左上顯示「等待後端佈局…」，每 3 秒重試，後端起來後自動建好。
 3. 左上面板顯示每台車的車型、連線狀態、`version` 與最近一次指令的回報；車上燈條綠色為 online、灰色為 offline。
 4. 右上是操作面板：
    - **介面大小**（最上面一列）：面板、機台上的進度條與左上的車輛清單會依畫面高度自動放大（畫面高 900 像素以下是 1 倍，1080p 約 1.2 倍、1440p 約 1.6 倍）；看不清楚時按「＋」再放大、「－」縮小，也可以按 Ctrl＋＝／Ctrl＋－，Ctrl＋0 回到預設，大小記在本機，下次開啟沿用。放大後面板會蓋住較多場景，按「收起」整個收起來，右上角留一顆「展開面板」。
@@ -76,20 +83,24 @@
 
 ## 場景內容
 
-- 暫定佈局（車床每台一站）：下排靠南牆，由左到右為切料、原料倉、粗加工 1、2 號機、精加工 1、2 號機、淬火、回火、電鍍；上排靠北牆，由右到左為拋光、雜物倉庫、品管、包裝、成品倉、出貨。走道內側是充電維護區、刀具庫（島區中央，交接點接在內圈車道）與載具存放區。
+場景由後端的佈局決定（`GET /api/layouts/active`），下面是預設佈局的樣子：
+
+- 預設佈局（車床每台一站）：下排靠南牆，由左到右為切料、原料倉、粗加工 1、2 號機、精加工 1、2 號機、淬火、回火、電鍍；上排靠北牆，由右到左為拋光、雜物倉庫、品管、包裝、成品倉、出貨。走道內側是五個 AGV 車位、刀具庫（島區中央，交接點接在內圈車道）與載具存放區。
 - 西牆中間是工廠大門，進料與出貨共用：門外南側的棧板是剛到廠的原料，門內北側（靠出貨站與成品倉）是待出貨的成品箱。貨物只是示意，沒有對應的後端資料。
-- 成品倉與雜物倉庫只是場景（模型、框線、標示）：沒有交接點，後端沒有對應的站點，AGV 不會去。
-- 每站前方的青色方框是交接點，離走道 2.4 公尺，方框不會壓到車道。走道只畫邊線，沒有方向箭頭，因為交通規則尚未決定。
-- 環狀走道有內外兩條車道（黃線是走道邊緣，白線是車道分隔），都不限方向；沒有畫箭頭，誰先走由後端的路段預約決定。
-- 車輛平常停在充電維護區的車位（五格），有搬運任務才移動。四台大型車會同時工作，遇到前面有車會停下等待或改走另一條車道。
+- 雜物倉庫與載具存放區只是裝飾（模型、框線、標示）：沒有交接點，後端沒有對應的站點，AGV 不會去。
+- 每個工站與倉儲站前方的青色方框是交接點，離走道 2.4 公尺，方框不會壓到車道。
+- 路網每條路段畫一片灰色鋪面加一條黃色中心線，節點補一個圓。沒有畫車道邊線、分隔線與方向箭頭：車道不限方向，誰先走由後端的路段預約決定。
+- 每個 AGV 車位是一台車，車位的框線是淺藍色；車位平常不寫字（車上有自己的標籤）。車輛平常停在車位，有搬運任務才移動。四台大型車會同時工作，遇到前面有車會停下等待或改走另一條車道。
+- 後端套用另一份佈局（`POST /api/layouts/{id}/apply`）後，後端發布新的佈局版本（MQTT `layout`，retained），Unity 收到就重新向後端要佈局、整個場景重建：新的機台出現、路網換掉、站點的進度條重建；不在佈局裡的車消失，車輛全部回到各自的車位。畫面不需要重開。
+- 預設視角依廠房大小：目標是廠房中心往南 1.5 公尺（再往西讓出右邊操作面板的位置），距離 56 公尺乘上廠房相對預設廠房（76 × 30.4 公尺）的倍數，限制在 30～140 公尺；按 F 回到這個視角。預設佈局的結果和第 1b 步相同。
 - 進度條是固定大小的螢幕元件，畫面拉遠時會顯得比機台大；加工進度逐件跳動，不是平滑移動。
 - AGV：大型車（橘色頂升平台）、小型車（白色車身、刀把架）、未知車型（紫色，表示後端設定缺漏）。
 
 ## 物件與顏色的管理
 
-- 場景裡只有 `OpenFleet` 物件掛了腳本（`FleetView`、`FleetMqttClient`、`PresentationController`）和攝影機的 `FactoryCameraController`，都不需要在 Inspector 掛任何參考。
-- 執行時由 `PresentationController` 負責：以 `Resources.Load` 載入 AGV Prefab 與 PanelSettings、建立車輛、建立操作面板與進度條兩個 UIDocument、替 `Factory/Stations` 底下的每個站點加上 `StationAnchor`。
-- 物件之間靠名稱對應，名稱都定義成常數並由 Build Factory Scene 共用：站點物件名稱＝後端站點代碼；Prefab 裡的 `Status Lights`、`Label`、`Load`；站點裡的 `Inbound Contents`、`Outbound Contents`。
+- 場景裡只有 `OpenFleet` 物件掛了腳本（`FleetView`、`FleetMqttClient`、`PresentationController`、`LayoutController`）和攝影機的 `FactoryCameraController`，都不需要在 Inspector 掛任何參考。
+- 執行時由 `PresentationController` 負責：以 `Resources.Load` 載入 AGV Prefab、模組 Prefab、環境材質清單與 PanelSettings、建立車輛、建立操作面板與進度條兩個 UIDocument、保管目前的站點（`LayoutScene` 建好後交給它）。
+- 物件之間靠名稱對應，名稱都定義成常數並由 Build Factory Scene 共用：模組物件名稱＝佈局的模組代碼（工站與倉儲站就是後端的站點代碼）；Prefab 裡的 `Status Lights`、`Label`、`Load`；模組 Prefab 裡的 `Model`、`Zone`、`Handoff Point`；站點裡的 `Inbound Contents`、`Outbound Contents`。
 - 要調整畫面上的顏色（連線狀態、進度條、路徑虛線、面板）只改 `PresentationController.Colors`；模型本身的材質顏色在 `Editor/Palette.cs`，改完要重建場景。
 
 Inspector 上只剩純數值的設定：連線設定（host、port、factoryId、API 位址）在 `OpenFleet` 物件，攝影機的視角與速度在 `Main Camera`；都有預設值，不改也能執行。

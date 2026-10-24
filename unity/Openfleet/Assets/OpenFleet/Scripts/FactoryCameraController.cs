@@ -9,9 +9,16 @@ namespace OpenFleet.Unity
     /// </summary>
     public sealed class FactoryCameraController : MonoBehaviour
     {
-        /// <summary>預設視角：稍微偏南。右邊有操作面板蓋住，中心在 X = 3，切料到精加工 2 號機都在畫面裡（Editor 建場景時也用這個值）。</summary>
+        /// <summary>
+        /// 佈局還沒載入時的視角（Editor 建場景時也用這個值），等於預設佈局算出來的預設視角。
+        /// 載入佈局後由 <see cref="SetHome"/> 依廠房大小換掉（算法在 LayoutController）。
+        /// 右邊有操作面板蓋住，中心偏西到 X = 3，預設佈局的切料到精加工 2 號機都在畫面裡（第 1b 步決定）。
+        /// </summary>
         public static readonly Vector3 DefaultTarget = new Vector3(3f, 0f, -1.5f);
         public const float DefaultDistance = 56f;
+
+        /// <summary>最遠的縮放距離是預設距離的幾倍（Claude 暫定；原本固定 80，約是 56 的 1.43 倍）。</summary>
+        public const float MaxDistanceFactor = 1.45f;
 
         [SerializeField] private Vector3 target = DefaultTarget;
         [SerializeField] private float yaw;
@@ -44,6 +51,29 @@ namespace OpenFleet.Unity
             _homeYaw = yaw;
             _homePitch = pitch;
             _homeDistance = distance;
+        }
+
+        /// <summary>
+        /// 換預設視角（F 鍵回到的位置）：佈局載入或廠房大小改變時由 LayoutController 呼叫。
+        /// 最遠的縮放距離也跟著變成預設距離的 <see cref="MaxDistanceFactor"/> 倍。
+        /// <paramref name="moveCamera"/> 為 true 時攝影機也立刻回到這個視角（取消跟隨）。
+        /// </summary>
+        public void SetHome(Vector3 homeTarget, float homeDistance, bool moveCamera = true)
+        {
+            _homeTarget = homeTarget;
+            _homeDistance = homeDistance;
+            maxDistance = homeDistance * MaxDistanceFactor;
+            if (!moveCamera)
+            {
+                distance = Mathf.Min(distance, maxDistance);
+                return;
+            }
+
+            Following = null;
+            target = _homeTarget;
+            yaw = _homeYaw;
+            pitch = _homePitch;
+            distance = _homeDistance;
         }
 
         private void Update()
