@@ -30,6 +30,12 @@ namespace OpenFleet.Contracts
             return Vehicle(factoryId, "+", channel);
         }
 
+        /// <summary>使用中的佈局版本（retained）：模擬器據此增減車輛，Unity 據此重建場景。</summary>
+        public static string Layout(string factoryId)
+        {
+            return $"{Root}/{factoryId}/layout";
+        }
+
         public static string VehicleState(string factoryId, string vehicleId)
         {
             return $"{Root}/{factoryId}/state/vehicles/{vehicleId}";

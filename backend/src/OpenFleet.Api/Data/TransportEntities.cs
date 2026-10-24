@@ -10,6 +10,13 @@ public sealed class Vehicle
 
     /// <summary>是否參與自動派工。大型車接物料搬運，小型車接刀具配送。</summary>
     public bool DispatchEnabled { get; set; }
+
+    /// <summary>車位座標（交接點，由佈局推導）。不在佈局裡的車沒有車位。</summary>
+    public double? HomeX { get; set; }
+    public double? HomeZ { get; set; }
+
+    /// <summary>是否在使用中的佈局裡。不在的車保留主檔（歷史紀錄可能參照），但不派工、不接受狀態。</summary>
+    public bool InLayout { get; set; }
 }
 
 /// <summary>路網節點（座標，公尺）。站點交接點與充電車位也是節點。</summary>

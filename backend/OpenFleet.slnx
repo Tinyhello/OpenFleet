@@ -3,6 +3,7 @@
     <Project Path="src/OpenFleet.Api/OpenFleet.Api.csproj" />
     <Project Path="src/OpenFleet.Contracts/OpenFleet.Contracts.csproj" />
     <Project Path="src/OpenFleet.Messaging/OpenFleet.Messaging.csproj" />
+    <Project Path="src/OpenFleet.Layout/OpenFleet.Layout.csproj" />
     <Project Path="src/OpenFleet.Simulator/OpenFleet.Simulator.csproj" />
   </Folder>
   <Folder Name="/tests/">

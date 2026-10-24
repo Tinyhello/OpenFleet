@@ -1,3 +1,4 @@
+using OpenFleet.Layout;
 using Microsoft.Extensions.Time.Testing;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Contracts;
@@ -10,8 +11,7 @@ public class RoadNetworkTests
 
     private static RoadNetwork Build()
     {
-        var (nodes, edges) = DemoRoadNetwork.Build();
-        return new RoadNetwork(nodes, edges);
+        return TestLayouts.Network(DefaultLayout.Build());
     }
 
     [Fact]
@@ -66,8 +66,7 @@ public class TrafficControllerTests
 
     public TrafficControllerTests()
     {
-        var (nodes, edges) = DemoRoadNetwork.Build();
-        _network = new RoadNetwork(nodes, edges);
+        _network = TestLayouts.Network(DefaultLayout.Build());
         _traffic = new TrafficController(_network, new TrafficOptions(), _time);
     }
 

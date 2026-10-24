@@ -1,9 +1,8 @@
-using OpenFleet.Contracts;
-
 namespace OpenFleet.Api.Fleet;
 
 /// <summary>
 /// 對應 "Fleet" 設定區段。以下預設值是 P1 示範用的暫定值，不是已確認的業務規則。
+/// 車輛與它們的車位（車型、待命位置）不在這裡：它們來自使用中的佈局（P7 第 2 步）。
 /// </summary>
 public sealed class FleetOptions
 {
@@ -17,15 +16,6 @@ public sealed class FleetOptions
     /// <summary>指令的有效期限；設備超時才收到就應回報 Rejected。</summary>
     public TimeSpan CommandTimeToLive { get; set; } = TimeSpan.FromSeconds(10);
 
-    /// <summary>
-    /// 車輛 ID → 車型。啟動時寫入 Vehicles 資料表（已存在的車輛會更新車型）。
-    /// 不在清單中的車輛仍會接受回報，但車型為 <see cref="VehicleType.Unknown"/>，也不會被派工。
-    /// </summary>
-    public Dictionary<string, VehicleType> VehicleTypes { get; set; } = new(StringComparer.Ordinal);
-
-    /// <summary>參與自動派工的車輛。示範設定是兩台大型車（物料）與一台小型車（刀具）。</summary>
-    public List<string> DispatchVehicleIds { get; set; } = [];
-
     public TimeSpan DispatchInterval { get; set; } = TimeSpan.FromSeconds(1);
 
     public TimeSpan OutboxPollInterval { get; set; } = TimeSpan.FromMilliseconds(500);
@@ -38,16 +28,4 @@ public sealed class FleetOptions
 
     /// <summary>同一個任務被設備拒絕或執行失敗這麼多次後標記為 Failed，避免無限重派。</summary>
     public int MaxDispatchAttempts { get; set; } = 3;
-
-    /// <summary>
-    /// 車輛 ID → 待命位置（充電維護區的車位，會對應到最近的路網節點）。沒有任務的車輛會被交通控制引導回去。
-    /// 席位數與充電規則尚未定案，這裡只是示範用的固定車位。
-    /// </summary>
-    public Dictionary<string, ParkingSlot> Parking { get; set; } = new(StringComparer.Ordinal);
-}
-
-public sealed class ParkingSlot
-{
-    public double X { get; set; }
-    public double Z { get; set; }
 }

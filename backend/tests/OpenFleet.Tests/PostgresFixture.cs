@@ -57,17 +57,10 @@ public sealed class TestDatabase
     /// <summary>品管每一支的檢驗結果由測試指定；沒有指定的都是合格。</summary>
     public ScriptedDefects Defects { get; } = new();
 
-    /// <summary>示範路網（和後端啟動時寫進資料庫的是同一份定義）。</summary>
-    public RoadNetwork Network { get; } = BuildNetwork();
+    /// <summary>測試佈局的路網（和 <see cref="TestLayouts.Default"/> 寫入資料庫的是同一份）。</summary>
+    public RoadNetwork Network { get; } = TestLayouts.Network(TestLayouts.Default());
 
-    public FleetOptions Fleet { get; } = new()
-    {
-        VehicleTypes =
-        {
-            ["agv-a"] = VehicleType.Large, ["agv-b"] = VehicleType.Large, ["agv-c"] = VehicleType.Large, ["agv-s"] = VehicleType.Small,
-        },
-        DispatchVehicleIds = ["agv-a", "agv-b", "agv-c", "agv-s"],
-    };
+    public FleetOptions Fleet { get; } = new();
 
     /// <summary>
     /// <paramref name="plentyOfBlanks"/>：每種備料都放很多現成的，建立批次時不會經過切料站（P5 以前的測試看的是後面的工序）。
@@ -78,7 +71,7 @@ public sealed class TestDatabase
         var database = new TestDatabase(postgres.NewConnectionString());
         await using var db = database.NewContext();
         await db.Database.MigrateAsync();
-        await DatabaseInitializer.SeedAsync(db, database.Fleet);
+        await DatabaseInitializer.SeedAsync(db, TestLayouts.Default());
         if (plentyOfBlanks)
         {
             var inventory = new InventoryService(db, database.Time, NullLogger<InventoryService>.Instance);
@@ -154,12 +147,6 @@ public sealed class TestDatabase
                 throw new InvalidOperationException($"Event {type} for {vehicleId} was not processed.");
             }
         }
-    }
-
-    private static RoadNetwork BuildNetwork()
-    {
-        var (nodes, edges) = DemoRoadNetwork.Build();
-        return new RoadNetwork(nodes, edges);
     }
 
     public Scope NewScope()

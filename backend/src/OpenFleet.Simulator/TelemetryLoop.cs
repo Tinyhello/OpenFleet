@@ -18,7 +18,7 @@ public sealed class TelemetryLoop(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("Simulating {Count} vehicle(s), session {SessionId}.", settings.Value.VehicleIds.Count, fleet.SessionId);
+        logger.LogInformation("Telemetry loop started, session {SessionId}; vehicles come from the active layout.", fleet.SessionId);
 
         using var timer = new PeriodicTimer(settings.Value.TelemetryInterval, time);
         var last = time.GetTimestamp();

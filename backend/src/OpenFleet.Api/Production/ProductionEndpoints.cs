@@ -122,18 +122,8 @@ public static class ProductionEndpoints
         // 示範用：清掉所有訂單、工單、批次與搬運資料（含刀具配送）並把刀具計數歸零，庫存與採購回到初始值（設定、站點、車輛、規格保留）。車上若還有進行中的任務，之後的回報會因找不到派工而被忽略。
         api.MapPost("/demo/reset", async (OpenFleetDbContext db, ILoggerFactory loggers, CancellationToken ct) =>
         {
-            await db.Database.ExecuteSqlRawAsync(
-                """TRUNCATE "Lots", "TransportTasks", "OutboxMessages", "InboxMessages", "ScrapRecords", "ProductionOrders", "SalesOrderLines", "SalesOrders" CASCADE""", ct);
-            // 刀具計數與換刀紀錄也歸零，機台回到剛換好刀的狀態。
-            await db.Database.ExecuteSqlRawAsync(
-                """TRUNCATE "ToolChanges", "BatchRuns"; UPDATE "MachineTools" SET "PiecesSinceChange" = 0, "ChangeStartedAt" = NULL, "ChangeDueAt" = NULL, "SpareRequestedAt" = NULL, "SpareDeliveredAt" = NULL, "WaitingSince" = NULL""", ct);
-            // 貨車從頭倒數。
-            await db.Database.ExecuteSqlRawAsync(
-                """UPDATE "TruckSchedules" SET "RemainingSeconds" = (SELECT "TruckIntervalSeconds" FROM "ProductionSettings"), "AccruedAt" = NULL, "LastArrivedAt" = NULL""", ct);
-            // 庫存與採購回到示範的初始值。
-            await db.Database.ExecuteSqlRawAsync("""TRUNCATE "StockReservations", "StockMovements", "StockBalances", "PurchaseOrders" """, ct);
-            await DatabaseInitializer.SeedInventoryAsync(db);
-            await db.SaveChangesAsync(ct);
+            // 清空與庫存的初始值由 DemoData 負責（佈局套用也共用同一段）。
+            await DemoData.ResetAsync(db, ct);
             loggers.CreateLogger(nameof(ProductionEndpoints)).LogWarning("Demo data reset: lots, tasks, movements, stock, purchase orders, outbox and inbox cleared.");
             return Results.NoContent();
         });

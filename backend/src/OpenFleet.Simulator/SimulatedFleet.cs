@@ -32,13 +32,17 @@ public sealed class SimulatedFleet
     private readonly Queue<Guid> _replyOrder = new();
     private readonly Queue<OutgoingEvent> _outgoing = new();
 
+    /// <summary>上次套用的佈局版本；同一版本重新連線時只做增減，不動車輛位置（見 <see cref="ApplyLayout"/>）。</summary>
+    private Guid? _layoutId;
+    private DateTimeOffset? _appliedAt;
+
     public SimulatedFleet(IOptions<SimulatorSettings> settings, IOptions<MqttSettings> mqtt, TimeProvider time)
     {
         _settings = settings.Value;
         _producerId = mqtt.Value.ProducerId;
         _time = time;
 
-        // 起始位置由設定指定（示範設定是充電車位）；沒指定的車排在原點旁邊，後端會把它們引到最近的節點。
+        // 初始清單只給測試與離線用（正式執行時是空的）。起始位置由設定指定；沒指定的車排在原點旁邊，後端會把它們引到最近的節點。
         _vehicles = _settings.VehicleIds
             .Select((id, index) => _settings.StartPositions.TryGetValue(id, out var start)
                 ? new SimulatedVehicle(id, start.X, start.Z)
@@ -46,9 +50,73 @@ public sealed class SimulatedFleet
             .ToDictionary(v => v.VehicleId, StringComparer.Ordinal);
     }
 
-    public Guid SessionId { get; } = Guid.NewGuid();
+    /// <summary>目前的 Session。佈局換了版本就換一個新的，後端會當作設備重啟。</summary>
+    public Guid SessionId { get; private set; } = Guid.NewGuid();
 
-    public bool Contains(string vehicleId) => _vehicles.ContainsKey(vehicleId);
+    public bool Contains(string vehicleId)
+    {
+        lock (_gate)
+        {
+            return _vehicles.ContainsKey(vehicleId);
+        }
+    }
+
+    /// <summary>
+    /// 套用後端發布的佈局（P7 第 2 步 5.13）。清單裡的車就是模擬器的車：多的移除，少的加入。
+    /// 新的版本（LayoutId 或 AppliedAt 不同）：換一個新的 SessionId，每一台都放回車位、清掉工作、路徑與載貨。
+    /// 同一個版本（重新連線時收到的 retained 訊息）：只補加與移除，不動位置。
+    /// 啟動後收到的第一個佈局是例外：設定檔初始清單裡的車保留原位（見方法內的說明）。
+    /// </summary>
+    public void ApplyLayout(LayoutRevisionMessage layout)
+    {
+        lock (_gate)
+        {
+            var isNewVersion = layout.LayoutId != _layoutId || layout.AppliedAt != _appliedAt;
+
+            // 啟動時車輛只可能來自設定檔的初始清單，而正式執行時那份清單是空的，所以這個例外不影響正式行為；
+            // 測試與離線執行可以用初始清單把車放在指定的起點（例如離車位很遠的地方），看交通控制把閒置的車引導回車位。
+            // 之後的新版本（使用者換了佈局）仍然一律放回車位。
+            var keepStartPositions = _layoutId is null;
+            var wanted = layout.Vehicles.Select(v => v.VehicleId).ToHashSet(StringComparer.Ordinal);
+
+            foreach (var vehicleId in _vehicles.Keys.Where(id => !wanted.Contains(id)).ToList())
+            {
+                _vehicles.Remove(vehicleId);
+            }
+
+            foreach (var vehicle in layout.Vehicles)
+            {
+                if (!_vehicles.TryGetValue(vehicle.VehicleId, out var existing))
+                {
+                    _vehicles.Add(vehicle.VehicleId, new SimulatedVehicle(vehicle.VehicleId, vehicle.HomeX, vehicle.HomeZ));
+                }
+                else if (isNewVersion)
+                {
+                    // 保留起點時也要清掉工作、路徑與載貨，只是不搬動位置：新的 Session 後端會當作設備重啟，舊的路徑不能帶過去。
+                    if (keepStartPositions)
+                    {
+                        existing.ReturnHome(existing.X, existing.Z);
+                    }
+                    else
+                    {
+                        existing.ReturnHome(vehicle.HomeX, vehicle.HomeZ);
+                    }
+                }
+            }
+
+            if (isNewVersion)
+            {
+                // 後端會把新 Session 當作設備重啟：舊 Session 的回報與還沒送出的事件一併丟掉。
+                SessionId = Guid.NewGuid();
+                _replies.Clear();
+                _replyOrder.Clear();
+                _outgoing.Clear();
+            }
+
+            _layoutId = layout.LayoutId;
+            _appliedAt = layout.AppliedAt;
+        }
+    }
 
     /// <summary>推進模擬時間並產生每台車的遙測。斷線時也持續推進：車子不會因為網路斷掉而停下。</summary>
     public IReadOnlyList<(string VehicleId, VehicleTelemetry Telemetry)> Advance(TimeSpan elapsed)
@@ -99,7 +167,12 @@ public sealed class SimulatedFleet
     {
         lock (_gate)
         {
-            var vehicle = _vehicles[vehicleId];
+            // 車輛可能剛被佈局移除（放行是另一個 Topic，晚到的很常見）：找不到就忽略。
+            if (!_vehicles.TryGetValue(vehicleId, out var vehicle))
+            {
+                return;
+            }
+
             if (clearance.PlanId == vehicle.PlanId)
             {
                 if (clearance.Revision <= vehicle.Revision)
@@ -141,7 +214,11 @@ public sealed class SimulatedFleet
                 return true;
             }
 
-            var vehicle = _vehicles[vehicleId];
+            if (!_vehicles.TryGetValue(vehicleId, out var vehicle))
+            {
+                return false;
+            }
+
             var source = new CommandSource(vehicleId, command.CommandId, command.AssignmentId, envelope.MessageId);
 
             if (_time.GetUtcNow() > command.ExpiresAt)
@@ -398,5 +475,23 @@ public sealed class SimulatedFleet
 
         /// <summary>已經到達的點數；下一個要去的是 Path[Reached]。</summary>
         public int Reached { get; set; }
+
+        /// <summary>放回車位，清掉工作、路徑與載貨（新的佈局版本）。</summary>
+        public void ReturnHome(double x, double z)
+        {
+            X = x;
+            Z = z;
+            Sequence = 0;
+            Job = null;
+            LoadQuantity = 0;
+            LoadCode = null;
+            PlanId = null;
+            Revision = 0;
+            EmptySpeedFactor = 1;
+            LoadedSpeedFactor = 1;
+            Path = [];
+            Released = 0;
+            Reached = 0;
+        }
     }
 }

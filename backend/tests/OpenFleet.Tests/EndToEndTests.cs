@@ -14,6 +14,7 @@ using MQTTnet.Protocol;
 using MQTTnet.Server;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Contracts;
+using OpenFleet.Layout;
 using OpenFleet.Messaging;
 using OpenFleet.Simulator;
 
@@ -46,20 +47,18 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             b.UseSetting("Mqtt:ReconnectDelay", "00:00:00.200");
             b.UseSetting("Fleet:OfflineAfter", "00:00:01");
             b.UseSetting("Fleet:LivenessCheckInterval", "00:00:00.200");
-            b.UseSetting("Fleet:VehicleTypes:agv-t1", "Large");
-            b.UseSetting("Fleet:VehicleTypes:agv-t2", "Small");
             b.UseSetting("ConnectionStrings:OpenFleet", postgres.NewConnectionString());
-            b.UseSetting("Fleet:DispatchVehicleIds:0", "agv-t1");
             b.UseSetting("Fleet:DispatchInterval", "00:00:00.100");
             b.UseSetting("Fleet:OutboxPollInterval", "00:00:00.100");
             b.UseSetting("Production:TickInterval", "00:00:00.100");
-            // agv-t2 的車位是充電維護區中間那一格；交通控制調快、前瞻放大，讓高速行駛的車不必每個節點都停。
-            b.UseSetting("Fleet:Parking:agv-t2:X", "-8");
-            b.UseSetting("Fleet:Parking:agv-t2:Z", "0.2");
+            // 交通控制調快、前瞻放大，讓高速行駛的車不必每個節點都停。
             b.UseSetting("Traffic:ControlInterval", "00:00:00.050");
             b.UseSetting("Traffic:Lookahead", "6");
         });
         _http = _api.CreateClient();
+
+        // 後端的車輛來自佈局：啟動後套用只有兩個車位的佈局。模擬器的初始清單和這兩個車位同名（見下面的設定）。
+        await ApplyLayoutAsync(TwoVehicleLayout());
 
         var simulator = SimulatorApp.CreateBuilder([]);
         // 不讀 appsettings.json：車輛清單與路線只用下面的測試設定，避免示範用的車輛混進來。
@@ -74,20 +73,42 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
             ["Mqtt:ClientId"] = "test-simulator",
             ["Mqtt:ProducerId"] = "simulator",
             ["Mqtt:ReconnectDelay"] = "00:00:00.200",
-            ["Simulator:VehicleIds:0"] = "agv-t1",
-            ["Simulator:VehicleIds:1"] = "agv-t2",
+            // 初始清單只給測試與離線用：啟動後收到的第一個佈局不會把清單裡的車放回車位，車從這裡指定的起點出發。
+            // agv-01 從自己的車位出發；agv-02 從品管站的交接點出發，沒有任務，所以交通控制要沿路網把它引導回自己的車位。
+            ["Simulator:VehicleIds:0"] = "agv-01",
+            ["Simulator:VehicleIds:1"] = "agv-02",
+            ["Simulator:StartPositions:agv-01:X"] = "-10.3",
+            ["Simulator:StartPositions:agv-01:Z"] = "0.2",
+            ["Simulator:StartPositions:agv-02:X"] = "4",
+            ["Simulator:StartPositions:agv-02:Z"] = "9.4",
             ["Simulator:TelemetryInterval"] = "00:00:00.100",
-            // agv-t1 從充電車位出發；agv-t2 從品管站的交接點出發，沒有任務所以會被引導回車位。
-            ["Simulator:StartPositions:agv-t1:X"] = "-10.3",
-            ["Simulator:StartPositions:agv-t1:Z"] = "0.2",
-            ["Simulator:StartPositions:agv-t2:X"] = "4",
-            ["Simulator:StartPositions:agv-t2:Z"] = "9.4",
             // 加快車速與交接，讓整個物料流程在幾秒內跑完。
             ["Simulator:Speed"] = "40",
             ["Simulator:HandoverDuration"] = "00:00:00.100",
         });
         _simulator = simulator.Build();
         await _simulator.StartAsync();
+    }
+
+    /// <summary>
+    /// 測試用的佈局：預設佈局只留兩個車位，agv-01 是大型、agv-02 改成小型（位置與預設佈局相同）。
+    /// </summary>
+    private static FactoryLayoutDocument TwoVehicleLayout()
+    {
+        var document = DefaultLayout.Build();
+        document.Modules.RemoveAll(m => ModuleCatalog.IsBay(m.Kind) && m.Code is not ("agv-01" or "agv-02"));
+        document.Modules.Single(m => m.Code == "agv-02").Kind = ModuleKind.AgvBaySmall;
+        return document;
+    }
+
+    /// <summary>建立佈局並套用（API）。套用時工廠是空的，所以不需要 resetDemo。</summary>
+    private async Task ApplyLayoutAsync(FactoryLayoutDocument document)
+    {
+        var created = await _http.PostAsJsonAsync("/api/layouts", new SaveLayoutRequest { Name = "e2e", Document = document }, JsonDefaults.Options);
+        Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync());
+        var saved = (await created.Content.ReadFromJsonAsync<SaveLayoutResponse>(JsonDefaults.Options))!;
+        var applied = await _http.PostAsync($"/api/layouts/{saved.Layout.Id}/apply", null);
+        Assert.True(applied.IsSuccessStatusCode, await applied.Content.ReadAsStringAsync());
     }
 
     public async Task DisposeAsync()
@@ -106,16 +127,16 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         await EventuallyAsync(async () => (await GetVehiclesAsync()).Count(v => v.Connectivity == VehicleConnectivity.Online) == 2);
 
         // 車型由後端設定決定，並透過快照（JSON 字串 enum）傳給顯示端。
-        Assert.Equal(VehicleType.Large, (await GetVehicleAsync("agv-t1")).VehicleType);
-        Assert.Equal(VehicleType.Small, (await GetVehicleAsync("agv-t2")).VehicleType);
+        Assert.Equal(VehicleType.Large, (await GetVehicleAsync("agv-01")).VehicleType);
+        Assert.Equal(VehicleType.Small, (await GetVehicleAsync("agv-02")).VehicleType);
 
-        var response = await _http.PostAsync("/api/vehicles/agv-t1/ping", null);
+        var response = await _http.PostAsync("/api/vehicles/agv-01/ping", null);
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var accepted = (await response.Content.ReadFromJsonAsync<CommandAcceptedResponse>(JsonDefaults.Options))!;
 
         await EventuallyAsync(async () =>
         {
-            var state = await GetVehicleAsync("agv-t1");
+            var state = await GetVehicleAsync("agv-01");
             return state.LastCommandId == accepted.CommandId && state.LastCommandEvent == VehicleEventType.Completed;
         });
     }
@@ -167,15 +188,15 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(
             new[]
             {
-                "station:raw-store", "vehicle:agv-t1", "station:rough-1", "vehicle:agv-t1", "station:fine-1", "vehicle:agv-t1", "station:heat-1",
-                "vehicle:agv-t1", "station:temper-1", "vehicle:agv-t1", "station:plating-1", "vehicle:agv-t1", "station:polish-1", "vehicle:agv-t1", "station:qc-1",
-                "vehicle:agv-t1", "station:packing-1",
+                "station:raw-store", "vehicle:agv-01", "station:rough", "vehicle:agv-01", "station:fine", "vehicle:agv-01", "station:heat-1",
+                "vehicle:agv-01", "station:temper-1", "vehicle:agv-01", "station:plating-1", "vehicle:agv-01", "station:polish-1", "vehicle:agv-01", "station:qc-1",
+                "vehicle:agv-01", "station:packing-1",
             },
-            trace.Movements.Select(m => m.To));
-        Assert.Equal(new[] { "rough-1", "fine-1", "heat-1", "temper-1", "plating-1", "polish-1", "qc-1", "packing-1" }, trace.Operations.Select(o => o.StationCode));
+            trace.Movements.Select(m => Generic(m.To)));
+        Assert.Equal(new[] { "rough", "fine", "heat-1", "temper-1", "plating-1", "polish-1", "qc-1", "packing-1" }, trace.Operations.Select(o => Generic(o.StationCode)));
         Assert.All(trace.Operations, o => Assert.Equal((Contracts.OperationStatus.Completed, 20, 20), (o.Status, o.PiecesCompleted, o.Quantity)));
         Assert.Equal(8, trace.Tasks.Count);
-        Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-t1", 1), (t.Status, t.VehicleId, t.Attempts)));
+        Assert.All(trace.Tasks, t => Assert.Equal((TransportTaskStatus.Completed, "agv-01", 1), (t.Status, t.VehicleId, t.Attempts)));
 
         // 站點狀態：粗加工、精加工的兩台車床刀具合計各 60 件，出貨站有 60 件在等貨車；車輛卸完料後是空車。
         var stations = (await _http.GetFromJsonAsync<List<StationStatusDto>>("/api/stations/status", JsonDefaults.Options))!;
@@ -184,7 +205,7 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Null(stations.Single(s => s.Code == "polish-1").Machine().Tool);
         Assert.Equal(60, stations.Single(s => s.Code == "shipping").InboundQuantity);
         Assert.NotNull(stations.Single(s => s.Code == "shipping").Truck);
-        await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });
+        await EventuallyAsync(async () => (await GetVehicleAsync("agv-01")) is { LoadQuantity: 0, Activity: VehicleActivity.Idle });
 
         // 任務歷史：待派工 → 已派工 → 執行中 → 完成。
         var events = (await _http.GetFromJsonAsync<List<TaskEventDto>>($"/api/transport-tasks/{trace.Tasks[0].Id}/events", JsonDefaults.Options))!;
@@ -196,15 +217,56 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
     [Fact]
     public async Task Idle_vehicle_is_guided_along_the_road_network_to_its_parking_slot()
     {
+        // agv-02 從品管站的交接點 (4, 9.4) 出發、沒有任務；它的車位是 (-8, 0.2)。
+        // 模擬器的車只照放行的路徑開，所以停在車位上就表示交通控制沿路網把它引導了過去；
+        // 另外記下途中有沒有看到它在行駛，確認它真的是開過去的（不是一開始就在車位上）。
+        var drove = false;
         await EventuallyAsync(async () =>
         {
-            var state = await GetVehicleAsync("agv-t2");
+            var state = await GetVehicleAsync("agv-02");
+            drove |= state.Speed > 0;
             return state.Speed == 0 && Math.Abs(state.Position.X + 8) < 0.01 && Math.Abs(state.Position.Z - 0.2) < 0.01;
         });
+        Assert.True(drove, "agv-02 never moved: it should have driven from the QC handoff to its slot.");
 
-        // 沒有設定車位的車留在原地。
-        var other = await GetVehicleAsync("agv-t1");
+        // agv-01 一開始就在自己的車位、也沒有任務，所以留在原地。
+        var other = await GetVehicleAsync("agv-01");
         Assert.Equal((-10.3, 0.2), (other.Position.X, other.Position.Z));
+    }
+
+    [Fact]
+    public async Task Layout_api_answers_a_malformed_document_with_400_or_a_problem_list_instead_of_500()
+    {
+        var layoutsBefore = (await _http.GetFromJsonAsync<List<LayoutSummaryDto>>("/api/layouts", JsonDefaults.Options))!.Count;
+
+        // 驗證：欄位是 null、清單有 null、種類是整數 99（JSON 的 enum 允許整數），一律 200 加問題清單。
+        foreach (var document in new[]
+        {
+            """null""",
+            """{"floor":null,"modules":null,"roadNodes":null,"roadEdges":null}""",
+            """{"modules":[null],"roadNodes":[null],"roadEdges":[null]}""",
+            """{"modules":[{"code":null,"kind":"roughLathe"}],"roadEdges":[{"from":null,"to":"a"}]}""",
+            """{"modules":[{"code":"rough-1","kind":99}]}""",
+        })
+        {
+            var response = await _http.PostAsync("/api/layouts/validate", Json(document));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var validation = (await response.Content.ReadFromJsonAsync<LayoutValidationDto>(JsonDefaults.Options))!;
+            Assert.False(validation.IsValid, document);
+            Assert.Contains(validation.Issues, i => i.Code == "document-invalid");
+        }
+
+        // 另存：同樣的輸入回 400，而且沒有寫進資料庫。
+        foreach (var document in new[] { """null""", """{"modules":null}""", """{"modules":[{"code":"rough-1","kind":99}]}""", """{"roadNodes":[null]}""" })
+        {
+            var response = await _http.PostAsync("/api/layouts", Json($$"""{"name":"壞的","document":{{document}}}"""));
+
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("document", await response.Content.ReadAsStringAsync());
+        }
+
+        Assert.Equal(layoutsBefore, (await _http.GetFromJsonAsync<List<LayoutSummaryDto>>("/api/layouts", JsonDefaults.Options))!.Count);
     }
 
     [Fact]
@@ -269,7 +331,7 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
 
         using var doc = JsonDocument.Parse(json);
         var payload = doc.RootElement.GetProperty("payload");
-        Assert.StartsWith("agv-t", payload.GetProperty("vehicleId").GetString());
+        Assert.StartsWith("agv-0", payload.GetProperty("vehicleId").GetString());
         Assert.Equal("online", payload.GetProperty("connectivity").GetString());
     }
 
@@ -283,9 +345,9 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
 
         await EventuallyAsync(async () => !(await GetHealthAsync()));
         await EventuallyAsync(async () => (await GetVehiclesAsync()).All(v => v.Connectivity == VehicleConnectivity.Offline));
-        var sequenceWhileDown = (await GetVehicleAsync("agv-t1")).TelemetrySequence;
+        var sequenceWhileDown = (await GetVehicleAsync("agv-01")).TelemetrySequence;
 
-        var offline = await _http.PostAsync("/api/vehicles/agv-t1/ping", null);
+        var offline = await _http.PostAsync("/api/vehicles/agv-01/ping", null);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, offline.StatusCode);
 
         _broker = await StartBrokerAsync(_port);
@@ -293,14 +355,16 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
         await EventuallyAsync(GetHealthAsync);
         await EventuallyAsync(async () =>
         {
-            var state = await GetVehicleAsync("agv-t1");
+            var state = await GetVehicleAsync("agv-01");
             return state.Connectivity == VehicleConnectivity.Online && state.TelemetrySequence > sequenceWhileDown;
         });
 
-        var response = await _http.PostAsync("/api/vehicles/agv-t1/ping", null);
+        var response = await _http.PostAsync("/api/vehicles/agv-01/ping", null);
         var accepted = (await response.Content.ReadFromJsonAsync<CommandAcceptedResponse>(JsonDefaults.Options))!;
-        await EventuallyAsync(async () => (await GetVehicleAsync("agv-t1")).LastCommandId == accepted.CommandId);
+        await EventuallyAsync(async () => (await GetVehicleAsync("agv-01")).LastCommandId == accepted.CommandId);
     }
+
+    private static StringContent Json(string json) => new(json, System.Text.Encoding.UTF8, "application/json");
 
     private async Task<List<VehicleState>> GetVehiclesAsync() =>
         (await _http.GetFromJsonAsync<List<VehicleState>>("/api/vehicles", JsonDefaults.Options))!;
@@ -360,6 +424,13 @@ public sealed class EndToEndTests(PostgresFixture postgres) : IAsyncLifetime
 
         Assert.Fail($"Condition not met within {timeout ?? Timeout}.");
     }
+
+    /// <summary>
+    /// 兩台車床的同一道工序是一樣的：哪一框先派出去由待派工的排序決定（同一批的框建立時間相同，靠 Id 排），
+    /// 所以第一道加工可能是 1 號機，也可能是 2 號機。這個測試驗證的是工序順序與搬運，不是是哪一台。
+    /// </summary>
+    private static string Generic(string location) =>
+        location.Replace("rough-1", "rough").Replace("rough-2", "rough").Replace("fine-1", "fine").Replace("fine-2", "fine");
 
     private static int GetFreePort()
     {

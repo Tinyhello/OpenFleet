@@ -1,6 +1,6 @@
-using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using OpenFleet.Api.Fleet;
+using OpenFleet.Api.Layout;
 using OpenFleet.Contracts;
 
 namespace OpenFleet.Tests;
@@ -11,12 +11,21 @@ public class FleetStateStoreTests
     private readonly StateChangeQueue _changes = new();
     private readonly FleetStateStore _store;
 
-    private static readonly IOptions<FleetOptions> Options = Microsoft.Extensions.Options.Options.Create(new FleetOptions
-    {
-        VehicleTypes = { ["agv-large"] = VehicleType.Large, ["agv-small"] = VehicleType.Small },
-    });
+    private static readonly ActiveLayout Layout = LayoutWith(("agv-large", VehicleType.Large), ("agv-small", VehicleType.Small));
 
-    public FleetStateStoreTests() => _store = new FleetStateStore(_time, _changes, Options);
+    public FleetStateStoreTests() => _store = new FleetStateStore(_time, _changes, Layout);
+
+    /// <summary>車型跟著使用中的佈局走（車位座標這裡用不到）。</summary>
+    private static ActiveLayout LayoutWith(params (string Id, VehicleType Type)[] vehicles)
+    {
+        var layout = new ActiveLayout();
+        layout.Load(
+            new LayoutRevisionMessage { Name = "test", Vehicles = vehicles.Select(v => new LayoutVehicle { VehicleId = v.Id, Type = v.Type }).ToList() },
+            new Dictionary<string, string>(),
+            new Dictionary<string, string>(),
+            []);
+        return layout;
+    }
 
     private static VehicleTelemetry Telemetry(Guid session, long sequence, double x = 0) =>
         new() { SessionId = session, Sequence = sequence, Position = new Position3 { X = x } };
@@ -56,7 +65,7 @@ public class FleetStateStoreTests
         Assert.Equal(_store.StateEpoch, _store.Find("agv")!.StateEpoch);
 
         // 重啟後 Version 會從頭算，顯示端要靠 Epoch 分辨，而不是比 Version 大小。
-        var restarted = new FleetStateStore(_time, new StateChangeQueue(), Options);
+        var restarted = new FleetStateStore(_time, new StateChangeQueue(), Layout);
         restarted.ApplyTelemetry("agv", Telemetry(Guid.NewGuid(), 1));
         Assert.NotEqual(_store.StateEpoch, restarted.Find("agv")!.StateEpoch);
     }

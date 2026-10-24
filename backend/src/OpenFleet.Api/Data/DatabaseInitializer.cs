@@ -3,8 +3,10 @@ using Microsoft.Extensions.Options;
 using OpenFleet.Api.Catalog;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Inventory;
+using OpenFleet.Api.Layout;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Contracts;
+using OpenFleet.Layout;
 
 namespace OpenFleet.Api.Data;
 
@@ -13,35 +15,6 @@ namespace OpenFleet.Api.Data;
 /// </summary>
 public static class DatabaseInitializer
 {
-    /// <summary>
-    /// 暫定佈局的交接點（與 Unity 的 FactoryLayout 相同：站點中心往走道方向 3.4 m）。
-    /// 逐件工序一台機台一站（P7 第 1b 步，使用者 2026-10-22：粗加工、精加工各兩台車床，其他站一台）：
-    /// 站代碼是「工序代碼-編號」，機台代碼等於站代碼，所以刀具與加工紀錄的機台代碼不變。
-    /// 下排由左到右是切料、原料倉、粗加工 1～2 號機、精加工 1～2 號機、淬火、回火、電鍍（切料站在原料倉左邊，使用者 2026-10-22 選擇把廠房往西加寬）；
-    /// 上排由右到左是拋光、（雜物倉庫）、品管、包裝、成品倉、出貨，括號裡的只是場景、不是站點；
-    /// 刀具庫在走道內側的島區中央（使用者 2026-10-12 指定的相鄰關係；實際座標是 Claude 排的）。
-    /// 一台車床的待加工料容量 30 件是已確認的數值，每一站各 30 件（粗加工、精加工各兩站）；倉庫與暫存點的容量規則還沒定，所以留空。
-    /// </summary>
-    private static readonly Station[] DemoStations =
-    [
-        new() { Code = "cutting-1", Name = "切料", HandoffX = -28, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30, StepSequence = 0 },
-        new() { Code = "raw-store", Name = "原料倉", HandoffX = -20, HandoffZ = -DemoRoadNetwork.HandoffZ },
-        new() { Code = "rough-1", Name = "粗加工 1 號機", HandoffX = -12, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30, StepSequence = 1 },
-        new() { Code = "rough-2", Name = "粗加工 2 號機", HandoffX = -4, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30, StepSequence = 1 },
-        new() { Code = "fine-1", Name = "精加工 1 號機", HandoffX = 4, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30, StepSequence = 2 },
-        new() { Code = "fine-2", Name = "精加工 2 號機", HandoffX = 12, HandoffZ = -DemoRoadNetwork.HandoffZ, InboundCapacity = 30, OutboundCapacity = 30, StepSequence = 2 },
-        new() { Code = "heat-1", Name = "淬火", HandoffX = 20, HandoffZ = -DemoRoadNetwork.HandoffZ, StepSequence = 3 },
-        new() { Code = "temper-1", Name = "回火", HandoffX = 28, HandoffZ = -DemoRoadNetwork.HandoffZ, StepSequence = 4 },
-        new() { Code = "plating-1", Name = "電鍍", HandoffX = 36, HandoffZ = -DemoRoadNetwork.HandoffZ, StepSequence = 5 },
-        new() { Code = "polish-1", Name = "拋光", HandoffX = 20, HandoffZ = DemoRoadNetwork.HandoffZ, StepSequence = 6 },
-        new() { Code = "qc-1", Name = "品管", HandoffX = 4, HandoffZ = DemoRoadNetwork.HandoffZ, StepSequence = 7 },
-        new() { Code = "packing-1", Name = "包裝", HandoffX = -4, HandoffZ = DemoRoadNetwork.HandoffZ, StepSequence = 8 },
-        // 成品倉：P4 只是場景，P5 變成真正的站點（使用者 2026-10-22：多出來的零件依規格與客戶收進成品倉）。
-        new() { Code = "finished-store", Name = "成品倉", HandoffX = -12, HandoffZ = DemoRoadNetwork.HandoffZ },
-        new() { Code = "shipping", Name = "出貨", HandoffX = -20, HandoffZ = DemoRoadNetwork.HandoffZ },
-        new() { Code = "tool-store", Name = "刀具庫", HandoffX = DemoRoadNetwork.IslandX, HandoffZ = DemoRoadNetwork.IslandHandoffZ },
-    ];
-
     /// <summary>
     /// 示範製程。逐件工序的每件加工時間（粗加工 30 秒、精加工 60 秒）與刀具壽命（500／250 件）、
     /// 淬火 4 小時、回火 8 小時（兩座爐，中間要搬運）、滿 150 支開爐最多 300 支、
@@ -117,65 +90,28 @@ public static class DatabaseInitializer
         new() { Code = "P24-SK01", Name = "鍵形 K1", Shape = "特殊形狀", RodDiameterMm = 24, UpperBlankLengthMm = 115, FinishSecondsPerPiece = 120 },
     ];
 
+    /// <summary>
+    /// 啟動時套用 Migration、補上示範資料，再檢查佈局並把它載入記憶體（P7 第 2 步 5.10）。
+    /// </summary>
     public static async Task InitializeDatabaseAsync(this WebApplication app)
     {
         await using var scope = app.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<OpenFleetDbContext>();
-        var fleet = scope.ServiceProvider.GetRequiredService<IOptions<FleetOptions>>().Value;
 
         await db.Database.MigrateAsync();
-        await SeedAsync(db, fleet);
+        await SeedAsync(db, DefaultLayout.Build());
 
-        // 路網不會在執行中改變：啟動時從資料庫讀進記憶體，之後規劃路徑不必再查資料庫。
-        var nodes = await db.RouteNodes.AsNoTracking().Select(n => new RoadNode(n.Code, n.X, n.Z)).ToListAsync();
-        var edges = await db.RouteEdges.AsNoTracking().Select(e => new { e.FromCode, e.ToCode }).ToListAsync();
-        app.Services.GetRequiredService<RoadNetwork>().Load(nodes, edges.Select(e => (e.FromCode, e.ToCode)));
+        // 驗證失敗或預設佈局的程式改了就重新套用（有在製品時只記錄警告）；之後從資料庫載入路網與佈局。
+        await scope.ServiceProvider.GetRequiredService<LayoutService>().ReconcileOnStartupAsync(CancellationToken.None);
+        await scope.ServiceProvider.GetRequiredService<LayoutRuntime>().LoadAsync(CancellationToken.None);
     }
 
-    public static async Task SeedAsync(OpenFleetDbContext db, FleetOptions fleet)
+    /// <summary>
+    /// 補上缺少的示範資料（只新增，不蓋掉面板改過的設定）。站點、機台、路網與車輛由佈局推導：
+    /// 預設佈局每次都用 <paramref name="defaultLayout"/> 覆寫；沒有使用中的佈局時讓它使用中並推導。測試傳入 TestLayouts.Default()。
+    /// </summary>
+    public static async Task SeedAsync(OpenFleetDbContext db, FactoryLayoutDocument defaultLayout)
     {
-        var stations = await db.Stations.ToDictionaryAsync(s => s.Code);
-        foreach (var demo in DemoStations)
-        {
-            if (!stations.TryGetValue(demo.Code, out var station))
-            {
-                db.Stations.Add(new Station
-                {
-                    Code = demo.Code,
-                    Name = demo.Name,
-                    HandoffX = demo.HandoffX,
-                    HandoffZ = demo.HandoffZ,
-                    InboundCapacity = demo.InboundCapacity,
-                    OutboundCapacity = demo.OutboundCapacity,
-                    StepSequence = demo.StepSequence,
-                });
-            }
-            else
-            {
-                // 舊資料庫升級：欄位是後來才加的，沒有值就補上示範值。
-                station.OutboundCapacity ??= demo.OutboundCapacity;
-
-                // 佈局不是面板能改的設定：舊資料庫的交接點跟著目前的示範佈局。
-                station.HandoffX = demo.HandoffX;
-                station.HandoffZ = demo.HandoffZ;
-                station.StepSequence = demo.StepSequence;
-            }
-        }
-
-        // 路網整份跟著目前的示範佈局：補上缺少的節點與路段，舊佈局留下來的刪掉。
-        var (nodes, edges) = DemoRoadNetwork.Build();
-        var demoNodes = nodes.Select(n => n.Code).ToHashSet(StringComparer.Ordinal);
-        var demoEdges = edges.Select(e => RoadNetwork.EdgeKey(e.From, e.To)).ToHashSet();
-        var storedNodes = await db.RouteNodes.ToListAsync();
-        var storedEdges = await db.RouteEdges.ToListAsync();
-        db.RouteEdges.RemoveRange(storedEdges.Where(e => !demoEdges.Contains(RoadNetwork.EdgeKey(e.FromCode, e.ToCode))));
-        db.RouteNodes.RemoveRange(storedNodes.Where(n => !demoNodes.Contains(n.Code)));
-        var knownNodes = storedNodes.Select(n => n.Code).ToHashSet(StringComparer.Ordinal);
-        var knownEdges = storedEdges.Select(e => RoadNetwork.EdgeKey(e.FromCode, e.ToCode)).ToHashSet();
-        db.RouteNodes.AddRange(nodes.Where(n => !knownNodes.Contains(n.Code)).Select(n => new RouteNode { Code = n.Code, X = n.X, Z = n.Z }));
-        db.RouteEdges.AddRange(edges.Where(e => !knownEdges.Contains(RoadNetwork.EdgeKey(e.From, e.To)))
-            .Select(e => new RouteEdge { FromCode = e.From, ToCode = e.To }));
-
         // 工序的代碼與名稱不是面板能改的，跟著目前的示範；補上缺少的工序（舊資料庫沒有後段工序或回火）。
         // 已經有的工序只更新代碼與名稱，面板改過的數值會保留。
         var stepRows = await db.ProcessSteps.ToDictionaryAsync(s => s.Sequence);
@@ -205,34 +141,9 @@ public static class DatabaseInitializer
             TestSpeed = demo.TestSpeed,
         }));
 
-        // 逐件工序每一站就是一台機台（P7 第 1b 步）：機台代碼等於站代碼，補上缺少的、名稱跟著目前的命名。
-        // 有刀具的工序每台機台各一筆刀具狀態。
-        var machines = await db.Machines.ToDictionaryAsync(m => m.Code);
-        var tools = await db.MachineTools.Select(t => t.MachineCode).ToListAsync();
-        foreach (var station in DemoStations.Where(s => s.StepSequence is not null))
-        {
-            var step = DemoSteps.Single(s => s.Sequence == station.StepSequence);
-            if (step.Kind != ProcessStepKind.Piece)
-            {
-                continue;
-            }
-
-            if (machines.TryGetValue(station.Code, out var machine))
-            {
-                machine.Name = station.Name;
-                machine.StationCode = station.Code;
-                machine.Number = 1;
-            }
-            else
-            {
-                db.Machines.Add(new Machine { Code = station.Code, StationCode = station.Code, Number = 1, Name = station.Name });
-            }
-
-            if (step.UsesTool && !tools.Contains(station.Code))
-            {
-                db.MachineTools.Add(new MachineTool { MachineCode = station.Code });
-            }
-        }
+        // 佈局（P7 第 2 步）：站點、機台、路網與車輛由使用中的佈局推導。推導要讀工序，所以先存檔。
+        await db.SaveChangesAsync();
+        await LayoutWriter.EnsureDefaultAsync(db, defaultLayout);
 
         if (!await db.ProductionSettings.AnyAsync())
         {
@@ -273,19 +184,6 @@ public static class DatabaseInitializer
 
         await SeedCatalogAsync(db);
         await SeedInventoryAsync(db);
-
-        var vehicles = await db.Vehicles.ToDictionaryAsync(v => v.Id);
-        foreach (var (id, type) in fleet.VehicleTypes)
-        {
-            if (!vehicles.TryGetValue(id, out var vehicle))
-            {
-                vehicle = new Vehicle { Id = id };
-                db.Vehicles.Add(vehicle);
-            }
-
-            vehicle.Type = type;
-            vehicle.DispatchEnabled = fleet.DispatchVehicleIds.Contains(id);
-        }
 
         await db.SaveChangesAsync();
     }

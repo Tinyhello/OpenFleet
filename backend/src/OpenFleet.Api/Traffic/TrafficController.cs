@@ -78,6 +78,20 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
         }
     }
 
+    /// <summary>
+    /// 換佈局時清掉所有車輛的預約與路徑。車輛會被放回車位，之後的遙測會重新建立它們的狀態。
+    /// 換佈局時背景工作是暫停的（<see cref="Layout.LayoutGate"/>），所以這裡不會和規劃搶資源。
+    /// </summary>
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            _vehicles.Clear();
+            _nodeOwner.Clear();
+            _edgeOwner.Clear();
+        }
+    }
+
     /// <summary>目前的預約狀況（節點 → 車輛），供測試與除錯。</summary>
     public IReadOnlyDictionary<string, string> ReservedNodes()
     {

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Options;
+using OpenFleet.Api.Layout;
 using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Fleet;
@@ -16,12 +16,15 @@ public enum TelemetryOutcome
 /// 所有變更都在同一把鎖內完成，並在變更後把「複本」放進 <see cref="StateChangeQueue"/>，
 /// 避免外部拿到內部物件參考後在鎖外修改。
 /// </summary>
-public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes, IOptions<FleetOptions> options)
+public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes, ActiveLayout layout)
 {
     private const int RetiredSessionsToRemember = 8;
 
     private readonly Lock _gate = new();
     private readonly Dictionary<string, VehicleRecord> _vehicles = new(StringComparer.Ordinal);
+
+    /// <summary>退出佈局的車（見 <see cref="Retire"/>）：它們的遙測與事件一律忽略。</summary>
+    private readonly HashSet<string> _retired = new(StringComparer.Ordinal);
 
     /// <summary>
     /// 本次啟動的狀態世代。Version 只存在記憶體，重啟後會從 0 重新計算；
@@ -33,6 +36,11 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
     {
         lock (_gate)
         {
+            if (_retired.Contains(vehicleId))
+            {
+                return TelemetryOutcome.Ignored;
+            }
+
             var record = GetOrAdd(vehicleId);
             var state = record.State;
 
@@ -78,6 +86,11 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
     {
         lock (_gate)
         {
+            if (_retired.Contains(vehicleId))
+            {
+                return;
+            }
+
             var state = GetOrAdd(vehicleId).State;
             state.LastCommandId = vehicleEvent.CommandId;
             state.LastCommandEvent = vehicleEvent.EventType;
@@ -108,6 +121,54 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
         }
 
         return changed;
+    }
+
+    /// <summary>
+    /// 車輛退出佈局：移除它的狀態並記住，之後的遙測與事件都忽略，直到 <see cref="Unretire"/> 把它加回來（P7 第 2 步）。
+    /// </summary>
+    public void Retire(IEnumerable<string> vehicleIds)
+    {
+        lock (_gate)
+        {
+            foreach (var vehicleId in vehicleIds)
+            {
+                _vehicles.Remove(vehicleId);
+                _retired.Add(vehicleId);
+            }
+        }
+    }
+
+    public void Unretire(IEnumerable<string> vehicleIds)
+    {
+        lock (_gate)
+        {
+            foreach (var vehicleId in vehicleIds)
+            {
+                _retired.Remove(vehicleId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 套用佈局後更新車輛清單：佈局裡的車加回來（車型跟著佈局），不在佈局裡的車退出。
+    /// </summary>
+    public void SetLayoutVehicles(IReadOnlyDictionary<string, VehicleType> inLayout, IEnumerable<string> outOfLayout)
+    {
+        Retire(outOfLayout);
+        Unretire(inLayout.Keys);
+
+        lock (_gate)
+        {
+            foreach (var (vehicleId, type) in inLayout)
+            {
+                if (_vehicles.TryGetValue(vehicleId, out var record) && record.State.VehicleType != type)
+                {
+                    record.State.VehicleType = type;
+                    record.State.Version++;
+                    Publish(record.State);
+                }
+            }
+        }
     }
 
     public bool Contains(string vehicleId)
@@ -141,7 +202,7 @@ public sealed class FleetStateStore(TimeProvider time, StateChangeQueue changes,
     {
         if (!_vehicles.TryGetValue(vehicleId, out var record))
         {
-            var type = options.Value.VehicleTypes.GetValueOrDefault(vehicleId, VehicleType.Unknown);
+            var type = layout.TypeOf(vehicleId);
             record = new VehicleRecord(new VehicleState { VehicleId = vehicleId, VehicleType = type, Connectivity = VehicleConnectivity.Offline, StateEpoch = StateEpoch });
             _vehicles.Add(vehicleId, record);
         }

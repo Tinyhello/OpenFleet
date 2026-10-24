@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\OpenFleet.Messaging\OpenFleet.Messaging.csproj" />
+    <ProjectReference Include="..\OpenFleet.Layout\OpenFleet.Layout.csproj" />
   </ItemGroup>
 
   <ItemGroup>

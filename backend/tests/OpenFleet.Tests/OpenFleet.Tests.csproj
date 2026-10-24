@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\OpenFleet.Api\OpenFleet.Api.csproj" />
     <ProjectReference Include="..\..\src\OpenFleet.Simulator\OpenFleet.Simulator.csproj" />
+    <ProjectReference Include="..\..\src\OpenFleet.Layout\OpenFleet.Layout.csproj" />
   </ItemGroup>
 
 </Project>

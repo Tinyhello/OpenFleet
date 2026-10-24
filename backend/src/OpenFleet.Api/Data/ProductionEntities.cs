@@ -23,6 +23,15 @@ public sealed class Station
     /// 搬到某道工序的框，派車時才從這些站裡挑。倉儲站與出貨站沒有工序，是 null。
     /// </summary>
     public int? StepSequence { get; set; }
+
+    /// <summary>
+    /// 佈局裡的種類（P7 第 2 步）。站點由使用中的佈局推導，這些欄位（種類、座標、朝向）由推導寫入；
+    /// 升級後第一次啟動會補上，所以舊資料可以是 null。
+    /// </summary>
+    public ModuleKind? Kind { get; set; }
+    public double X { get; set; }
+    public double Z { get; set; }
+    public int Rotation { get; set; }
 }
 
 /// <summary>

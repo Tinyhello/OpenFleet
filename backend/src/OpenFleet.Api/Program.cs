@@ -4,6 +4,7 @@ using OpenFleet.Api.Orders;
 using Microsoft.EntityFrameworkCore;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
+using OpenFleet.Api.Layout;
 using OpenFleet.Api.Production;
 using OpenFleet.Api.Traffic;
 using OpenFleet.Api.Transport;
@@ -24,6 +25,10 @@ builder.Services.AddOptions<ProductionOptions>().Bind(builder.Configuration.GetS
 builder.Services.AddSingleton<StateChangeQueue>();
 builder.Services.AddSingleton<FleetStateStore>();
 
+// 佈局（P7 第 2 步）：使用中的佈局與背景工作的閘門都在記憶體；套用時暫停閘門、換掉路網與車輛清單。
+builder.Services.AddSingleton<ActiveLayout>();
+builder.Services.AddSingleton<LayoutGate>();
+
 // 路網與交通控制的狀態都在記憶體：路網啟動時從資料庫載入，預約狀況由車輛的遙測重建。
 builder.Services.AddOptions<TrafficOptions>().Bind(builder.Configuration.GetSection(TrafficOptions.SectionName));
 builder.Services.AddSingleton<RoadNetwork>();
@@ -42,6 +47,8 @@ builder.Services.AddScoped<OrderService>();
 builder.Services.AddScoped<VehicleShortageService>();
 builder.Services.AddScoped<TransportService>();
 builder.Services.AddScoped<VehicleEventProcessor>();
+builder.Services.AddScoped<LayoutService>();
+builder.Services.AddScoped<LayoutRuntime>();
 
 builder.Services.AddOpenFleetMqtt(builder.Configuration);
 builder.Services.AddMqttHandler<VehicleEventHandler>();
@@ -53,6 +60,7 @@ builder.Services.AddHostedService<OutboxPublisher>();
 builder.Services.AddHostedService<DispatchWorker>();
 builder.Services.AddHostedService<TrafficWorker>();
 builder.Services.AddHostedService<ProductionWorker>();
+builder.Services.AddHostedService<LayoutPublisher>();
 
 var app = builder.Build();
 
@@ -71,6 +79,7 @@ app.MapCatalogEndpoints();
 app.MapInventoryEndpoints();
 app.MapOrderEndpoints();
 app.MapTransportEndpoints();
+app.MapLayoutEndpoints();
 
 app.Run();
 

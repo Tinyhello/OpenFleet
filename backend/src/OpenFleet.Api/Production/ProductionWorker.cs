@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using OpenFleet.Api.Layout;
 
 namespace OpenFleet.Api.Production;
 
@@ -18,6 +19,7 @@ public sealed class ProductionOptions
 public sealed class ProductionWorker(
     IServiceScopeFactory scopes,
     IOptions<ProductionOptions> options,
+    LayoutGate gate,
     TimeProvider time,
     ILogger<ProductionWorker> logger) : BackgroundService
 {
@@ -29,6 +31,12 @@ public sealed class ProductionWorker(
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
+                // 套用佈局時暫停（見 LayoutGate）。
+                if (!gate.TryEnter())
+                {
+                    continue;
+                }
+
                 try
                 {
                     await using var scope = scopes.CreateAsyncScope();
@@ -37,6 +45,10 @@ public sealed class ProductionWorker(
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     logger.LogError(ex, "Production cycle failed; retrying next cycle.");
+                }
+                finally
+                {
+                    gate.Exit();
                 }
             }
         }

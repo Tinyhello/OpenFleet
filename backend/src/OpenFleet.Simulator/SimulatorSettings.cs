@@ -7,13 +7,17 @@ public sealed class SimulatorSettings
 {
     public const string SectionName = "Simulator";
 
+    /// <summary>
+    /// 初始的車輛清單（測試與離線用）。正式執行時車輛來自後端發布的佈局（<see cref="LayoutHandler"/>），這裡留空。
+    /// </summary>
     public List<string> VehicleIds { get; set; } = [];
 
     /// <summary>遙測發送間隔；預設 200ms（每秒 5 次，文件中的初始候選值）。</summary>
     public TimeSpan TelemetryInterval { get; set; } = TimeSpan.FromMilliseconds(200);
 
     /// <summary>
-    /// 車輛啟動時的位置（公尺，X／Z 平面）。示範設定是各自的充電車位；沒有列出的車排在原點旁邊。
+    /// 初始清單裡的車的起始位置（公尺，X／Z 平面），只給測試與離線用。沒有列出的車排在原點旁邊。
+    /// 啟動後收到的第一個佈局不會把初始清單裡的車放回車位，車從這裡出發；之後的新版本才回到佈局裡的車位（見 <see cref="LayoutHandler"/>）。
     /// </summary>
     public Dictionary<string, RoutePoint> StartPositions { get; set; } = new(StringComparer.Ordinal);
 

@@ -1,4 +1,7 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using OpenFleet.Api.Layout;
 using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Data;
@@ -23,6 +26,7 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
     public DbSet<TruckSchedule> TruckSchedules => Set<TruckSchedule>();
     public DbSet<Shipment> Shipments => Set<Shipment>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
+    public DbSet<FactoryLayoutEntity> FactoryLayouts => Set<FactoryLayoutEntity>();
     public DbSet<RouteNode> RouteNodes => Set<RouteNode>();
     public DbSet<RouteEdge> RouteEdges => Set<RouteEdge>();
     public DbSet<TransportTask> TransportTasks => Set<TransportTask>();
@@ -313,6 +317,32 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
             e.HasKey(s => s.Code);
             e.Property(s => s.Code).HasMaxLength(32);
             e.Property(s => s.Name).HasMaxLength(64);
+            e.Property(s => s.Kind).HasConversion<string>().HasMaxLength(32);
+        });
+
+        model.Entity<FactoryLayoutEntity>(e =>
+        {
+            e.ToTable("FactoryLayouts");
+            e.HasKey(l => l.Id);
+            e.Property(l => l.Name).HasMaxLength(40);
+            e.HasIndex(l => l.Name).IsUnique();
+
+            // 同時只能有一份使用中、一份預設（部分唯一索引）。
+            e.HasIndex(l => l.IsActive).IsUnique().HasFilter("\"IsActive\"");
+            e.HasIndex(l => l.IsDefault).IsUnique().HasFilter("\"IsDefault\"");
+
+            // 文件整份存成 jsonb（和 MQTT、HTTP 共用 JsonDefaults，雜湊才穩定）。
+            e.Property(l => l.Document)
+                .HasColumnType("jsonb")
+                .HasConversion(
+                    new ValueConverter<FactoryLayoutDocument, string>(
+                        d => LayoutJson.Serialize(d),
+                        json => LayoutJson.Deserialize(json)),
+                    new ValueComparer<FactoryLayoutDocument>(
+                        (a, b) => LayoutJson.Serialize(a!) == LayoutJson.Serialize(b!),
+                        d => LayoutJson.Serialize(d).GetHashCode(),
+                        d => LayoutJson.Deserialize(LayoutJson.Serialize(d))));
+            e.Property(l => l.AppliedHash).HasMaxLength(64);
         });
 
         model.Entity<ProcessStep>(e =>

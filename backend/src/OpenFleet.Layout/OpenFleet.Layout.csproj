@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    工廠佈局的共用程式庫（純計算，不依賴資料庫與 MQTT）。刻意使用 netstandard2.1 + C# 9，
+    之後 Unity 的沙盒編輯也會引用同一份程式碼（第 4 步），所以不用 record、init 與 System.Text.Json。
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\OpenFleet.Contracts\OpenFleet.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -167,7 +167,7 @@ public sealed class MachineTests(PostgresFixture postgres)
             await db.Database.MigrateAsync();
             Assert.Equal(0, await db.Machines.CountAsync());
             Assert.Equal(new[] { "tool-store" }, await db.Stations.Select(s => s.Code).OrderBy(c => c).ToListAsync());
-            await DatabaseInitializer.SeedAsync(db, new FleetOptions());
+            await DatabaseInitializer.SeedAsync(db, TestLayouts.Default());
         }
 
         await using (var db = new OpenFleetDbContext(options))

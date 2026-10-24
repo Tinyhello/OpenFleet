@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using MQTTnet.Protocol;
 using OpenFleet.Api.Data;
 using OpenFleet.Api.Fleet;
+using OpenFleet.Api.Layout;
 using OpenFleet.Api.Transport;
 using OpenFleet.Contracts;
 using OpenFleet.Messaging;
@@ -18,15 +19,13 @@ public sealed class TrafficWorker(
     IServiceScopeFactory scopes,
     FleetStateStore fleet,
     TrafficController traffic,
-    RoadNetwork network,
+    ActiveLayout layout,
+    LayoutGate gate,
     IMqttPublisher publisher,
-    IOptions<FleetOptions> fleetOptions,
     IOptions<TrafficOptions> options,
     TimeProvider time,
     ILogger<TrafficWorker> logger) : BackgroundService
 {
-    private Dictionary<string, string>? _stationNodes;
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var timer = new PeriodicTimer(options.Value.ControlInterval, time);
@@ -35,6 +34,12 @@ public sealed class TrafficWorker(
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
+                // 套用佈局時暫停：等新佈局的資料都寫好，再從下一輪開始規劃。
+                if (!gate.TryEnter())
+                {
+                    continue;
+                }
+
                 try
                 {
                     await RunOnceAsync(stoppingToken);
@@ -42,6 +47,10 @@ public sealed class TrafficWorker(
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     logger.LogError(ex, "Traffic cycle failed; retrying next cycle.");
+                }
+                finally
+                {
+                    gate.Exit();
                 }
             }
         }
@@ -63,10 +72,6 @@ public sealed class TrafficWorker(
         await using (var scope = scopes.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<OpenFleetDbContext>();
-
-            // 站點不會在執行中改變：交接點對應的節點查一次就記住。
-            _stationNodes ??= (await db.Stations.AsNoTracking().ToListAsync(cancellationToken))
-                .ToDictionary(s => s.Code, s => network.Nearest(s.HandoffX, s.HandoffZ).Code, StringComparer.Ordinal);
 
             assignments = (await scope.ServiceProvider.GetRequiredService<TransportService>().GetMovementGoalsAsync(cancellationToken))
                 .ToDictionary(g => g.VehicleId, StringComparer.Ordinal);
@@ -117,9 +122,8 @@ public sealed class TrafficWorker(
     {
         if (assignment is null)
         {
-            return fleetOptions.Value.Parking.TryGetValue(vehicle.VehicleId, out var slot)
-                ? (network.Nearest(slot.X, slot.Z).Code, true)
-                : (null, false);
+            // 沒有任務的車回自己的車位（車位是佈局的一部分，換佈局時車會被放回車位）。
+            return layout.HomeNodeOf(vehicle.VehicleId) is { } home ? (home, true) : (null, false);
         }
 
         // 有效派工的目的站一定已經定好（派車時才定，P7 第 1a 步）；萬一沒有，這台車先不動，不替它規劃路徑。
@@ -129,8 +133,12 @@ public sealed class TrafficWorker(
             return (null, false);
         }
 
-        var pickup = _stationNodes![assignment.FromStationCode];
-        var destination = _stationNodes[assignment.ToStationCode];
+        if (!layout.TryStationNode(assignment.FromStationCode, out var pickup)
+            || !layout.TryStationNode(assignment.ToStationCode, out var destination))
+        {
+            logger.LogWarning("Vehicle {VehicleId} is assigned to a station outside the active layout; holding it in place.", vehicle.VehicleId);
+            return (null, false);
+        }
 
         return assignment.Status switch
         {

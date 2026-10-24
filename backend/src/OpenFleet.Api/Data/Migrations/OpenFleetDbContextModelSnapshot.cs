@@ -323,6 +323,56 @@ namespace OpenFleet.Api.Data.Migrations
                         });
                 });
 
+            modelBuilder.Entity("OpenFleet.Api.Data.FactoryLayoutEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("AppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("AppliedHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Document")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsDefault")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IsActive")
+                        .IsUnique()
+                        .HasFilter("\"IsActive\"");
+
+                    b.HasIndex("IsDefault")
+                        .IsUnique()
+                        .HasFilter("\"IsDefault\"");
+
+                    b.HasIndex("Name")
+                        .IsUnique();
+
+                    b.ToTable("FactoryLayouts", (string)null);
+                });
+
             modelBuilder.Entity("OpenFleet.Api.Data.InboxMessage", b =>
                 {
                     b.Property<string>("ProducerId")
@@ -1403,6 +1453,10 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<int?>("InboundCapacity")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Kind")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -1411,8 +1465,17 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<int?>("OutboundCapacity")
                         .HasColumnType("integer");
 
+                    b.Property<int>("Rotation")
+                        .HasColumnType("integer");
+
                     b.Property<int?>("StepSequence")
                         .HasColumnType("integer");
+
+                    b.Property<double>("X")
+                        .HasColumnType("double precision");
+
+                    b.Property<double>("Z")
+                        .HasColumnType("double precision");
 
                     b.HasKey("Code");
 
@@ -1796,6 +1859,15 @@ namespace OpenFleet.Api.Data.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.Property<bool>("DispatchEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<double?>("HomeX")
+                        .HasColumnType("double precision");
+
+                    b.Property<double?>("HomeZ")
+                        .HasColumnType("double precision");
+
+                    b.Property<bool>("InLayout")
                         .HasColumnType("boolean");
 
                     b.Property<string>("Type")
