@@ -24,17 +24,6 @@ namespace OpenFleet.Unity
         /// <summary>狀態列在還沒有佈局時顯示的文字。</summary>
         public const string WaitingText = "等待後端佈局…";
 
-        // 預設視角：目標是廠房中心往南 1.5 m，距離 56 m 乘上廠房相對預設佈局（76 × 30.4 m）的倍數，限制在 30～140 m。
-        // 規劃寫的參考大小是 60 × 30.4 m，那是第 1b 步把下排拉寬到 8 m 間距（廠房加寬到 76 m）之前的數字；
-        // 照它算預設佈局會拉遠到 71 m，機台上的進度條（固定大小的螢幕元件）會互相重疊，所以參考大小改成現在的預設廠房。
-        private const float HomeSouthShift = 1.5f;
-        private const float HomeDistance = 56f, HomeReferenceWidth = 76f, HomeReferenceDepth = 30.4f;
-        private const float HomeMinDistance = 30f, HomeMaxDistance = 140f;
-
-        // 右邊的操作面板蓋住畫面的一部分，目標往西偏一點，廠房才不會被面板切掉（第 1b 步決定預設視角 X = 3，
-        // 也就是廠房中心 X = 4 往西 1 m；距離 56 m 時 1 m，距離越遠偏移越多）。
-        private const float HomePanelShift = 1f / 56f;
-
         private PresentationController _presentation;
         private FleetView _fleet;
         private FleetMqttClient _mqtt;
@@ -221,9 +210,9 @@ namespace OpenFleet.Unity
         }
 
         /// <summary>
-        /// 預設視角依廠房大小：目標是廠房中心往南 1.5 m（再往西讓出面板的位置），距離 = 56 × max(寬 / 76, 深 / 30.4)，限制在 30～140。
-        /// 預設佈局（76 × 30.4 m）的結果和第 1b 步相同：目標 (3, 0, -1.5)、距離 56 m。
-        /// 廠房大小沒變時（例如只是換了機台位置）只更新預設視角，不動使用者目前的視角；第一次與大小改變時攝影機一起回到預設視角。
+        /// 預設視角（使用者 2026-10-25 決定）：整個廠房（外牆外框）都在沒被右邊操作面板蓋住的畫面裡，
+        /// 目標與距離由攝影機依視野與面板寬度算（FactoryCameraController.FitHome），面板收起或視窗大小改變時也會重算。
+        /// 廠房外框沒變時（例如只是換了機台位置）只更新預設視角，不動使用者目前的視角；第一次與外框改變時攝影機一起回到預設視角。
         /// </summary>
         private void ApplyHome(LayoutFloor floor)
         {
@@ -239,16 +228,8 @@ namespace OpenFleet.Unity
             var maxX = (float)bounds.MaxX;
             var minZ = (float)bounds.MinZ;
             var maxZ = (float)bounds.MaxZ;
-            var width = maxX - minX;
-            var depth = maxZ - minZ;
-            var distance = Mathf.Clamp(HomeDistance * Mathf.Max(width / HomeReferenceWidth, depth / HomeReferenceDepth), HomeMinDistance, HomeMaxDistance);
-            var target = new Vector3(
-                (minX + maxX) / 2f - distance * HomePanelShift,
-                0f,
-                (minZ + maxZ) / 2f - HomeSouthShift);
-
             var key = $"{minX}|{maxX}|{minZ}|{maxZ}";
-            camera.SetHome(target, distance, moveCamera: key != _homeFloorKey);
+            camera.FitHome(minX, maxX, minZ, maxZ, moveCamera: key != _homeFloorKey);
             _homeFloorKey = key;
         }
 

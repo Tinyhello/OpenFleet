@@ -10,6 +10,8 @@ namespace OpenFleet.Api.Production;
 /// 純計算、不碰資料庫；時間都是「從現在起幾秒」。
 /// 簡化（預估比實際樂觀的地方）：品管全部合格（不算反工與補做）；隨時有空車，搬運一趟是固定的估計時間（交接兩次加上路程），
 /// 不算等車與交通；站的容量不會滿；停機等刀的機台當作新刀馬上到；等料的框一直等（不預估採購什麼時候到）。
+/// 預估中才送到下一道的框，在「派車的那一刻」（上一道做完）就照實際派送規則（<see cref="StationSelector"/>）指定去哪一站，
+/// 之後只在那一站排隊、只由那一站的機台或爐處理，和一開始就排在站前的框一樣。
 /// </summary>
 public sealed class ScheduleForecaster
 {
@@ -72,7 +74,7 @@ public sealed class ScheduleForecaster
         /// <summary>逐件工序的每件加工秒數覆寫（工單規格的粗加工、精加工），以工序代碼查；沒有的用製程設定。</summary>
         public IReadOnlyDictionary<string, double>? SecondsPerPiece { get; init; }
 
-        /// <summary>Queued：已經排在哪一座工站前。預估中才到站的框是 null，同一道工序任何一站都可以接（共用排隊區）。</summary>
+        /// <summary>Queued：已經排在哪一座工站前。null 表示沒有指定站，同一道工序任何一站都可以接；預估中才到站的框不會是 null（派車時就指定了站）。</summary>
         public string? StationCode { get; init; }
 
         /// <summary>切料站實際要切的支數（整根圓棒切完，最後一框連多出來的一起切）；不經過切料、或還不知道時是 null。</summary>
@@ -258,7 +260,7 @@ public sealed class ScheduleForecaster
             _result.Blocked[lot.In.Id] = ForecastBlocker.WaitingForFurnaceFill;
             if (lot.Phase == LotPhase.Queued && StepOf(lot.Step) is { } step)
             {
-                // 已經排在某座爐前的記在那座爐；還沒到站的記在這道工序代碼最小的那一站。
+                // 排在某座爐前的記在那座爐（預估中才到站的框，派車時也已指定爐）；沒有指定站的才記在這道工序代碼最小的那一站。
                 var station = lot.QueuedStation ?? StationsOf(step.Sequence)[0];
                 if (!_result.Stranded.TryGetValue(station, out var stranded))
                 {
@@ -283,6 +285,7 @@ public sealed class ScheduleForecaster
             }
         }
 
+        var unbound = new List<SimLot>();
         foreach (var lot in _lots)
         {
             switch (lot.Phase)
@@ -298,10 +301,16 @@ public sealed class ScheduleForecaster
                         break;
                     }
 
-                    var to = lot.In.ToStation ?? StationOf(target, lot.In.FromStation);
-                    var from = lot.In.FromStation ?? to;
-                    var travel = Travel(from, to) + _rates.HandoverSeconds;
-                    At(lot.In.OnVehicle ? travel : travel + _rates.HandoverSeconds, () => Arrive(lot));
+                    if (lot.In.ToStation is { } bound)
+                    {
+                        MoveInitially(lot, bound);
+                    }
+                    else
+                    {
+                        // 還在等車、尚未指定站：等所有機台與爐的狀態都建好，再照派送規則挑站。
+                        unbound.Add(lot);
+                    }
+
                     break;
                 case LotPhase.Queued:
                     Enqueue(lot);
@@ -318,6 +327,21 @@ public sealed class ScheduleForecaster
             var lots = _lots.Where(l => run.LotIds.Contains(l.In.Id)).ToList();
             StartFurnace(step, run.StationCode, lots, run.StartedAt, run.RemainingSeconds / _rates.StepSpeed(step), running: true);
         }
+
+        foreach (var lot in unbound)
+        {
+            var target = StepOf(lot.Step)!;
+            MoveInitially(lot, ChooseStation(target, lot.In.FromStation, lot));
+        }
+    }
+
+    /// <summary>現在就在搬運中的框：記下目的站，抵達的時間是路程加交接（還在站上等車的多一次取料交接）。</summary>
+    private void MoveInitially(SimLot lot, string to)
+    {
+        lot.Destination = to;
+        var from = lot.In.FromStation ?? to;
+        var travel = Travel(from, to) + _rates.HandoverSeconds;
+        At(lot.In.OnVehicle ? travel : travel + _rates.HandoverSeconds, () => Arrive(lot));
     }
 
     /// <summary>已經在做的那一框：照剩下的件數算完成時間，刀具到壽命一樣要換刀。</summary>
@@ -367,7 +391,7 @@ public sealed class ScheduleForecaster
             return;
         }
 
-        // 已經排在某座站前的框只能由那座站的機台接；還沒到站的框，同一道工序任何一台都可以接。
+        // 框已經指定站（排隊中、或派車時挑好的）就只能由那座站的機台接；沒有指定站的才是同一道工序任何一台都可以接。
         var assigned = MachineAssignment.Assign(free, queue, l => SetupOf(l.In), step.UsesTool, l => l.In.Priority,
             canPair: (machine, lot) => lot.QueuedStation is null || lot.QueuedStation == _stationOfMachine[machine.Code]);
         foreach (var (picked, lot) in assigned)
@@ -439,8 +463,8 @@ public sealed class ScheduleForecaster
     }
 
     /// <summary>
-    /// 整爐工序開爐（一座爐一次）：這一座爐沒有在跑，而且排隊中的支數達到下限。排隊的料是排在這座爐前的，
-    /// 或還沒決定去哪座爐的（同一道工序的爐共用排隊區，預估的簡化）。急單、交期早的框先裝（<see cref="SchedulePriority"/>），
+    /// 整爐工序開爐（一座爐一次）：這一座爐沒有在跑，而且排隊中的支數達到下限。排隊的料是排在這座爐前的
+    /// （每一框派車時都已指定爐；只有沒有指定站的才算每一座爐都能裝）。急單、交期早的框先裝（<see cref="SchedulePriority"/>），
     /// 其餘照到站順序，裝到上限為止；一框不拆開，放不下的留到下一爐。規則同 <see cref="ProductionService"/>。
     /// </summary>
     private void DispatchFurnace(ProcessStep step, string furnace, List<SimLot> queue)
@@ -501,12 +525,12 @@ public sealed class ScheduleForecaster
     }
 
     /// <summary>
-    /// 這一座爐之後還會有料進來：工序在這道工序之前的（都會來），或這道工序還在搬運中、而且還沒定要去哪座爐、或定的就是這座爐。
-    /// 已經排在別座爐前、或已經在爐裡的，不算會再來（P7 第 1a 步；和 ProductionService 的規則相同）。
+    /// 這一座爐之後還會有料進來：工序在這道工序之前的（都會來，到時候才挑爐），或這道工序還在搬運中、而且送的就是這座爐（沒指定站的也算）。
+    /// 已經排在別座爐前、送往別座爐、或已經在爐裡的，不算會再來（P7 第 1a 步；和 ProductionService 的規則相同）。
     /// </summary>
     private static bool MoreComing(ProcessStep step, string furnace, IReadOnlyList<SimLot> active) => active.Any(l =>
         l.Step < step.Sequence
-        || (l.Step == step.Sequence && l.Phase == LotPhase.Moving && (l.In.ToStation is null || l.In.ToStation == furnace)));
+        || (l.Step == step.Sequence && l.Phase == LotPhase.Moving && (l.Destination is null || l.Destination == furnace)));
 
     /// <summary>
     /// 測試模式的規則：爐空著、爐前有料等超過設定的秒數就直接開爐（使用者 2026-10-23）。
@@ -581,16 +605,20 @@ public sealed class ScheduleForecaster
             return;
         }
 
-        lot.Step = next.Sequence;
-        lot.Phase = LotPhase.Moving;
+        // 上一道做完就是派車的那一刻：此時挑好下一道的站（和實際派車一樣，後面才派的框看得到前面框已經選了哪一站）。
         lot.QueuedStation = null;
-        var to = StationOf(next, station);
+        lot.Destination = null;
+        lot.Step = next.Sequence;
+        var to = ChooseStation(next, station, lot);
+        lot.Phase = LotPhase.Moving;
+        lot.Destination = to;
         At(at + Hop(station, to), () => Arrive(lot));
     }
 
     private void Arrive(SimLot lot)
     {
         lot.ArrivedAt = _now;
+        lot.QueuedStation = lot.Destination;
         Enqueue(lot);
     }
 
@@ -619,18 +647,51 @@ public sealed class ScheduleForecaster
     private ProcessStep StepOfStation(string station) =>
         StepOf(_stepOfStation[station]) ?? throw new InvalidOperationException($"Station {station} has no process step.");
 
-    /// <summary>送到某道工序的站：沒有來源站時取代碼最小的；有來源時取離來源最近的（距離相同時代碼小的）。</summary>
-    private string StationOf(ProcessStep step, string? from)
+    /// <summary>
+    /// 替一框挑下一道工序要去哪一站。只有一站就是那一站；有好幾站時把預估目前的狀態整理成
+    /// <see cref="StationSelector"/> 的候選（和 TransportService 派車時一樣的規則，不另寫一份）：
+    /// 逐件工序看站上機台的換線排名與是否馬上能做；整爐工序看爐是否在跑與爐前（排隊加送來途中）的支數。
+    /// 預估不計站的容量，所以每一站都放得下。<paramref name="from"/> 為 null（不知道從哪出發）時路程都當 0。
+    /// </summary>
+    private string ChooseStation(ProcessStep step, string? from, SimLot lot)
     {
-        var candidates = StationsOf(step.Sequence);
-        if (candidates.Count == 0)
+        var stations = StationsOf(step.Sequence);
+        if (stations.Count == 0)
         {
             throw new InvalidOperationException($"Process step {step.Code} has no station.");
         }
 
-        return from is null
-            ? candidates[0]
-            : candidates.OrderBy(c => Travel(from, c)).ThenBy(c => c, StringComparer.Ordinal).First();
+        if (stations.Count == 1)
+        {
+            return stations[0];
+        }
+
+        // 路程用秒表示（公尺除以固定車速），排序結果和用公尺相同。
+        double Route(string code) => from is null ? 0 : Travel(from, code);
+
+        string? chosen;
+        if (step.Kind == ProcessStepKind.Piece)
+        {
+            var setup = SetupOf(lot.In);
+            chosen = StationSelector.PickPiece(stations.Select(code =>
+            {
+                var machines = _machines.Values.Where(m => m.In.StationCode == code).ToList();
+                var rank = machines.Count == 0 ? int.MaxValue : machines.Min(m => MachineAssignment.Rank(m.Last, setup, step.UsesTool));
+                return new StationSelector.PieceCandidate(code, rank, machines.Any(m => !m.Busy), Route(code));
+            }));
+        }
+        else
+        {
+            var queue = _queues.GetValueOrDefault(step.Sequence);
+            chosen = StationSelector.PickFurnace(stations.Select(code =>
+            {
+                var waiting = (queue?.Where(l => l.QueuedStation == code).Sum(l => l.In.Quantity) ?? 0)
+                    + _lots.Where(l => l.Phase == LotPhase.Moving && l.Step == step.Sequence && l.Destination == code).Sum(l => l.In.Quantity);
+                return new StationSelector.FurnaceCandidate(code, _busyFurnaces.Contains(code), waiting, Route(code));
+            }));
+        }
+
+        return chosen ?? stations[0];
     }
 
     /// <summary>搬運一趟：取料交接、路程、卸料交接。</summary>
@@ -662,8 +723,11 @@ public sealed class ScheduleForecaster
         /// <summary>到站排隊的時間；一開始就在排隊的框是實際到站的時間。</summary>
         public double ArrivedAt { get; set; } = input.QueuedAt;
 
-        /// <summary>目前排在哪一座站前。只在這道工序的排隊中有；離開這道工序（送往下一道）就清掉，之後是共用排隊區。</summary>
+        /// <summary>目前排在哪一座站前。只在這道工序的排隊中有；離開這道工序（送往下一道）就清掉，到站時再填成派車時挑的站。</summary>
         public string? QueuedStation { get; set; } = input.StationCode;
+
+        /// <summary>搬運中：派車時挑好的目的站；還沒挑就是 null。</summary>
+        public string? Destination { get; set; }
     }
 
     private sealed class SimMachine(MachineInput input)

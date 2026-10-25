@@ -98,7 +98,7 @@ namespace OpenFleet.Unity
         private string _dragNode;
         private bool _dragNodeArmed;
         private Vector2 _dragNodePress;
-        private double _nodeStartX, _nodeStartZ, _nodeTargetX, _nodeTargetZ;
+        private double _nodeStartX, _nodeStartZ, _nodeTargetX, _nodeTargetZ, _nodeGrabX, _nodeGrabZ;
         private bool _drawing;
         private RoadSnap _drawStart;
         private double _drawEndX, _drawEndZ;
@@ -124,6 +124,8 @@ namespace OpenFleet.Unity
         private bool _floorDragArmed;
         private Vector2 _floorDragPress;
         private double _floorPressX, _floorPressZ, _floorTargetX, _floorTargetZ;
+        // 抓取偏移：按下時「控制點位置 − 滑鼠位置」，拖曳時目標 = 滑鼠 + 偏移，沒有按在控制點正中央也不會跳（牆整段拖用位移量，不需要）。
+        private double _floorGrabX, _floorGrabZ;
         private Transform _floorRoot;
         private readonly List<Transform> _floorLines = new List<Transform>();
         private readonly List<Transform> _floorCorners = new List<Transform>();
@@ -936,7 +938,7 @@ namespace OpenFleet.Unity
                 // 交接點的節點跟著模組走，不能拖（面板會提示）。
                 if (!_session.IsHandoffNode(nodeCode))
                 {
-                    BeginNodeDrag(nodeCode, screen);
+                    BeginNodeDrag(nodeCode, screen, x, z);
                 }
 
                 return;
@@ -1102,7 +1104,7 @@ namespace OpenFleet.Unity
 
         // ---- 路線：拖曳節點 ----
 
-        private void BeginNodeDrag(string code, Vector2 screen)
+        private void BeginNodeDrag(string code, Vector2 screen, double x, double z)
         {
             var node = FindNode(code);
             if (node == null)
@@ -1115,6 +1117,9 @@ namespace OpenFleet.Unity
             _dragNodePress = screen;
             _nodeStartX = _nodeTargetX = node.X;
             _nodeStartZ = _nodeTargetZ = node.Z;
+            // 抓取偏移：按在節點旁邊（最遠 0.5 m）時，節點不會跳到滑鼠下面。
+            _nodeGrabX = node.X - x;
+            _nodeGrabZ = node.Z - z;
         }
 
         /// <summary>
@@ -1146,6 +1151,8 @@ namespace OpenFleet.Unity
                 return;
             }
 
+            x += _nodeGrabX;
+            z += _nodeGrabZ;
             var target = NearestOtherNode(_dragNode, x, z, LayoutRules.SnapNodeRadius);
             var snapped = target != null;
             if (snapped)
@@ -1581,7 +1588,7 @@ namespace OpenFleet.Unity
             if (Distance(x, z, gateHandle.X, gateHandle.Z) <= GatePickRadius * far)
             {
                 SetFloorSelection(-1, -1);
-                BeginFloorDrag(FloorDrag.Gate, -1, screen, x, z);
+                BeginFloorDrag(FloorDrag.Gate, -1, screen, x, z, gateHandle.X, gateHandle.Z);
                 return;
             }
 
@@ -1600,7 +1607,7 @@ namespace OpenFleet.Unity
             if (corner >= 0)
             {
                 SelectFloorCorner(corner);
-                BeginFloorDrag(FloorDrag.Corner, corner, screen, x, z);
+                BeginFloorDrag(FloorDrag.Corner, corner, screen, x, z, outline[corner].X, outline[corner].Z);
                 return;
             }
 
@@ -1650,7 +1657,7 @@ namespace OpenFleet.Unity
             return (hit.X + normal.X * GateHandleOffset, hit.Z + normal.Z * GateHandleOffset);
         }
 
-        private void BeginFloorDrag(FloorDrag kind, int index, Vector2 screen, double x, double z)
+        private void BeginFloorDrag(FloorDrag kind, int index, Vector2 screen, double x, double z, double? handleX = null, double? handleZ = null)
         {
             _floorDrag = kind;
             _floorDragIndex = index;
@@ -1658,6 +1665,13 @@ namespace OpenFleet.Unity
             _floorDragPress = screen;
             _floorPressX = _floorTargetX = x;
             _floorPressZ = _floorTargetZ = z;
+            _floorGrabX = handleX.HasValue ? handleX.Value - x : 0d;
+            _floorGrabZ = handleZ.HasValue ? handleZ.Value - z : 0d;
+            if (handleX.HasValue && handleZ.HasValue)
+            {
+                _floorTargetX = handleX.Value;
+                _floorTargetZ = handleZ.Value;
+            }
         }
 
         /// <summary>
@@ -1676,8 +1690,9 @@ namespace OpenFleet.Unity
                 _floorDragArmed = true;
             }
 
-            _floorTargetX = x;
-            _floorTargetZ = z;
+            // 角與大門用「滑鼠 + 抓取偏移」（對齊格距由後面的 Snap 做）；整段牆用滑鼠本身，結束時再減去按下的位置。
+            _floorTargetX = x + _floorGrabX;
+            _floorTargetZ = z + _floorGrabZ;
             var outline = _session.FloorOutline();
             var gate = _session.GateCenter();
             var gatePoint = (X: gate.X, Z: gate.Z);
@@ -1687,8 +1702,8 @@ namespace OpenFleet.Unity
             switch (_floorDrag)
             {
                 case FloorDrag.Corner when _floorDragIndex < n:
-                    outline[_floorDragIndex].X = LayoutEditSession.Snap(x, grid);
-                    outline[_floorDragIndex].Z = LayoutEditSession.Snap(z, grid);
+                    outline[_floorDragIndex].X = LayoutEditSession.Snap(_floorTargetX, grid);
+                    outline[_floorDragIndex].Z = LayoutEditSession.Snap(_floorTargetZ, grid);
                     break;
 
                 case FloorDrag.Wall when _floorDragIndex < n:
@@ -1705,7 +1720,7 @@ namespace OpenFleet.Unity
                 }
 
                 case FloorDrag.Gate:
-                    gatePoint = ProjectGate(outline, x, z);
+                    gatePoint = ProjectGate(outline, _floorTargetX, _floorTargetZ);
                     break;
             }
 
@@ -1883,14 +1898,16 @@ namespace OpenFleet.Unity
             var to = FloorGeometry.PointOnWall(outline, gateHit.Index, length <= 0 ? 0 : Math.Min(length, gateHit.Along + half) / length);
             _gateSpan = EnsureFloorItem(_gateSpan, true, "Gate Span");
             PlaceLine(_gateSpan, from.X, from.Z, to.X, to.Z, 0.4f, FloorToolY + 0.018f);
-            Paint(_gateSpan.GetComponent<Renderer>(), Colors.GateHandle);
+            // 這段牆放不下大門（和驗證的 gate-invalid 同一條規則）：控制點與範圍線畫成錯誤色。
+            var gateColor = LayoutScene.GateHold(outline, gatePoint) == null ? Colors.LayoutError : Colors.GateHandle;
+            Paint(_gateSpan.GetComponent<Renderer>(), gateColor);
             Show(_gateSpan, true);
 
             var handle = GateHandlePoint(outline, gatePoint.X, gatePoint.Z);
             _gateHandle = EnsureFloorItem(_gateHandle, false, "Gate Handle");
             _gateHandle.localPosition = new Vector3((float)handle.X, FloorToolY + 0.02f, (float)handle.Z);
             _gateHandle.localScale = new Vector3(GateHandleSize * far, 0.02f, GateHandleSize * far);
-            Paint(_gateHandle.GetComponent<Renderer>(), Colors.GateHandle);
+            Paint(_gateHandle.GetComponent<Renderer>(), gateColor);
             Show(_gateHandle, true);
         }
 

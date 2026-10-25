@@ -22,6 +22,22 @@ namespace OpenFleet.Unity
     {
         private const float RefreshSeconds = 1f;
 
+        /// <summary>
+        /// 面板寬度與離視窗右緣的距離（UI 縮放 100% 時的像素）。預設視角用它算出被面板蓋住的寬度，讓整個廠房落在面板左邊。
+        /// </summary>
+        public const float PanelWidth = 380f, PanelMargin = 10f;
+
+        /// <summary>讀不到後端設定（後端比 Unity 晚啟動）時，自動重試的間隔（秒）；和佈局的載入一樣 3 秒。</summary>
+        private const float RetrySeconds = 3f;
+
+        private static bool _panelShown;
+
+        /// <summary>
+        /// 面板蓋住視窗右側的寬度（螢幕像素，已乘上介面縮放；多留一點空隙）。面板收起、沒有面板（-hide-panels）時是 0。
+        /// 預設視角（FactoryCameraController）據此把廠房擺在剩下的畫面中央。
+        /// </summary>
+        public static float CoveredPixels => _panelShown ? (PanelWidth + PanelMargin + PanelMargin) * PresentationController.UiScale : 0f;
+
         /// <summary>按「套用」時，把各工序滑桿上的值寫回要送出的設定。</summary>
         private readonly List<Action> _stepAppliers = new List<Action>();
         private readonly Dictionary<string, string> _stationNames = new Dictionary<string, string>();
@@ -89,7 +105,8 @@ namespace OpenFleet.Unity
             _root.pickingMode = PickingMode.Ignore;
             ApplyFont(_root);
             Build();
-            StartCoroutine(LoadSettings());
+            _panelShown = true;
+            StartCoroutine(LoadSettingsUntilReady());
             StartCoroutine(RefreshLoop());
             OnLayoutPanelEnabled();
         }
@@ -97,6 +114,7 @@ namespace OpenFleet.Unity
         private void OnDisable()
         {
             StopAllCoroutines();
+            _panelShown = false;
             PointerOverPanel = false;
             TextInputFocused = false;
             OnLayoutPanelDisabled();
@@ -139,12 +157,28 @@ namespace OpenFleet.Unity
         /// </summary>
         public static void ApplyFont(VisualElement root)
         {
-            var font = Font.CreateDynamicFontFromOSFont(
-                new[] { "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC" }, 16);
+            var font = CjkFont();
             if (font != null)
             {
                 root.style.unityFontDefinition = new StyleFontDefinition(font);
             }
+        }
+
+        private static Font _cjkFont;
+
+        /// <summary>
+        /// 作業系統的中文字型（建一次，各處共用）。UI Toolkit 與左上的 IMGUI 狀態框都用它，
+        /// 預設字型沒有中文字，IMGUI 會把中文畫成像被劃掉的方框。找不到時回傳 null，維持預設字型。
+        /// </summary>
+        public static Font CjkFont()
+        {
+            if (_cjkFont == null)
+            {
+                _cjkFont = Font.CreateDynamicFontFromOSFont(
+                    new[] { "Microsoft JhengHei UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC" }, 16);
+            }
+
+            return _cjkFont;
         }
 
         private void Build()
@@ -154,7 +188,7 @@ namespace OpenFleet.Unity
             s.position = Position.Absolute;
             s.top = 10;
             s.right = 10;
-            s.width = 380;
+            s.width = PanelWidth;
             s.maxHeight = Length.Percent(92);
             s.backgroundColor = Colors.Panel;
             s.color = Color.white;
@@ -387,12 +421,47 @@ namespace OpenFleet.Unity
             _testMode.style.unityFontStyleAndWeight = on ? FontStyle.Bold : FontStyle.Normal;
         }
 
-        private IEnumerator LoadSettings()
+        private const string WaitingBackend = "等待後端連線，連上後會自動讀取設定…";
+
+        /// <summary>
+        /// 啟動時讀設定與規格：後端比 Unity 晚啟動時讀不到，每 <see cref="RetrySeconds"/> 秒重試到成功為止
+        /// （重試期間不跳錯誤訊息，只提示在等後端；成功後規格清單、設定滑桿與站點名稱都已經更新）。
+        /// </summary>
+        private IEnumerator LoadSettingsUntilReady()
         {
+            while (true)
+            {
+                yield return LoadSettings(true);
+                if (_settingsReady)
+                {
+                    if (_status != null && _status.text == WaitingBackend)
+                    {
+                        SetStatus(string.Empty, Color.white);
+                    }
+
+                    yield break;
+                }
+
+                if (_status != null && _status.text.Length == 0)
+                {
+                    SetStatus(WaitingBackend, Colors.Muted);
+                }
+
+                yield return new WaitForSecondsRealtime(RetrySeconds);
+            }
+        }
+
+        private bool _settingsReady;
+
+        private IEnumerator LoadSettings() => LoadSettings(false);
+
+        private IEnumerator LoadSettings(bool quiet)
+        {
+            _settingsReady = false;
             using (var request = UnityWebRequest.Get($"{Api}/api/settings"))
             {
                 yield return request.SendWebRequest();
-                if (!Succeeded(request, "讀取設定"))
+                if (quiet ? request.result != UnityWebRequest.Result.Success : !Succeeded(request, "讀取設定"))
                 {
                     yield break;
                 }
@@ -401,7 +470,11 @@ namespace OpenFleet.Unity
                 _orderQuantity.value = _settings.LotQuantity;
             }
 
-            yield return LoadSpecs();
+            yield return LoadSpecs(quiet);
+            if (!_specsReady)
+            {
+                yield break;
+            }
 
             // 站點名稱用來把料框的位置顯示成中文。
             using (var request = UnityWebRequest.Get($"{Api}/api/stations"))
@@ -414,6 +487,8 @@ namespace OpenFleet.Unity
                     {
                         _stationNames[station.Code] = station.Name;
                     }
+
+                    _settingsReady = true;
                 }
             }
         }
@@ -879,6 +954,7 @@ namespace OpenFleet.Unity
         private void ShowPanel(bool visible)
         {
             _panel.style.display = visible ? DisplayStyle.Flex : DisplayStyle.None;
+            _panelShown = visible;
             _expand.style.display = visible ? DisplayStyle.None : DisplayStyle.Flex;
         }
 

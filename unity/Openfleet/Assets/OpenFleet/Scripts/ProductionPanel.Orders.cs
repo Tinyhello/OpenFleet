@@ -99,16 +99,21 @@ namespace OpenFleet.Unity
             content.Add(scroll);
         }
 
-        /// <summary>沖頭規格的清單，下單時選。</summary>
-        private IEnumerator LoadSpecs()
+        private bool _specsReady;
+
+        /// <summary>沖頭規格的清單，下單時選。<paramref name="quiet"/> 為 true 時失敗不顯示錯誤（自動重試用）。</summary>
+        private IEnumerator LoadSpecs(bool quiet = false)
         {
+            _specsReady = false;
             using (var request = UnityWebRequest.Get($"{Api}/api/catalog/specs"))
             {
                 yield return request.SendWebRequest();
-                if (!Succeeded(request, "讀取規格"))
+                if (quiet ? request.result != UnityWebRequest.Result.Success : !Succeeded(request, "讀取規格"))
                 {
                     yield break;
                 }
+
+                _specsReady = true;
 
                 var selected = SelectedSpec()?.Code;
                 _specs.Clear();

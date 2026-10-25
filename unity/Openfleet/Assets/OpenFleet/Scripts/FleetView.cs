@@ -237,8 +237,11 @@ namespace OpenFleet.Unity
 
             _styleScale = scale;
             var size = Mathf.RoundToInt(12 * scale);
-            _labelStyle = new GUIStyle(GUI.skin.label) { fontSize = size };
-            _buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = size };
+            // 預設的 IMGUI 字型沒有中文字（「等待後端佈局…」會被畫成像被劃掉的方框），改用和操作面板相同的作業系統中文字型；
+            // 找不到字型時 font 是 null，維持預設字型。英文在這個字型下也正常。
+            var font = ProductionPanel.CjkFont();
+            _labelStyle = new GUIStyle(GUI.skin.label) { fontSize = size, font = font };
+            _buttonStyle = new GUIStyle(GUI.skin.button) { fontSize = size, font = font };
         }
     }
 }

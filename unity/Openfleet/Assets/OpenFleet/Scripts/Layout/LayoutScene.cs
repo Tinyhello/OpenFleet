@@ -23,6 +23,9 @@ namespace OpenFleet.Unity
         // 牆與大門的尺寸沿用第 1b 步的場景。大門寬度 10 m 是 Claude 挑的，和驗證用同一個常數。
         private const float WallHeight = 1.2f, WallThickness = 0.2f, ApronDepth = 5f, GateWidth = (float)LayoutRules.GateWidth;
 
+        // 轉角太尖（轉折超過這個角度）時，牆端的斜接延伸固定在這個角度的量，另外在頂點放一根圓形角柱把外側的缺口蓋住。Claude 暫定。
+        private const float SharpTurnDegrees = 140f, SharpCornerPostDiameter = 0.6f;
+
         // 路網鋪面（寬 1.6 m）、中心黃線（寬 0.06 m）、節點補角的圓（直徑 1.6 m）：規劃時決定的數字。
         private const float RoadWidth = 1.6f, RoadLineWidth = 0.06f;
         private const float RoadHeight = 0.01f, RoadLineHeight = 0.004f, RoadLineY = 0.012f;
@@ -132,17 +135,20 @@ namespace OpenFleet.Unity
             BuildFloorMesh(env, outline);
 
             var gate = LayoutFloorShape.Gate(floor);
-            // 大門不在任何牆上時（驗證會報 gate-invalid）仍畫在最近的那段牆上，編輯時才看得到它在哪裡。
-            var gateHit = FloorGeometry.NearestWall(outline, gate.X, gate.Z);
+            // 大門放不下（不在牆上、牆太短、離牆端太近：和驗證的 gate-invalid 同一條規則）時不挖缺口、不畫門柱與門前空地，牆維持封閉。
+            // 一般模式不會有這種佈局（套用不了），編輯模式才看得到；那時由編輯器把大門控制點畫成錯誤色。
+            var gateHit = GateHold(outline, (gate.X, gate.Z));
             var gateWall = gateHit != null ? gateHit.Index : -1;
 
             for (var i = 0; i < outline.Count; i++)
             {
                 var start = FloorGeometry.WallStart(outline, i);
                 var end = FloorGeometry.WallEnd(outline, i);
+                var extendA = CornerExtension(outline, i);
+                var extendB = CornerExtension(outline, (i + 1) % outline.Count);
                 if (i != gateWall)
                 {
-                    WallSegment(env, "Wall " + i, start, end, true, true);
+                    WallSegment(env, "Wall " + i, start, end, extendA, extendB);
                     continue;
                 }
 
@@ -153,12 +159,12 @@ namespace OpenFleet.Unity
                 var openTo = along + GateWidth / 2f;
                 if (openFrom > 0f)
                 {
-                    WallSegment(env, "Wall " + i + " A", start, FloorGeometry.PointOnWall(outline, i, openFrom / length), true, false);
+                    WallSegment(env, "Wall " + i + " A", start, FloorGeometry.PointOnWall(outline, i, openFrom / length), extendA, 0f);
                 }
 
                 if (openTo < length)
                 {
-                    WallSegment(env, "Wall " + i + " B", FloorGeometry.PointOnWall(outline, i, openTo / length), end, false, true);
+                    WallSegment(env, "Wall " + i + " B", FloorGeometry.PointOnWall(outline, i, openTo / length), end, 0f, extendB);
                 }
 
                 var normal = FloorGeometry.WallOutwardNormal(outline, i);
@@ -167,6 +173,15 @@ namespace OpenFleet.Unity
                 Box(door, "Apron", new Vector3(0f, -0.05f, ApronDepth / 2f), new Vector3(GateWidth, 0.1f, ApronDepth), _materials.Aisle);
                 Box(door, "Threshold", new Vector3(0f, 0.01f, 0f), new Vector3(GateWidth, 0.02f, 0.3f), _materials.LaneLine);
                 BuildMainGate(door);
+            }
+
+            // 太尖的轉角（轉折超過 SharpTurnDegrees）牆端的延伸量有上限，外側會留一個小缺口，補一根圓形的角柱。
+            for (var v = 0; v < outline.Count; v++)
+            {
+                if (TurnAngle(outline, v) > SharpTurnDegrees)
+                {
+                    Cylinder(env, "Corner Post", new Vector3((float)outline[v].X, WallHeight / 2f, (float)outline[v].Z), SharpCornerPostDiameter, WallHeight, _materials.Wall);
+                }
             }
 
             // 柱子：每段牆從起點（外牆的順序）往後 2 m 起每 8 m 一根，排在站與站之間，不擋在站點前面。
@@ -245,11 +260,71 @@ namespace OpenFleet.Unity
         }
 
         /// <summary>
-        /// 一段牆（從 a 到 b）：方塊沿牆方向旋轉，高 1.2 m、厚 0.2 m。
-        /// <paramref name="extendA"/>／<paramref name="extendB"/> 為 true 時那一端多伸出半個牆厚，把轉角補滿
-        /// （直角轉角完全補滿；斜的轉角外側會留一個小缺口，是已知的外觀限制）。
+        /// 轉角處牆端要多伸出的長度：外側斜接，兩段牆的外緣剛好在斜接點相交，所以是 牆厚/2 × tan(轉折角/2)；
+        /// 直角（轉折 90°）時就是半個牆厚，和原本相同；直牆（轉折 0°）不用延伸。
+        /// 轉折越大延伸越長，超過 <see cref="SharpTurnDegrees"/> 就固定在上限，剩下的缺口由角柱補。
         /// </summary>
-        private void WallSegment(Transform env, string name, (double X, double Z) a, (double X, double Z) b, bool extendA, bool extendB)
+        private static float CornerExtension(List<LayoutPoint> outline, int vertex)
+        {
+            var turn = Mathf.Min(TurnAngle(outline, vertex), SharpTurnDegrees);
+            return WallThickness / 2f * Mathf.Tan(turn * Mathf.Deg2Rad / 2f);
+        }
+
+        /// <summary>頂點處外牆轉折的角度（度）：0 是直的、90 是直角、接近 180 是幾乎折回去。有一段牆長度為 0 時算 0。</summary>
+        private static float TurnAngle(List<LayoutPoint> outline, int vertex)
+        {
+            var count = outline.Count;
+            var previous = outline[(vertex + count - 1) % count];
+            var current = outline[vertex];
+            var next = outline[(vertex + 1) % count];
+            var ax = (float)(current.X - previous.X);
+            var az = (float)(current.Z - previous.Z);
+            var bx = (float)(next.X - current.X);
+            var bz = (float)(next.Z - current.Z);
+            var la = Mathf.Sqrt(ax * ax + az * az);
+            var lb = Mathf.Sqrt(bx * bx + bz * bz);
+            if (la < 0.01f || lb < 0.01f)
+            {
+                return 0f;
+            }
+
+            return Mathf.Acos(Mathf.Clamp((ax * bx + az * bz) / (la * lb), -1f, 1f)) * Mathf.Rad2Deg;
+        }
+
+        /// <summary>
+        /// 大門放得下的那段牆的命中資訊；放不下（不在牆上、牆太短、離牆端太近）時是 null。
+        /// 規則和後端驗證的 gate-invalid 相同：大門中心在牆上（0.05 m 內），牆至少 11 m，門的兩端離牆端點各至少 0.5 m。
+        /// 編輯器用同一個方法決定大門控制點要不要畫成錯誤色。
+        /// </summary>
+        public static WallHit GateHold(List<LayoutPoint> outline, (double X, double Z) gate)
+        {
+            var half = LayoutRules.GateWidth / 2 + LayoutRules.GateMargin;
+            for (var i = 0; i < outline.Count; i++)
+            {
+                var hit = FloorGeometry.ProjectOnWall(outline, i, gate.X, gate.Z);
+                if (hit.Distance > LayoutRules.GateOnWallTolerance)
+                {
+                    continue;
+                }
+
+                var length = FloorGeometry.WallLength(outline, i);
+                if (length >= 2 * half - LayoutRules.Tolerance
+                    && hit.Along >= half - LayoutRules.GateOnWallTolerance
+                    && length - hit.Along >= half - LayoutRules.GateOnWallTolerance)
+                {
+                    return hit;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 一段牆（從 a 到 b）：方塊沿牆方向旋轉，高 1.2 m、厚 0.2 m。
+        /// <paramref name="extendA"/>／<paramref name="extendB"/> 是那一端多伸出的長度（轉角的斜接延伸，見 <see cref="CornerExtension"/>；
+        /// 大門缺口那一端是 0），直角時是半個牆厚，轉角補滿。
+        /// </summary>
+        private void WallSegment(Transform env, string name, (double X, double Z) a, (double X, double Z) b, float extendA, float extendB)
         {
             var dx = (float)(b.X - a.X);
             var dz = (float)(b.Z - a.Z);
@@ -259,8 +334,8 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            var from = extendA ? -WallThickness / 2f : 0f;
-            var to = length + (extendB ? WallThickness / 2f : 0f);
+            var from = -extendA;
+            var to = length + extendB;
             var mid = (from + to) / 2f;
             var center = new Vector3((float)a.X + dx / length * mid, WallHeight / 2f, (float)a.Z + dz / length * mid);
             // 方塊的長邊是區域 Z 軸；yaw 從 +Z 往 +X 轉。

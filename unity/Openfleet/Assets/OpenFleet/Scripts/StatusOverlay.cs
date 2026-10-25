@@ -343,7 +343,21 @@ namespace OpenFleet.Unity
             element.style.display = DisplayStyle.Flex;
             element.style.left = position.x;
             element.style.top = position.y;
+
+            // 進度條隨距離縮小：56 m 以內維持原本的大小，更遠時和距離成反比（世界裡的大小不變，鄰近機台的條不會互相壓到）。
+            // 縮到下限 MinBarScale 就不再變小（再小就看不清楚了）。數字是 Claude 暫定。
+            var scale = Mathf.Clamp(BarReferenceDistance / Mathf.Max(0.1f, Vector3.Distance(_camera.transform.position, world)), MinBarScale, 1f);
+            element.style.scale = new Scale(new Vector3(scale, scale, 1f));
         }
+
+        /// <summary>
+        /// 進度條維持原本大小的最遠攝影機距離（公尺）。以前是 56 m（舊預設視角），但那時相鄰機台的條就已經快碰到（機台間距 8 m，
+        /// 條寬約 10 m 的世界尺寸）；新的預設視角更遠，要讓 8 m 間距的條不互相蓋住，參考距離取 40 m（Claude 暫定）。
+        /// </summary>
+        private const float BarReferenceDistance = 40f;
+
+        /// <summary>進度條縮小的下限（倍數）。</summary>
+        private const float MinBarScale = 0.4f;
 
         /// <summary>浮動小面板的共同外觀：深色半透明底，以自己的中心對齊定位點。</summary>
         private static void Frame(VisualElement element)
