@@ -37,13 +37,30 @@ namespace OpenFleet.Contracts
         public List<LayoutRoadEdge> RoadEdges { get; set; } = new List<LayoutRoadEdge>();
     }
 
-    /// <summary>地面的範圍（公尺，X／Z）。</summary>
+    /// <summary>
+    /// 地面（公尺，X／Z）。形狀是 <see cref="Outline"/> 圍出的多邊形；舊文件沒有 Outline，用 Min／Max 的矩形。
+    /// 讀形狀一律經過共用程式庫的 LayoutFloorShape，不要直接讀 Min／Max。
+    /// </summary>
     public sealed class LayoutFloor
     {
+        /// <summary>舊文件的矩形；有 Outline 時是外框（編輯器在每次修改後更新）。</summary>
         public double MinX { get; set; }
         public double MaxX { get; set; }
         public double MinZ { get; set; }
         public double MaxZ { get; set; }
+
+        /// <summary>外牆頂點，依序相連、最後一點接回第一點（第 i 段牆是 Outline[i]→Outline[i+1]）。null 或空表示用 Min／Max 的矩形（舊文件）。</summary>
+        public List<LayoutPoint>? Outline { get; set; }
+
+        /// <summary>大門中心（必須落在某段牆上）。null 表示舊行為：最西邊那段牆的中點。</summary>
+        public LayoutPoint? Gate { get; set; }
+    }
+
+    /// <summary>平面上的一點（公尺，X／Z）。</summary>
+    public sealed class LayoutPoint
+    {
+        public double X { get; set; }
+        public double Z { get; set; }
     }
 
     public sealed class LayoutModule
@@ -125,6 +142,9 @@ namespace OpenFleet.Contracts
         public List<string> ModuleCodes { get; set; } = new List<string>();
         public List<string> NodeCodes { get; set; } = new List<string>();
         public List<LayoutRoadEdge> Edges { get; set; } = new List<LayoutRoadEdge>();
+
+        /// <summary>有問題的外牆編號（第 i 段牆是 Outline[i]→Outline[i+1]），編輯器把這些牆畫紅。沒有牆的問題為空。</summary>
+        public List<int> WallIndices { get; set; } = new List<int>();
     }
 
     public sealed class LayoutValidationDto

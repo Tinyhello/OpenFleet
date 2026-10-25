@@ -203,7 +203,7 @@ namespace OpenFleet.Layout
             return true;
         }
 
-        private static bool SegmentsIntersect((double X, double Z) p1, (double X, double Z) p2, (double X, double Z) p3, (double X, double Z) p4)
+        internal static bool SegmentsIntersect((double X, double Z) p1, (double X, double Z) p2, (double X, double Z) p3, (double X, double Z) p4)
         {
             var d1 = Cross(p3, p4, p1);
             var d2 = Cross(p3, p4, p2);

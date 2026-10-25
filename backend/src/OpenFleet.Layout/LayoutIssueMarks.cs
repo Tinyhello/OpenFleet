@@ -7,7 +7,7 @@ namespace OpenFleet.Layout
     /// <summary>
     /// 驗證結果整理成編輯器上色用的集合：錯誤的節點、路段、模組畫紅色，警告的節點畫黃色。
     /// 直接依各問題的嚴重度取 NodeCodes／Edges／ModuleCodes：edge-short、edge-crossing、edge-clearance、edge-through-module、
-    /// edge-invalid、handoff-missing、unreachable 是錯誤；node-isolated、handoff-through 是警告。
+    /// edge-invalid、edge-outside、handoff-missing、unreachable 是錯誤；node-isolated、handoff-through 是警告。
     /// 路段不分方向（A–B 與 B–A 視為同一條）。
     /// </summary>
     public sealed class LayoutIssueMarks
@@ -17,6 +17,9 @@ namespace OpenFleet.Layout
         public HashSet<string> ErrorNodeCodes { get; } = new HashSet<string>(StringComparer.Ordinal);
 
         public HashSet<string> WarningNodeCodes { get; } = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>錯誤的外牆編號（floor-invalid、gate-invalid 等問題的 WallIndices），編輯器把這些牆畫紅。</summary>
+        public HashSet<int> ErrorWallIndices { get; } = new HashSet<int>();
 
         public HashSet<string> ErrorModuleCodes { get; } = new HashSet<string>(StringComparer.Ordinal);
 
@@ -49,6 +52,14 @@ namespace OpenFleet.Layout
                 if (!isError)
                 {
                     continue;
+                }
+
+                if (issue.WallIndices != null)
+                {
+                    foreach (var wall in issue.WallIndices)
+                    {
+                        marks.ErrorWallIndices.Add(wall);
+                    }
                 }
 
                 foreach (var module in issue.ModuleCodes)

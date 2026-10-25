@@ -91,7 +91,7 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 ### 資料模型
 
 - `FactoryLayouts`：`Name`（1～40 字、不重複）、`Document`（jsonb，存檔的文件，可編輯）、`AppliedDocument`（套用時的快照，工廠實際在跑的版本）、`IsDefault`、`IsActive`、`AppliedAt`、`AppliedHash`。
-- 文件 `FactoryLayoutDocument` ＝ 廠房範圍（`Floor`）＋ 模組（`Modules`：種類、位置、朝向 0／90／180／270）＋ 路網（`RoadNodes` 節點、`RoadEdges` 路段）。模組有 17 種：九道工序的機台或爐、原料倉、成品倉、出貨、刀具庫、大型與小型 AGV 車位、雜物倉庫、載具存放區。
+- 文件 `FactoryLayoutDocument` ＝ 廠房（`Floor`：外牆多邊形 `Outline` 與大門位置 `Gate`；舊文件沒有 `Outline` 時視為 `MinX`～`MaxX`、`MinZ`～`MaxZ` 的矩形、大門在最西邊那段牆的中點）＋ 模組（`Modules`：種類、位置、朝向 0／90／180／270）＋ 路網（`RoadNodes` 節點、`RoadEdges` 路段）。模組有 17 種：九道工序的機台或爐、原料倉、成品倉、出貨、刀具庫、大型與小型 AGV 車位、雜物倉庫、載具存放區。
 - 套用時由文件推導 `Stations`、`Machines`、`MachineTools`、`RouteNodes`、`RouteEdges`、`Vehicles`：每台機台一個工站、每個車位一台車；不在佈局裡的車只退出派工，不刪除。製程（加工時間、倍率）不屬於佈局，仍在示範設定。
 
 ### 共用程式庫 `OpenFleet.Layout`
@@ -130,11 +130,13 @@ netstandard2.1，後端與 Unity 共用（`unity/sync-contracts.ps1` 把 DLL 複
 | 代碼 | 等級 | 意思 |
 | --- | --- | --- |
 | `document-invalid` | 錯誤 | 文件結構不完整（欄位是 null、清單有空項目、種類不是定義過的值）；有這個錯誤就不再跑其他檢查 |
-| `floor-size` | 錯誤 | 廠房寬 40～100 m、深 24～60 m 以外 |
+| `floor-invalid` | 錯誤 | 外牆不成形：頂點少於 3 個或超過 64 個、相鄰重複點、某段牆短於 2 m、牆交叉或折回、面積為 0 |
+| `floor-size` | 錯誤 | 外牆的外框寬 40～100 m、深 24～60 m 以外 |
+| `gate-invalid` | 錯誤 | 大門不在任何一段牆上，或那段牆放不下 10 m 寬的門（門中心離牆的兩端各至少 5.5 m） |
 | `too-many` | 錯誤 | 模組超過 120 個、路網節點超過 1500 個、AGV 超過 20 台 |
 | `code-invalid` | 錯誤 | 模組或節點的代碼重複，或模組代碼不符合規則 |
 | `rotation-invalid` | 錯誤 | 朝向不是 0、90、180、270 |
-| `module-outside` | 錯誤 | 模組占地超出廠房 |
+| `module-outside` | 錯誤 | 模組占地不完全在外牆圍成的多邊形內 |
 | `module-overlap` | 錯誤 | 兩個模組的占地重疊（貼邊不算） |
 | `facility-count` | 錯誤 | 原料倉、成品倉、出貨、刀具庫不是剛好各一個 |
 | `step-missing` | 錯誤 | 九道工序有一道沒有機台 |
@@ -143,6 +145,7 @@ netstandard2.1，後端與 Unity 共用（`unity/sync-contracts.ps1` 把 DLL 複
 | `edge-short` | 錯誤 | 路段短於 1.6 m |
 | `edge-crossing` | 錯誤 | 路段交叉或碰到，交叉處要有路口節點 |
 | `edge-clearance` | 錯誤 | 沒有共用節點的兩條路段相距不到 1.6 m |
+| `edge-outside` | 錯誤 | 路段不在廠房內，或離牆不到 0.8 m（路面寬的一半） |
 | `edge-through-module` | 錯誤 | 路段穿過模組的占地（接到該模組自己交接點的不算） |
 | `handoff-missing` | 錯誤 | 交接點上沒有路網節點，或那個節點沒有任何路段 |
 | `unreachable` | 錯誤 | 模組的交接點不在原料倉交接點的連通路網裡 |

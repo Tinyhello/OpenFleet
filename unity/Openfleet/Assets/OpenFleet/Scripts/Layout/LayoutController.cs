@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using OpenFleet.Contracts;
+using OpenFleet.Layout;
 using UnityEngine;
 
 namespace OpenFleet.Unity
@@ -232,15 +233,21 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            var width = (float)(floor.MaxX - floor.MinX);
-            var depth = (float)(floor.MaxZ - floor.MinZ);
+            // 形狀可能是任意多邊形（P7 第 7 步），視角看外牆頂點的外框；舊文件的矩形也走同一條路。
+            var bounds = LayoutFloorShape.Bounds(floor);
+            var minX = (float)bounds.MinX;
+            var maxX = (float)bounds.MaxX;
+            var minZ = (float)bounds.MinZ;
+            var maxZ = (float)bounds.MaxZ;
+            var width = maxX - minX;
+            var depth = maxZ - minZ;
             var distance = Mathf.Clamp(HomeDistance * Mathf.Max(width / HomeReferenceWidth, depth / HomeReferenceDepth), HomeMinDistance, HomeMaxDistance);
             var target = new Vector3(
-                (float)(floor.MinX + floor.MaxX) / 2f - distance * HomePanelShift,
+                (minX + maxX) / 2f - distance * HomePanelShift,
                 0f,
-                (float)(floor.MinZ + floor.MaxZ) / 2f - HomeSouthShift);
+                (minZ + maxZ) / 2f - HomeSouthShift);
 
-            var key = $"{floor.MinX}|{floor.MaxX}|{floor.MinZ}|{floor.MaxZ}";
+            var key = $"{minX}|{maxX}|{minZ}|{maxZ}";
             camera.SetHome(target, distance, moveCamera: key != _homeFloorKey);
             _homeFloorKey = key;
         }

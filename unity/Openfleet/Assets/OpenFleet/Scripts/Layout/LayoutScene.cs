@@ -20,8 +20,8 @@ namespace OpenFleet.Unity
     {
         public const string RootName = "Factory";
 
-        // 牆與大門的尺寸沿用第 1b 步的場景。大門寬度是 Claude 挑的（規劃：西牆中間留 10 m 寬的大門）。
-        private const float WallHeight = 1.2f, WallThickness = 0.2f, ApronDepth = 5f, GateWidth = 10f;
+        // 牆與大門的尺寸沿用第 1b 步的場景。大門寬度 10 m 是 Claude 挑的，和驗證用同一個常數。
+        private const float WallHeight = 1.2f, WallThickness = 0.2f, ApronDepth = 5f, GateWidth = (float)LayoutRules.GateWidth;
 
         // 路網鋪面（寬 1.6 m）、中心黃線（寬 0.06 m）、節點補角的圓（直徑 1.6 m）：規劃時決定的數字。
         private const float RoadWidth = 1.6f, RoadLineWidth = 0.06f;
@@ -38,6 +38,7 @@ namespace OpenFleet.Unity
         private readonly List<StationAnchor> _anchors = new List<StationAnchor>();
         private readonly Dictionary<string, Transform> _modules = new Dictionary<string, Transform>(StringComparer.Ordinal);
         private readonly Dictionary<string, Transform> _nodeDots = new Dictionary<string, Transform>(StringComparer.Ordinal);
+        private readonly List<Mesh> _meshes = new List<Mesh>();
         private GameObject _root;
 
         /// <param name="materials">環境與路網用的材質。</param>
@@ -60,7 +61,7 @@ namespace OpenFleet.Unity
         /// <summary>節點代碼對應的小圓點（只有編輯模式才有；第 5 步拖曳路口時直接移動圓點，不重畫整個場景）。</summary>
         public IReadOnlyDictionary<string, Transform> NodeDots => _nodeDots;
 
-        /// <summary>地面範圍（X 對應 Rect 的 x、Z 對應 y）。</summary>
+        /// <summary>廠房外框（外牆頂點的範圍；X 對應 Rect 的 x、Z 對應 y）。形狀本身在文件的 Outline。</summary>
         public Rect Floor { get; private set; }
 
         /// <summary>目前場景是不是以編輯模式建的。</summary>
@@ -72,6 +73,15 @@ namespace OpenFleet.Unity
             _anchors.Clear();
             _modules.Clear();
             _nodeDots.Clear();
+            foreach (var mesh in _meshes)
+            {
+                if (mesh != null)
+                {
+                    Object.Destroy(mesh);
+                }
+            }
+
+            _meshes.Clear();
             if (_root != null)
             {
                 _root.SetActive(false);
@@ -94,73 +104,173 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            var f = document.Floor;
-            Floor = Rect.MinMaxRect((float)f.MinX, (float)f.MinZ, (float)f.MaxX, (float)f.MaxZ);
+            var bounds = LayoutFloorShape.Bounds(document.Floor);
+            Floor = Rect.MinMaxRect((float)bounds.MinX, (float)bounds.MinZ, (float)bounds.MaxX, (float)bounds.MaxZ);
 
             var root = _root.transform;
-            BuildEnvironment(Group(root, "Environment", Vector3.zero), Floor);
+            BuildEnvironment(Group(root, "Environment", Vector3.zero), document.Floor);
             BuildRoads(Group(root, "Roads", Vector3.zero), document, editMode);
             BuildModules(root, document, editMode);
         }
 
         // ---- 環境 ----
 
-        private void BuildEnvironment(Transform env, Rect floor)
+        /// <summary>
+        /// 依外牆多邊形建環境（使用者 2026-10-25 決定：廠房是任意多邊形、牆可以斜、大門在任一面牆上）：
+        /// 地板是三角化的網格，每段牆一個沿牆方向旋轉的方塊，柱子沿每段牆排列，大門那段牆留缺口。
+        /// 形狀一律透過 <see cref="LayoutFloorShape"/> 取（舊文件只有矩形，也能畫），不直接讀 Min／Max。
+        /// 預設佈局（矩形、大門在西牆中間）畫出來和多邊形化之前相同，只有東西牆多了幾根柱子。
+        /// </summary>
+        private void BuildEnvironment(Transform env, LayoutFloor floor)
         {
-            Box(env, "Floor", new Vector3(floor.center.x, -0.05f, floor.center.y), new Vector3(floor.width, 0.1f, floor.height), _materials.Floor);
-
-            // 牆與柱子。西牆中間是工廠大門，進料與出貨共用。
-            var wallFrom = floor.xMin - WallThickness / 2f;
-            var wallTo = floor.xMax + WallThickness / 2f;
-            Wall(env, "Wall N", true, floor.yMax, wallFrom, wallTo);
-            Wall(env, "Wall S", true, floor.yMin, wallFrom, wallTo);
-            Wall(env, "Wall E", false, floor.xMax, floor.yMin, floor.yMax);
-            BuildMainGate(WallWithDoor(env, "Wall W", false, floor.xMin, floor.yMin, floor.yMax, floor.center.y, GateWidth));
-
-            // 柱子沿南北牆每 8 m 一根，從西端往東 2 m 起算，排在站與站之間，不擋在站點前面。
-            for (var x = floor.xMin + 2f; x <= floor.xMax + 0.01f; x += 8f)
+            var outline = LayoutFloorShape.Outline(floor);
+            if (outline.Count < 3)
             {
-                foreach (var z in new[] { floor.yMin, floor.yMax })
+                return;
+            }
+
+            BuildFloorMesh(env, outline);
+
+            var gate = LayoutFloorShape.Gate(floor);
+            // 大門不在任何牆上時（驗證會報 gate-invalid）仍畫在最近的那段牆上，編輯時才看得到它在哪裡。
+            var gateHit = FloorGeometry.NearestWall(outline, gate.X, gate.Z);
+            var gateWall = gateHit != null ? gateHit.Index : -1;
+
+            for (var i = 0; i < outline.Count; i++)
+            {
+                var start = FloorGeometry.WallStart(outline, i);
+                var end = FloorGeometry.WallEnd(outline, i);
+                if (i != gateWall)
                 {
-                    Box(env, "Pillar", new Vector3(x, 2f, z), new Vector3(0.5f, 4f, 0.5f), _materials.Pillar);
+                    WallSegment(env, "Wall " + i, start, end, true, true);
+                    continue;
+                }
+
+                // 大門那段牆：門中心兩側各留一半門寬的缺口，缺口那一端不用補轉角。
+                var length = (float)FloorGeometry.WallLength(outline, i);
+                var along = Mathf.Clamp((float)gateHit.Along, 0f, length);
+                var openFrom = along - GateWidth / 2f;
+                var openTo = along + GateWidth / 2f;
+                if (openFrom > 0f)
+                {
+                    WallSegment(env, "Wall " + i + " A", start, FloorGeometry.PointOnWall(outline, i, openFrom / length), true, false);
+                }
+
+                if (openTo < length)
+                {
+                    WallSegment(env, "Wall " + i + " B", FloorGeometry.PointOnWall(outline, i, openTo / length), end, false, true);
+                }
+
+                var normal = FloorGeometry.WallOutwardNormal(outline, i);
+                var yaw = Mathf.Atan2((float)normal.X, (float)normal.Z) * Mathf.Rad2Deg;
+                var door = Group(env, "Gate Door", new Vector3((float)gateHit.X, 0f, (float)gateHit.Z), yaw);
+                Box(door, "Apron", new Vector3(0f, -0.05f, ApronDepth / 2f), new Vector3(GateWidth, 0.1f, ApronDepth), _materials.Aisle);
+                Box(door, "Threshold", new Vector3(0f, 0.01f, 0f), new Vector3(GateWidth, 0.02f, 0.3f), _materials.LaneLine);
+                BuildMainGate(door);
+            }
+
+            // 柱子：每段牆從起點（外牆的順序）往後 2 m 起每 8 m 一根，排在站與站之間，不擋在站點前面。
+            // 預設佈局南北牆的位置和以前相同；大門的缺口（含門柱）裡不放。
+            for (var i = 0; i < outline.Count; i++)
+            {
+                var length = (float)FloorGeometry.WallLength(outline, i);
+                if (length < 0.01f)
+                {
+                    continue;
+                }
+
+                var a = FloorGeometry.WallStart(outline, i);
+                var b = FloorGeometry.WallEnd(outline, i);
+                var yaw = Mathf.Atan2((float)(b.X - a.X), (float)(b.Z - a.Z)) * Mathf.Rad2Deg;
+                for (var d = 2f; d <= length + 0.01f; d += 8f)
+                {
+                    if (i == gateWall && Mathf.Abs(d - (float)gateHit.Along) < GateWidth / 2f + 0.5f)
+                    {
+                        continue;
+                    }
+
+                    var p = FloorGeometry.PointOnWall(outline, i, Mathf.Min(1f, d / length));
+                    Box(env, "Pillar", new Vector3((float)p.X, 2f, (float)p.Z), new Vector3(0.5f, 4f, 0.5f), _materials.Pillar, new Vector3(0f, yaw, 0f));
                 }
             }
         }
 
         /// <summary>
-        /// 一面有出入口的牆：在 <paramref name="doorAt"/> 留一個寬 <paramref name="doorWidth"/> 的缺口，牆外鋪一塊進出用的地面。
-        /// 回傳出入口的群組（+Z 朝廠外），讓呼叫端加上門柱或貨物。其他參數的意義同 <see cref="Wall"/>。
+        /// 地板：外牆多邊形三角化後的網格，上表面在 y = 0（和原本的地板方塊同高）。
+        /// 不做側面與底面：側面被牆擋住，攝影機也看不到底面。網格不屬於任何資產，重建時要自己銷毀（見 <see cref="Clear"/>）。
+        /// 三角形的繞行方向不靠文件的約定，逐個用叉積判斷、讓法線朝上（Unity 的正面是順時針）。
         /// </summary>
-        private Transform WallWithDoor(Transform env, string name, bool alongX, float offset, float from, float to, float doorAt, float doorWidth)
+        private void BuildFloorMesh(Transform env, List<LayoutPoint> outline)
         {
-            Wall(env, name + " A", alongX, offset, from, doorAt - doorWidth / 2f);
-            Wall(env, name + " B", alongX, offset, doorAt + doorWidth / 2f, to);
+            var triangles = FloorGeometry.Triangulate(outline);
+            if (triangles.Length < 3)
+            {
+                return;
+            }
 
-            var position = alongX ? new Vector3(doorAt, 0f, offset) : new Vector3(offset, 0f, doorAt);
-            var outward = alongX ? (offset > 0f ? 0f : 180f) : (offset > 0f ? 90f : -90f);
-            var door = Group(env, name + " Door", position, outward);
-            Box(door, "Apron", new Vector3(0f, -0.05f, ApronDepth / 2f), new Vector3(doorWidth, 0.1f, ApronDepth), _materials.Aisle);
-            Box(door, "Threshold", new Vector3(0f, 0.01f, 0f), new Vector3(doorWidth, 0.02f, 0.3f), _materials.LaneLine);
-            return door;
+            var vertices = new Vector3[outline.Count];
+            var normals = new Vector3[outline.Count];
+            var uv = new Vector2[outline.Count];
+            for (var i = 0; i < outline.Count; i++)
+            {
+                vertices[i] = new Vector3((float)outline[i].X, 0f, (float)outline[i].Z);
+                normals[i] = Vector3.up;
+                uv[i] = new Vector2((float)outline[i].X, (float)outline[i].Z);
+            }
+
+            var indices = new int[triangles.Length];
+            for (var k = 0; k + 2 < triangles.Length; k += 3)
+            {
+                var a = triangles[k];
+                var b = triangles[k + 1];
+                var c = triangles[k + 2];
+                if (Vector3.Cross(vertices[b] - vertices[a], vertices[c] - vertices[a]).y < 0f)
+                {
+                    (b, c) = (c, b);
+                }
+
+                indices[k] = a;
+                indices[k + 1] = b;
+                indices[k + 2] = c;
+            }
+
+            var mesh = new Mesh { name = "Floor (runtime)", vertices = vertices, normals = normals, uv = uv, triangles = indices };
+            mesh.RecalculateBounds();
+            _meshes.Add(mesh);
+
+            var go = new GameObject("Floor");
+            go.transform.SetParent(env, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            go.AddComponent<MeshRenderer>().sharedMaterial = _materials.Floor;
         }
 
         /// <summary>
-        /// 一段牆。<paramref name="alongX"/> 為 true 時沿 X 方向、位於 Z = <paramref name="offset"/>；否則沿 Z 方向、位於 X = offset。
-        /// <paramref name="from"/>／<paramref name="to"/> 是牆在延伸方向上的起訖。
+        /// 一段牆（從 a 到 b）：方塊沿牆方向旋轉，高 1.2 m、厚 0.2 m。
+        /// <paramref name="extendA"/>／<paramref name="extendB"/> 為 true 時那一端多伸出半個牆厚，把轉角補滿
+        /// （直角轉角完全補滿；斜的轉角外側會留一個小缺口，是已知的外觀限制）。
         /// </summary>
-        private void Wall(Transform env, string name, bool alongX, float offset, float from, float to)
+        private void WallSegment(Transform env, string name, (double X, double Z) a, (double X, double Z) b, bool extendA, bool extendB)
         {
+            var dx = (float)(b.X - a.X);
+            var dz = (float)(b.Z - a.Z);
+            var length = Mathf.Sqrt(dx * dx + dz * dz);
+            if (length < 0.01f)
+            {
+                return;
+            }
+
+            var from = extendA ? -WallThickness / 2f : 0f;
+            var to = length + (extendB ? WallThickness / 2f : 0f);
             var mid = (from + to) / 2f;
-            var length = to - from;
-            Box(env, name,
-                alongX ? new Vector3(mid, WallHeight / 2f, offset) : new Vector3(offset, WallHeight / 2f, mid),
-                alongX ? new Vector3(length, WallHeight, WallThickness) : new Vector3(WallThickness, WallHeight, length),
-                _materials.Wall);
+            var center = new Vector3((float)a.X + dx / length * mid, WallHeight / 2f, (float)a.Z + dz / length * mid);
+            // 方塊的長邊是區域 Z 軸；yaw 從 +Z 往 +X 轉。
+            Box(env, name, center, new Vector3(WallThickness, WallHeight, to - from), _materials.Wall,
+                new Vector3(0f, Mathf.Atan2(dx, dz) * Mathf.Rad2Deg, 0f));
         }
 
         /// <summary>
-        /// 工廠大門（西牆中間，進料與出貨共用）：門柱、門楣、標示，以及兩側的貨物。
-        /// 群組的 +Z 朝廠外、+X 朝北：門外南側是剛到廠還沒入庫的原料，
+        /// 工廠大門（預設在西牆中間，可放在任一面牆；進料與出貨共用）：門柱、門楣、標示，以及兩側的貨物。
+        /// 群組的 +Z 朝廠外（依那段牆的朝外法線旋轉）、+X 朝預設佈局的北：門外南側是剛到廠還沒入庫的原料，
         /// 門內北側（靠成品倉那一邊）是包裝好等著出貨的成品箱。貨物只是示意，沒有對應的後端資料。
         /// </summary>
         private void BuildMainGate(Transform gate)
@@ -183,7 +293,7 @@ namespace OpenFleet.Unity
 
             Label(gate, "進料\nInbound", new Vector3(-3.25f, 1f, 3.6f), 0.07f, Color.white);
 
-            // 出貨：門內北側，沿著西牆排到出貨站前面。
+            // 出貨：門內北側，沿著牆排到出貨站前面。
             for (var i = 0; i < 3; i++)
             {
                 var x = half + 1.4f + i * 1.35f;

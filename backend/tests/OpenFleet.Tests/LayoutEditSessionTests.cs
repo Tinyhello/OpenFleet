@@ -39,7 +39,7 @@ public class LayoutEditSessionTests
     {
         // 新增欄位時要同步 LayoutDocuments.Clone 與 Canonical；這裡的屬性數量檢查會提醒。
         Assert.Equal(4, typeof(FactoryLayoutDocument).GetProperties().Length);
-        Assert.Equal(4, typeof(LayoutFloor).GetProperties().Length);
+        Assert.Equal(6, typeof(LayoutFloor).GetProperties().Length);
         Assert.Equal(5, typeof(LayoutModule).GetProperties().Length);
         Assert.Equal(3, typeof(LayoutRoadNode).GetProperties().Length);
         Assert.Equal(2, typeof(LayoutRoadEdge).GetProperties().Length);

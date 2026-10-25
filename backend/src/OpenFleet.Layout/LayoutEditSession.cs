@@ -15,6 +15,10 @@ namespace OpenFleet.Layout
     /// - 每次成功改到文件的操作，先把操作前的狀態推進復原堆疊（最多 <see cref="MaxHistory"/> 步，最舊的丟掉）並清掉重做堆疊；
     ///   失敗或沒有改到東西的操作（回傳 false 或 null）不留紀錄。
     /// - 連續的 <see cref="SetFloorSize"/>（拖滑桿）合成一步復原，直到出現別的操作（含復原、重做、<see cref="MarkSaved"/>）為止。
+    /// - 廠房形狀的操作（<see cref="MoveFloorVertex"/>、<see cref="MoveFloorWall"/>、<see cref="InsertFloorVertex"/>、
+    ///   <see cref="RemoveFloorVertex"/>、<see cref="MoveGate"/>）每個成功的操作一步復原。第一次改形狀時，舊文件的矩形
+    ///   （沒有 Outline、Gate）會先寫成 Outline 與 Gate 再修改；之後 Min／Max 一律是外框。大門跟著它所在的那段牆走。
+    ///   模組與路網不會跟著移動，超出廠房由驗證報錯。
     /// - 新增、移動不會因為重疊或超出廠房而拒絕：使用者可以刻意做出錯誤，由 <see cref="Validate"/> 回報；
     ///   拖曳時的紅綠框線用 <see cref="CanPlace"/>。（Claude 暫定）
     /// </summary>
@@ -28,6 +32,9 @@ namespace OpenFleet.Layout
 
         /// <summary>廠房大小滑桿的步距（公尺，使用者決定）。</summary>
         public const double FloorStep = 0.4;
+
+        /// <summary>廠房頂點、加轉角、大門的對齊格距（公尺，Claude 暫定，和模組相同）。</summary>
+        public const double FloorVertexGrid = LayoutRules.FloorVertexGrid;
 
         private readonly List<FactoryLayoutDocument> _undo = new List<FactoryLayoutDocument>();
         private readonly List<FactoryLayoutDocument> _redo = new List<FactoryLayoutDocument>();
@@ -197,6 +204,7 @@ namespace OpenFleet.Layout
 
         /// <summary>
         /// 設定廠房大小：以目前的中心往兩邊縮放，寬與深對齊 0.4 m 並限制在規則的範圍內，座標取到 0.01 m。
+        /// 有外牆頂點（Outline）時，頂點以外框中心等比縮放到新的寬與深，大門跟著縮放（還在同一段牆的同一個相對位置）。
         /// 大小沒變時回傳 false。連續呼叫（拖滑桿）合成一步復原。不管模組是否還在廠房內（驗證會回報）。
         /// </summary>
         public bool SetFloorSize(double width, double depth)
@@ -204,26 +212,244 @@ namespace OpenFleet.Layout
             var newWidth = Clamp(Snap(width, FloorStep), LayoutRules.MinFloorWidth, LayoutRules.MaxFloorWidth);
             var newDepth = Clamp(Snap(depth, FloorStep), LayoutRules.MinFloorDepth, LayoutRules.MaxFloorDepth);
             var floor = _document.Floor;
-            var centerX = (floor.MinX + floor.MaxX) / 2;
-            var centerZ = (floor.MinZ + floor.MaxZ) / 2;
-            var minX = RoadGraphEditor.Round(centerX - newWidth / 2);
-            var maxX = RoadGraphEditor.Round(centerX + newWidth / 2);
-            var minZ = RoadGraphEditor.Round(centerZ - newDepth / 2);
-            var maxZ = RoadGraphEditor.Round(centerZ + newDepth / 2);
-            if (minX == floor.MinX && maxX == floor.MaxX && minZ == floor.MinZ && maxZ == floor.MaxZ)
+            var hasOutline = floor.Outline != null && floor.Outline.Count > 0;
+            var bounds = hasOutline
+                ? LayoutFloorShape.Bounds(floor.Outline!)
+                : new LayoutRect(floor.MinX, floor.MaxX, floor.MinZ, floor.MaxZ);
+            var oldWidth = bounds.MaxX - bounds.MinX;
+            var oldDepth = bounds.MaxZ - bounds.MinZ;
+            var centerX = (bounds.MinX + bounds.MaxX) / 2;
+            var centerZ = (bounds.MinZ + bounds.MaxZ) / 2;
+            var scaleX = oldWidth > 0 ? newWidth / oldWidth : 1;
+            var scaleZ = oldDepth > 0 ? newDepth / oldDepth : 1;
+
+            double minX;
+            double maxX;
+            double minZ;
+            double maxZ;
+            if (hasOutline)
             {
-                return false;
+                if (Math.Abs(newWidth - oldWidth) < 1e-6 && Math.Abs(newDepth - oldDepth) < 1e-6)
+                {
+                    return false;
+                }
+
+                minX = double.NaN;
+                maxX = double.NaN;
+                minZ = double.NaN;
+                maxZ = double.NaN;
+            }
+            else
+            {
+                minX = RoadGraphEditor.Round(centerX - newWidth / 2);
+                maxX = RoadGraphEditor.Round(centerX + newWidth / 2);
+                minZ = RoadGraphEditor.Round(centerZ - newDepth / 2);
+                maxZ = RoadGraphEditor.Round(centerZ + newDepth / 2);
+                if (minX == floor.MinX && maxX == floor.MaxX && minZ == floor.MinZ && maxZ == floor.MaxZ)
+                {
+                    return false;
+                }
             }
 
             var before = LayoutDocuments.Clone(_document);
-            floor.MinX = minX;
-            floor.MaxX = maxX;
-            floor.MinZ = minZ;
-            floor.MaxZ = maxZ;
+            if (hasOutline)
+            {
+                foreach (var point in floor.Outline!)
+                {
+                    point.X = RoadGraphEditor.Round(centerX + (point.X - centerX) * scaleX);
+                    point.Z = RoadGraphEditor.Round(centerZ + (point.Z - centerZ) * scaleZ);
+                }
+
+                UpdateBounds(floor);
+            }
+            else
+            {
+                floor.MinX = minX;
+                floor.MaxX = maxX;
+                floor.MinZ = minZ;
+                floor.MaxZ = maxZ;
+            }
+
+            if (floor.Gate != null)
+            {
+                floor.Gate.X = RoadGraphEditor.Round(centerX + (floor.Gate.X - centerX) * scaleX);
+                floor.Gate.Z = RoadGraphEditor.Round(centerZ + (floor.Gate.Z - centerZ) * scaleZ);
+            }
+
             var coalesce = _floorDrag;
             var result = Commit(before, coalesce);
             _floorDrag = true;
             return result;
+        }
+
+        /// <summary>外牆頂點（複本，順序同文件；舊文件回傳 Min／Max 的矩形）。</summary>
+        public List<LayoutPoint> FloorOutline() => LayoutFloorShape.Outline(_document.Floor);
+
+        /// <summary>外牆段數（等於頂點數）。</summary>
+        public int FloorWallCount => LayoutFloorShape.WallCount(_document.Floor);
+
+        /// <summary>廠房面積（平方公尺）。</summary>
+        public double FloorArea => LayoutFloorShape.Area(_document.Floor);
+
+        /// <summary>大門中心（複本；舊文件是最西邊那段牆的中點）。</summary>
+        public LayoutPoint GateCenter() => LayoutFloorShape.Gate(_document.Floor);
+
+        /// <summary>大門所在的牆編號；大門不在任何牆上回傳 -1。</summary>
+        public int GateWallIndex => LayoutFloorShape.GateWallIndex(_document.Floor);
+
+        /// <summary>能不能刪轉角：至少要留 3 個。</summary>
+        public bool CanRemoveFloorVertex => FloorWallCount > 3;
+
+        /// <summary>能不能再加轉角：頂點數上限見 <see cref="LayoutRules.MaxFloorVertices"/>。</summary>
+        public bool CanInsertFloorVertex => FloorWallCount < LayoutRules.MaxFloorVertices;
+
+        /// <summary>
+        /// 移動第 <paramref name="index"/> 個頂點到 (x, z)（對齊 0.2 m 格點）。大門在相鄰兩段牆上時跟著走。
+        /// 編號不對、座標不是有限數字或位置沒變時回傳 false。
+        /// </summary>
+        public bool MoveFloorVertex(int index, double x, double z)
+        {
+            var outline = FloorOutline();
+            if (index < 0 || index >= outline.Count || !IsFinite(x, z))
+            {
+                return false;
+            }
+
+            var gate = GateCenter();
+            var follow = GateFollow(outline, gate);
+            var n = outline.Count;
+            outline[index].X = Snap(x, FloorVertexGrid);
+            outline[index].Z = Snap(z, FloorVertexGrid);
+            if (follow != null && (follow.Index == index || follow.Index == (index + n - 1) % n))
+            {
+                gate = GatePointOn(outline, follow);
+            }
+
+            return ApplyFloor(outline, gate);
+        }
+
+        /// <summary>
+        /// 整段牆沿它的法線方向平移：拖曳向量 (dx, dz) 投影到法線上，對齊 0.2 m；牆兩端的頂點一起移動，
+        /// 相鄰兩段牆跟著伸縮。大門在這段牆或相鄰的牆上時跟著走。編號不對、長度為 0 的牆或平移量對齊後是 0 時回傳 false。
+        /// </summary>
+        public bool MoveFloorWall(int index, double dx, double dz)
+        {
+            var outline = FloorOutline();
+            if (index < 0 || index >= outline.Count || !IsFinite(dx, dz))
+            {
+                return false;
+            }
+
+            var a = FloorGeometry.WallStart(outline, index);
+            var b = FloorGeometry.WallEnd(outline, index);
+            var length = LayoutGeometry.Distance(a, b);
+            if (length <= 0)
+            {
+                return false;
+            }
+
+            // 法線取行進方向的右手邊；正負只影響拖曳向量投影的符號，結果不受影響。
+            var nx = (b.Z - a.Z) / length;
+            var nz = -(b.X - a.X) / length;
+            var offset = Snap(dx * nx + dz * nz, FloorVertexGrid);
+            if (offset == 0)
+            {
+                return false;
+            }
+
+            var gate = GateCenter();
+            var follow = GateFollow(outline, gate);
+            var n = outline.Count;
+            var first = outline[index];
+            var second = outline[(index + 1) % n];
+            first.X = RoadGraphEditor.Round(first.X + nx * offset);
+            first.Z = RoadGraphEditor.Round(first.Z + nz * offset);
+            second.X = RoadGraphEditor.Round(second.X + nx * offset);
+            second.Z = RoadGraphEditor.Round(second.Z + nz * offset);
+            if (follow != null && (follow.Index == index || follow.Index == (index + n - 1) % n || follow.Index == (index + 1) % n))
+            {
+                gate = GatePointOn(outline, follow);
+            }
+
+            return ApplyFloor(outline, gate);
+        }
+
+        /// <summary>
+        /// 在第 <paramref name="wall"/> 段牆上加一個轉角：(x, z) 投影到牆上，沿牆對齊 0.2 m，把牆切成兩段。
+        /// 大門座標不變（落在包含它的那一段）。編號不對、頂點數已達上限、或對齊後落在牆的端點時回傳 false。
+        /// </summary>
+        public bool InsertFloorVertex(int wall, double x, double z)
+        {
+            var outline = FloorOutline();
+            if (wall < 0 || wall >= outline.Count || !IsFinite(x, z) || outline.Count >= LayoutRules.MaxFloorVertices)
+            {
+                return false;
+            }
+
+            var length = FloorGeometry.WallLength(outline, wall);
+            var hit = FloorGeometry.ProjectOnWall(outline, wall, x, z);
+            var along = Snap(hit.Along, FloorVertexGrid);
+            if (length <= 0 || along <= 1e-6 || along >= length - 1e-6)
+            {
+                return false;
+            }
+
+            var point = FloorGeometry.PointOnWall(outline, wall, along / length);
+            var created = new LayoutPoint { X = RoadGraphEditor.Round(point.X), Z = RoadGraphEditor.Round(point.Z) };
+            var start = FloorGeometry.WallStart(outline, wall);
+            var end = FloorGeometry.WallEnd(outline, wall);
+            if (LayoutGeometry.SamePoint((created.X, created.Z), start, 1e-9) || LayoutGeometry.SamePoint((created.X, created.Z), end, 1e-9))
+            {
+                return false;
+            }
+
+            outline.Insert(wall + 1, created);
+            return ApplyFloor(outline, GateCenter());
+        }
+
+        /// <summary>
+        /// 刪除第 <paramref name="index"/> 個頂點（相鄰兩段牆併成一段）。至少留 3 個頂點，編號不對時回傳 false。
+        /// 大門在被併掉的兩段牆上時，投影到新外牆上最近的點。
+        /// </summary>
+        public bool RemoveFloorVertex(int index)
+        {
+            var outline = FloorOutline();
+            if (index < 0 || index >= outline.Count || outline.Count <= 3)
+            {
+                return false;
+            }
+
+            var gate = GateCenter();
+            var follow = GateFollow(outline, gate);
+            var n = outline.Count;
+            outline.RemoveAt(index);
+            if (follow != null && (follow.Index == index || follow.Index == (index + n - 1) % n))
+            {
+                var hit = FloorGeometry.NearestWall(outline, gate.X, gate.Z)!;
+                gate = new LayoutPoint { X = RoadGraphEditor.Round(hit.X), Z = RoadGraphEditor.Round(hit.Z) };
+            }
+
+            return ApplyFloor(outline, gate);
+        }
+
+        /// <summary>
+        /// 移動大門：(x, z) 投影到最近的一段牆，沿牆對齊 0.2 m（從牆的起點量起）。
+        /// 不會因為牆太短或太靠牆端而拒絕，由驗證的 gate-invalid 回報。位置沒變或座標不是有限數字時回傳 false。
+        /// </summary>
+        public bool MoveGate(double x, double z)
+        {
+            var outline = FloorOutline();
+            if (!IsFinite(x, z) || outline.Count == 0)
+            {
+                return false;
+            }
+
+            var hit = FloorGeometry.NearestWall(outline, x, z)!;
+            var length = FloorGeometry.WallLength(outline, hit.Index);
+            var along = length <= 0 ? 0 : Clamp(Snap(hit.Along, FloorVertexGrid), 0, length);
+            var point = length <= 0 ? FloorGeometry.WallStart(outline, hit.Index) : FloorGeometry.PointOnWall(outline, hit.Index, along / length);
+            var gate = new LayoutPoint { X = RoadGraphEditor.Round(point.X), Z = RoadGraphEditor.Round(point.Z) };
+            return ApplyFloor(outline, gate);
         }
 
         /// <summary>
@@ -288,8 +514,7 @@ namespace OpenFleet.Layout
 
             var candidate = new LayoutModule { Kind = kind, X = Snap(x, ModuleGrid), Z = Snap(z, ModuleGrid), Rotation = normalized };
             var footprint = LayoutGeometry.Footprint(candidate);
-            var floor = _document.Floor;
-            if (!LayoutGeometry.RectInside(footprint, new LayoutRect(floor.MinX, floor.MaxX, floor.MinZ, floor.MaxZ)))
+            if (!FloorGeometry.RectInsidePolygon(FloorOutline(), footprint))
             {
                 return false;
             }
@@ -311,6 +536,68 @@ namespace OpenFleet.Layout
         /// <summary>對齊到格點（四捨五入到最近的格點，結果取到 0.01 m；-0 變 0）。</summary>
         public static double Snap(double value, double step) =>
             RoadGraphEditor.Round(Math.Round(value / step, MidpointRounding.AwayFromZero) * step);
+
+        // 大門所在的牆與在牆上的位置（t：0 是起點、1 是終點）。大門不在任何牆上時回傳 null（改形狀時就不去動它）。
+        private static WallHit? GateFollow(List<LayoutPoint> outline, LayoutPoint gate)
+        {
+            var hit = FloorGeometry.NearestWall(outline, gate.X, gate.Z);
+            return hit != null && hit.Distance <= LayoutRules.GateOnWallTolerance ? hit : null;
+        }
+
+        private static LayoutPoint GatePointOn(List<LayoutPoint> outline, WallHit follow)
+        {
+            var point = FloorGeometry.PointOnWall(outline, follow.Index, follow.T);
+            return new LayoutPoint { X = RoadGraphEditor.Round(point.X), Z = RoadGraphEditor.Round(point.Z) };
+        }
+
+        private static bool IsFinite(double a, double b) => !double.IsNaN(a) && !double.IsInfinity(a) && !double.IsNaN(b) && !double.IsInfinity(b);
+
+        // 外牆與大門和目前的文件相同就什麼都不改（舊文件的矩形也不轉成 Outline）；
+        // 否則寫進文件、把 Min／Max 更新成外框，留一步復原。
+        private bool ApplyFloor(List<LayoutPoint> outline, LayoutPoint gate)
+        {
+            var floor = _document.Floor;
+            var oldOutline = LayoutFloorShape.Outline(floor);
+            var oldGate = LayoutFloorShape.Gate(floor);
+            if (SameOutline(oldOutline, outline) && Math.Abs(oldGate.X - gate.X) < 1e-9 && Math.Abs(oldGate.Z - gate.Z) < 1e-9)
+            {
+                return false;
+            }
+
+            var before = LayoutDocuments.Clone(_document);
+            floor.Outline = outline;
+            floor.Gate = gate;
+            UpdateBounds(floor);
+            return Commit(before, false);
+        }
+
+        private static bool SameOutline(List<LayoutPoint> a, List<LayoutPoint> b)
+        {
+            if (a.Count != b.Count)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < a.Count; i++)
+            {
+                if (Math.Abs(a[i].X - b[i].X) >= 1e-9 || Math.Abs(a[i].Z - b[i].Z) >= 1e-9)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Min／Max 保持是外牆的外框（舊的程式與工具還在讀它們）。
+        private static void UpdateBounds(LayoutFloor floor)
+        {
+            var bounds = LayoutFloorShape.Bounds(floor.Outline!);
+            floor.MinX = bounds.MinX;
+            floor.MaxX = bounds.MaxX;
+            floor.MinZ = bounds.MinZ;
+            floor.MaxZ = bounds.MaxZ;
+        }
 
         private string Canonical => _canonical ??= LayoutDocuments.Canonical(_document);
 

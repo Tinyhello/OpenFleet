@@ -113,6 +113,19 @@ namespace OpenFleet.Unity
             /// <summary>吸附目標的標記框。</summary>
             public static readonly Color SnapMarker = new Color(0.6f, 1f, 0.9f);
 
+            // 廠房編輯（P7 第 7 步）。選取與錯誤沿用 LayoutSelected、LayoutError；下面三個是新的，顏色 Claude 暫定。
+            /// <summary>廠房工具的外牆線（沒選取、沒錯誤時）。</summary>
+            public static readonly Color FloorLine = new Color(0.85f, 0.92f, 1f);
+
+            /// <summary>牆角的控制點。</summary>
+            public static readonly Color FloorCorner = new Color(1f, 1f, 1f);
+
+            /// <summary>牆中點的控制點（拖整段牆）。</summary>
+            public static readonly Color FloorWallHandle = new Color(0.3f, 0.85f, 0.95f);
+
+            /// <summary>大門的控制點與門寬的範圍線。</summary>
+            public static readonly Color GateHandle = new Color(1f, 0.6f, 0.15f);
+
             /// <summary>急單（排在所有訂單前面）的標示。</summary>
             public static readonly Color Rush = new Color(1f, 0.62f, 0.3f);
             public static readonly Color InputText = new Color(0.08f, 0.09f, 0.11f);

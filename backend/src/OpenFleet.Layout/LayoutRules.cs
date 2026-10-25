@@ -22,6 +22,27 @@ namespace OpenFleet.Layout
         public const double MinFloorDepth = 24;
         public const double MaxFloorDepth = 60;
 
+        /// <summary>外牆每一段的最短長度（公尺）。Claude 暫定。</summary>
+        public const double MinWallLength = 2.0;
+
+        /// <summary>大門寬度（公尺）。沿用原本固定的 10 m 大門。</summary>
+        public const double GateWidth = 10;
+
+        /// <summary>大門兩端離牆端點的最小距離（公尺），所以放大門的牆至少 11 m。Claude 暫定。</summary>
+        public const double GateMargin = 0.5;
+
+        /// <summary>大門中心離牆多近算「在牆上」（公尺）。</summary>
+        public const double GateOnWallTolerance = 0.05;
+
+        /// <summary>路段離每段外牆至少這麼遠（公尺）：路面寬 1.6 m 的一半，再沒有餘裕。Claude 暫定。</summary>
+        public const double RoadWallClearance = 0.8;
+
+        /// <summary>編輯廠房頂點、加轉角、移大門時的對齊格距（公尺），和模組相同。Claude 暫定。</summary>
+        public const double FloorVertexGrid = 0.2;
+
+        /// <summary>外牆頂點數上限：驗證的自交檢查是頂點數的平方，文件可以任意大，所以要設限。Claude 暫定。</summary>
+        public const int MaxFloorVertices = 64;
+
         public const int MaxModules = 120;
         public const int MaxRoadNodes = 1500;
         public const int MaxVehicles = 20;

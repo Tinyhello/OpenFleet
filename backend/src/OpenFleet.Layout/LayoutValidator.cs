@@ -35,17 +35,19 @@ namespace OpenFleet.Layout
                 return Result(issues);
             }
 
-            CheckFloor(document, issues);
+            var polygonOk = CheckFloor(document, issues);
+            var outline = LayoutFloorShape.Outline(document.Floor);
             CheckLimits(document, issues);
             CheckCodes(document, issues);
             CheckRotations(document, issues);
-            CheckFootprints(document, issues);
+            CheckFootprints(document, outline, polygonOk, issues);
             CheckFacilities(document, issues);
             CheckProcesses(document, issues);
             CheckVehicles(document, issues);
 
             var nodes = FirstByCode(document.RoadNodes);
             var edges = CheckEdges(document, nodes, issues);
+            CheckEdgesInside(edges, outline, polygonOk, issues);
             CheckThroughModules(document, edges, issues);
             var handoffNodes = CheckHandoffs(document, nodes, edges, issues);
             CheckReachability(document, handoffNodes, edges, issues);
@@ -74,6 +76,19 @@ namespace OpenFleet.Layout
             if (document.Floor == null)
             {
                 AddError(issues, DocumentInvalid, "缺少廠房範圍（floor）");
+            }
+            else if (document.Floor.Outline != null)
+            {
+                var empty = new List<int>();
+                for (var i = 0; i < document.Floor.Outline.Count; i++)
+                {
+                    if (document.Floor.Outline[i] == null)
+                    {
+                        empty.Add(i);
+                    }
+                }
+
+                AddIndexed(issues, empty, "廠房外牆頂點清單（outline）裡有空的項目");
             }
 
             if (document.Modules == null)
@@ -160,7 +175,36 @@ namespace OpenFleet.Layout
                 AddIndexed(issues, noEnd, "路段的起點或終點（from／to）是空的");
             }
 
+            if (issues.Count == 0 && HasNonFiniteCoordinate(document))
+            {
+                AddError(issues, DocumentInvalid, "座標不是有效的數字（NaN 或無限大）");
+            }
+
             return issues.Count == 0;
+        }
+
+        // 座標一定要是有限的數字：NaN 會讓所有比較都不成立，後面的幾何檢查會得到沒有意義的結果。
+        // 呼叫時結構已經檢查過（清單存在、項目不是 null）。
+        private static bool HasNonFiniteCoordinate(FactoryLayoutDocument document)
+        {
+            var floor = document.Floor;
+            if (!double.IsFinite(floor.MinX) || !double.IsFinite(floor.MaxX) || !double.IsFinite(floor.MinZ) || !double.IsFinite(floor.MaxZ))
+            {
+                return true;
+            }
+
+            if (floor.Gate != null && (!double.IsFinite(floor.Gate.X) || !double.IsFinite(floor.Gate.Z)))
+            {
+                return true;
+            }
+
+            if (floor.Outline != null && floor.Outline.Any(p => !double.IsFinite(p.X) || !double.IsFinite(p.Z)))
+            {
+                return true;
+            }
+
+            return document.Modules.Any(m => !double.IsFinite(m.X) || !double.IsFinite(m.Z))
+                || document.RoadNodes.Any(n => !double.IsFinite(n.X) || !double.IsFinite(n.Z));
         }
 
         // 沒有項目就不回報；有的話列出前 MaxListedIndexes 個編號。
@@ -186,17 +230,133 @@ namespace OpenFleet.Layout
             public (double X, double Z) B { get; set; }
         }
 
-        private static void CheckFloor(FactoryLayoutDocument document, List<LayoutIssueDto> issues)
+        // 廠房檢查：floor-invalid（多邊形本身）、floor-size（外框大小）、gate-invalid（大門）。
+        // 回傳多邊形本身是否可用（沒有 floor-invalid）；不可用時，依多邊形判斷的模組與路段檢查會略過，免得一個錯誤變一串雜訊。
+        private static bool CheckFloor(FactoryLayoutDocument document, List<LayoutIssueDto> issues)
         {
             var floor = document.Floor;
-            var width = floor.MaxX - floor.MinX;
-            var depth = floor.MaxZ - floor.MinZ;
+            var outline = LayoutFloorShape.Outline(floor);
+            var polygonOk = CheckPolygon(outline, issues);
+
+            var bounds = LayoutFloorShape.Bounds(outline);
+            var width = bounds.MaxX - bounds.MinX;
+            var depth = bounds.MaxZ - bounds.MinZ;
             var tolerance = LayoutRules.Tolerance;
             if (width < LayoutRules.MinFloorWidth - tolerance || width > LayoutRules.MaxFloorWidth + tolerance
                 || depth < LayoutRules.MinFloorDepth - tolerance || depth > LayoutRules.MaxFloorDepth + tolerance)
             {
                 AddError(issues, "floor-size", $"廠房寬 40～100 m、深 24～60 m（目前寬 {Fmt(width)} m、深 {Fmt(depth)} m）");
             }
+
+            if (polygonOk)
+            {
+                CheckGate(floor, outline, issues);
+            }
+
+            return polygonOk;
+        }
+
+        private static bool CheckPolygon(List<LayoutPoint> outline, List<LayoutIssueDto> issues)
+        {
+            var before = issues.Count;
+            if (outline.Count < 3)
+            {
+                AddError(issues, "floor-invalid", $"廠房外牆至少要 3 個轉角（目前 {outline.Count} 個）");
+                return false;
+            }
+
+            if (outline.Count > LayoutRules.MaxFloorVertices)
+            {
+                AddError(issues, "floor-invalid", $"廠房外牆最多 {LayoutRules.MaxFloorVertices} 個轉角（目前 {outline.Count} 個）");
+                return false;
+            }
+
+            var duplicate = new List<int>();
+            var tooShort = new List<int>();
+            for (var i = 0; i < outline.Count; i++)
+            {
+                var length = FloorGeometry.WallLength(outline, i);
+                if (length <= 1e-6)
+                {
+                    duplicate.Add(i);
+                }
+                else if (length < LayoutRules.MinWallLength - LayoutRules.Tolerance)
+                {
+                    tooShort.Add(i);
+                }
+            }
+
+            if (duplicate.Count > 0)
+            {
+                AddError(issues, "floor-invalid", $"廠房外牆有相鄰的重複轉角：{WallList(duplicate)}", walls: duplicate);
+            }
+
+            if (tooShort.Count > 0)
+            {
+                AddError(issues, "floor-invalid", $"廠房外牆每段至少 {Fmt(LayoutRules.MinWallLength)} m：{WallList(tooShort)}", walls: tooShort);
+            }
+
+            var crossing = FloorGeometry.SelfIntersectingWalls(outline);
+            if (crossing.Count > 0)
+            {
+                AddError(issues, "floor-invalid", $"廠房外牆自己交叉或折回：{WallList(crossing)}", walls: crossing);
+            }
+
+            if (crossing.Count == 0 && duplicate.Count == 0 && FloorGeometry.Area(outline) < 1e-6)
+            {
+                AddError(issues, "floor-invalid", "廠房的面積是 0");
+            }
+
+            return issues.Count == before;
+        }
+
+        // 大門中心要在某段牆上（0.05 m 內），而且那段牆放得下 10 m 寬的門，門的兩端離牆端點各至少 0.5 m。
+        private static void CheckGate(LayoutFloor floor, List<LayoutPoint> outline, List<LayoutIssueDto> issues)
+        {
+            var gate = LayoutFloorShape.Gate(floor);
+            var near = new List<WallHit>();
+            for (var i = 0; i < outline.Count; i++)
+            {
+                var hit = FloorGeometry.ProjectOnWall(outline, i, gate.X, gate.Z);
+                if (hit.Distance <= LayoutRules.GateOnWallTolerance)
+                {
+                    near.Add(hit);
+                }
+            }
+
+            if (near.Count == 0)
+            {
+                var nearest = FloorGeometry.NearestWall(outline, gate.X, gate.Z);
+                AddError(
+                    issues,
+                    "gate-invalid",
+                    $"大門（{Fmt(gate.X)}, {Fmt(gate.Z)}）不在任何一段牆上",
+                    walls: nearest == null ? null : new[] { nearest.Index });
+                return;
+            }
+
+            var half = LayoutRules.GateWidth / 2 + LayoutRules.GateMargin;
+            var holds = near.Any(h =>
+            {
+                var length = FloorGeometry.WallLength(outline, h.Index);
+                return length >= 2 * half - LayoutRules.Tolerance
+                    && h.Along >= half - LayoutRules.GateOnWallTolerance
+                    && length - h.Along >= half - LayoutRules.GateOnWallTolerance;
+            });
+            if (!holds)
+            {
+                AddError(
+                    issues,
+                    "gate-invalid",
+                    $"大門放不下：那段牆要至少 {Fmt(2 * half)} m，而且門的兩端離牆端點各至少 {Fmt(LayoutRules.GateMargin)} m",
+                    walls: near.Select(h => h.Index).ToList());
+            }
+        }
+
+        private static string WallList(List<int> walls)
+        {
+            var listed = string.Join("、", walls.Take(MaxListedIndexes).Select(i => (i + 1).ToString(CultureInfo.InvariantCulture)));
+            return $"第 {listed} 段牆{(walls.Count > MaxListedIndexes ? "…" : "")}";
         }
 
         private static void CheckLimits(FactoryLayoutDocument document, List<LayoutIssueDto> issues)
@@ -258,15 +418,13 @@ namespace OpenFleet.Layout
             }
         }
 
-        private static void CheckFootprints(FactoryLayoutDocument document, List<LayoutIssueDto> issues)
+        private static void CheckFootprints(FactoryLayoutDocument document, List<LayoutPoint> outline, bool polygonOk, List<LayoutIssueDto> issues)
         {
-            var floor = document.Floor;
-            var floorRect = new LayoutRect(floor.MinX, floor.MaxX, floor.MinZ, floor.MaxZ);
             var footprints = document.Modules.Select(m => (Module: m, Rect: LayoutGeometry.Footprint(m))).ToList();
 
             foreach (var (module, rect) in footprints)
             {
-                if (!LayoutGeometry.RectInside(rect, floorRect))
+                if (polygonOk && !FloorGeometry.RectInsidePolygon(outline, rect))
                 {
                     AddError(issues, "module-outside", $"{ModuleNaming.DisplayName(document, module)} 的占地超出廠房", modules: new[] { module.Code });
                 }
@@ -410,6 +568,27 @@ namespace OpenFleet.Layout
             }
 
             return valid;
+        }
+
+        // 路段要在廠房內，而且離每段牆至少 0.8 m（路面寬 1.6 m 的一半）。
+        private static void CheckEdgesInside(List<Edge> edges, List<LayoutPoint> outline, bool polygonOk, List<LayoutIssueDto> issues)
+        {
+            if (!polygonOk)
+            {
+                return;
+            }
+
+            foreach (var edge in edges)
+            {
+                if (!FloorGeometry.SegmentInsidePolygon(outline, edge.A, edge.B, LayoutRules.RoadWallClearance))
+                {
+                    AddError(
+                        issues,
+                        "edge-outside",
+                        $"路段 {edge.From}–{edge.To} 不在廠房內，或離牆不到 {Fmt(LayoutRules.RoadWallClearance)} m",
+                        edges: new[] { edge.Source });
+                }
+            }
         }
 
         // 路段穿過模組的占地（占地往內縮 0.05 m 再判斷）；接到這個模組自己交接點的路段不算。
@@ -650,8 +829,9 @@ namespace OpenFleet.Layout
             string message,
             IEnumerable<string>? modules = null,
             IEnumerable<string>? nodes = null,
-            IEnumerable<LayoutRoadEdge>? edges = null) =>
-            Add(issues, LayoutIssueSeverity.Error, code, message, modules, nodes, edges);
+            IEnumerable<LayoutRoadEdge>? edges = null,
+            IEnumerable<int>? walls = null) =>
+            Add(issues, LayoutIssueSeverity.Error, code, message, modules, nodes, edges, walls);
 
         private static void AddWarning(
             List<LayoutIssueDto> issues,
@@ -659,8 +839,9 @@ namespace OpenFleet.Layout
             string message,
             IEnumerable<string>? modules = null,
             IEnumerable<string>? nodes = null,
-            IEnumerable<LayoutRoadEdge>? edges = null) =>
-            Add(issues, LayoutIssueSeverity.Warning, code, message, modules, nodes, edges);
+            IEnumerable<LayoutRoadEdge>? edges = null,
+            IEnumerable<int>? walls = null) =>
+            Add(issues, LayoutIssueSeverity.Warning, code, message, modules, nodes, edges, walls);
 
         private static void Add(
             List<LayoutIssueDto> issues,
@@ -669,7 +850,8 @@ namespace OpenFleet.Layout
             string message,
             IEnumerable<string>? modules,
             IEnumerable<string>? nodes,
-            IEnumerable<LayoutRoadEdge>? edges)
+            IEnumerable<LayoutRoadEdge>? edges,
+            IEnumerable<int>? walls)
         {
             issues.Add(new LayoutIssueDto
             {
@@ -679,6 +861,7 @@ namespace OpenFleet.Layout
                 ModuleCodes = modules?.ToList() ?? new List<string>(),
                 NodeCodes = nodes?.ToList() ?? new List<string>(),
                 Edges = edges?.ToList() ?? new List<LayoutRoadEdge>(),
+                WallIndices = walls?.ToList() ?? new List<int>(),
             });
         }
     }

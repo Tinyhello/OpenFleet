@@ -10,7 +10,7 @@ using Colors = OpenFleet.Unity.PresentationController.Colors;
 namespace OpenFleet.Unity
 {
     /// <summary>
-    /// 操作面板的「佈局」頁（P7 第 4 步）：進入與離開編輯、新增模組、選取的模組、廠房大小、檢查結果、佈局存檔與套用。
+    /// 操作面板的「佈局」頁（P7 第 4 步）：進入與離開編輯、新增模組、選取的模組、廠房（外牆形狀）、檢查結果、佈局存檔與套用。
     /// 編輯的狀態與滑鼠鍵盤操作在 <see cref="LayoutEditor"/>，這裡只負責畫面與呼叫它，以及佈局存檔的 HTTP 呼叫
     /// （<see cref="LayoutClient"/>）。數值只用滑桿與按鈕調整（注音輸入法打不進數字）；用不到的按鈕停用而不是隱藏。
     /// </summary>
@@ -50,9 +50,6 @@ namespace OpenFleet.Unity
             }),
         };
 
-        /// <summary>廠房大小滑桿：寬 40～100 m、深 24～60 m，每格 0.4 m（和 LayoutRules、LayoutEditSession.FloorStep 相同）。</summary>
-        private const int FloorWidthSteps = 150, FloorDepthSteps = 90;
-
         /// <summary>檢查結果最多列出幾條（太多時只列前面的，總數照實顯示）。Claude 暫定。</summary>
         private const int MaxIssuesShown = 40;
 
@@ -64,6 +61,10 @@ namespace OpenFleet.Unity
         private const string DrawToolHelp = "畫路線：按下的位置是起點，拖到終點放開就畫出路段；" +
             "起點與終點會吸附到 0.6 m 內的路口、0.4 m 內的路段、0.2 m 格點；按住 Shift 鎖定水平或垂直；" +
             "短於 1 m 不會畫；Esc 取消這一筆。畫路線時左鍵不會選取或拖曳模組；右鍵與中鍵拖曳仍是移動攝影機。";
+
+        private const string FloorToolHelp = "廠房工具（使用者 2026-10-25 決定：外牆是任意多邊形、用拖曳編輯）：" +
+            "拖曳白點移動轉角；拖曳青色菱形或牆線，整段牆沿著垂直牆的方向平移；拖曳牆外的橘色圓點，大門沿牆移動（10 m 寬、可放在任一面牆）。" +
+            "點牆或轉角選取；Delete 刪除選取的轉角、Esc 取消、Ctrl+Z 復原。位置對齊 0.2 m；這個工具下左鍵不選模組、路口或路段。";
 
         private static ProductionPanel _layoutPanel;
 
@@ -86,10 +87,13 @@ namespace OpenFleet.Unity
         private Label _editHint;
         private Button _toolSelect;
         private Button _toolDraw;
+        private Button _toolFloor;
         private VisualElement _selectionBox;
         private string _selectionKey;
-        private SliderInt _floorWidth;
-        private SliderInt _floorDepth;
+        private Label _floorInfo;
+        private VisualElement _floorBox;
+        private Label _floorHow;
+        private string _floorKey;
         private Label _issueSummary;
         private VisualElement _issueList;
         private LayoutValidationDto _issuesShown;
@@ -233,12 +237,14 @@ namespace OpenFleet.Unity
             nameRow.Add(_editDirty);
             page.Add(nameRow);
 
-            // 工具列（P7 第 5 步）：選取、畫路線。只在編輯中可用，目前的工具反白。
+            // 工具列（P7 第 5、7 步）：選取、畫路線、廠房。只在編輯中可用，目前的工具反白。
             var toolRow = Row();
             _toolSelect = ActionButton("選取", () => _editor.SetTool(RoadTool.Select));
             toolRow.Add(_toolSelect);
             _toolDraw = ActionButton("畫路線", () => _editor.SetTool(RoadTool.Draw));
             toolRow.Add(_toolDraw);
+            _toolFloor = ActionButton("廠房", () => _editor.SetTool(RoadTool.Floor));
+            toolRow.Add(_toolFloor);
             page.Add(toolRow);
 
             _editHint = Hint(string.Empty);
@@ -278,13 +284,16 @@ namespace OpenFleet.Unity
             _selectionBox = new VisualElement();
             page.Add(_selectionBox);
 
-            // (4) 廠房大小
-            page.Add(Heading("廠房大小"));
-            _floorWidth = FloorSlider("寬度", FloorWidthSteps);
-            page.Add(_floorWidth);
-            _floorDepth = FloorSlider("深度", FloorDepthSteps);
-            page.Add(_floorDepth);
-            page.Add(Hint("每格 0.4 m，以廠房中心往兩邊縮放；大門固定在西牆中間。"));
+            // (4) 廠房：外框、面積、牆數、選取的牆或轉角，以及簡短的操作說明（形狀在場景裡拖曳編輯，沒有滑桿）。
+            page.Add(Heading("廠房"));
+            _floorInfo = new Label();
+            _floorInfo.style.whiteSpace = WhiteSpace.Normal;
+            page.Add(_floorInfo);
+            _floorBox = new VisualElement();
+            page.Add(_floorBox);
+            _floorHow = Hint(string.Empty);
+            _floorHow.style.marginTop = 4;
+            page.Add(_floorHow);
 
             // (5) 檢查結果
             page.Add(Heading("檢查結果"));
@@ -330,38 +339,12 @@ namespace OpenFleet.Unity
             page.Add(Hint("套用會清空生產資料（訂單、批次、搬運），AGV 回到各自的車位；有在製品時會先提醒。預設佈局不能修改，要改請另存。"));
         }
 
-        private SliderInt FloorSlider(string label, int high)
-        {
-            var slider = new SliderInt(label, 0, high);
-            slider.style.marginBottom = 3;
-            slider.labelElement.style.color = Color.white;
-            slider.labelElement.style.minWidth = 110;
-            slider.RegisterValueChangedCallback(e => OnFloorSlider());
-            return slider;
-        }
-
         private static VisualElement WrapRow()
         {
             var row = Row();
             row.style.flexWrap = Wrap.Wrap;
             return row;
         }
-
-        private void OnFloorSlider()
-        {
-            if (_editor == null || !_editor.Editing || _suppressFloorSlider)
-            {
-                return;
-            }
-
-            _editor.SetFloorSize(FloorFromStep(_floorWidth.value, LayoutRules.MinFloorWidth), FloorFromStep(_floorDepth.value, LayoutRules.MinFloorDepth));
-        }
-
-        private bool _suppressFloorSlider;
-
-        private static double FloorFromStep(int step, double min) => Math.Round(min + step * LayoutEditSession.FloorStep, 2);
-
-        private static int StepFromFloor(double size, double min) => (int)Math.Round((size - min) / LayoutEditSession.FloorStep);
 
         /// <summary>依編輯器與後端的狀態更新整頁：按鈕的停用、各區塊的內容。</summary>
         private void RefreshLayoutPage()
@@ -383,12 +366,14 @@ namespace OpenFleet.Unity
             _editName.text = editing ? $"編輯中：{_editor.SourceName}" : $"使用中：{_layoutController.Active?.Name ?? "（尚未讀到）"}{(_layouts.Exists(l => l.IsActive && l.HasUnappliedChanges) ? "（有未套用的修改）" : string.Empty)}";
             _editDirty.style.display = editing && _editor.IsDirty ? DisplayStyle.Flex : DisplayStyle.None;
             _editHint.style.display = editing ? DisplayStyle.Flex : DisplayStyle.None;
-            var drawing = editing && _editor.Tool == RoadTool.Draw;
+            var tool = editing ? _editor.Tool : RoadTool.Select;
             _toolSelect.SetEnabled(enabled && editing);
             _toolDraw.SetEnabled(enabled && editing);
-            Highlight(_toolSelect, editing && !drawing, Colors.Selected);
-            Highlight(_toolDraw, drawing, Colors.Selected);
-            _editHint.text = drawing ? DrawToolHelp : SelectToolHelp;
+            _toolFloor.SetEnabled(enabled && editing);
+            Highlight(_toolSelect, editing && tool == RoadTool.Select, Colors.Selected);
+            Highlight(_toolDraw, tool == RoadTool.Draw, Colors.Selected);
+            Highlight(_toolFloor, tool == RoadTool.Floor, Colors.Selected);
+            _editHint.text = tool == RoadTool.Draw ? DrawToolHelp : tool == RoadTool.Floor ? FloorToolHelp : SelectToolHelp;
 
             // (2)
             foreach (var group in AddGroups)
@@ -405,23 +390,91 @@ namespace OpenFleet.Unity
             RefreshSelection(editing, enabled);
 
             // (4)
-            var floor = editing ? _editor.Document.Floor : _layoutController.Active?.Document?.Floor;
-            _floorWidth.SetEnabled(enabled && editing);
-            _floorDepth.SetEnabled(enabled && editing);
-            if (floor != null)
-            {
-                var width = floor.MaxX - floor.MinX;
-                var depth = floor.MaxZ - floor.MinZ;
-                _suppressFloorSlider = true;
-                _floorWidth.SetValueWithoutNotify(StepFromFloor(width, LayoutRules.MinFloorWidth));
-                _floorDepth.SetValueWithoutNotify(StepFromFloor(depth, LayoutRules.MinFloorDepth));
-                _suppressFloorSlider = false;
-                _floorWidth.label = $"寬度 {width:0.0} m";
-                _floorDepth.label = $"深度 {depth:0.0} m";
-            }
+            RefreshFloorSection(editing, enabled);
 
             RefreshIssues(editing);
             RefreshLayoutFiles(editing, enabled);
+        }
+
+        /// <summary>
+        /// 「廠房」區塊：外框寬 × 深、面積、牆數（形狀一律透過 <see cref="LayoutFloorShape"/> 取，舊文件的矩形也一樣）；
+        /// 編輯中選了牆或轉角時多一段資訊與按鈕。內容沒變就不重建（按鈕剛被按下去時不閃）。
+        /// </summary>
+        private void RefreshFloorSection(bool editing, bool enabled)
+        {
+            var floor = editing ? _editor.Document.Floor : _layoutController.Active?.Document?.Floor;
+            if (floor == null)
+            {
+                _floorInfo.text = "（尚未讀到佈局）";
+                _floorBox.Clear();
+                _floorKey = null;
+                _floorHow.text = string.Empty;
+                return;
+            }
+
+            var outline = editing ? _editor.FloorOutline() : LayoutFloorShape.Outline(floor);
+            var bounds = LayoutFloorShape.Bounds(outline);
+            _floorInfo.text = $"外框 {bounds.MaxX - bounds.MinX:0.0} × {bounds.MaxZ - bounds.MinZ:0.0} m　面積 {FloorGeometry.Area(outline):0.0} m²　{outline.Count} 面牆";
+            _floorHow.text = editing
+                ? "按上面的「廠房」工具，在場景裡拖曳牆角、整段牆與大門；點牆可在中間加轉角，點轉角可刪除。"
+                : "進入編輯後，用「廠房」工具在場景裡拖曳編輯外牆。";
+
+            var wall = editing ? _editor.SelectedWall : -1;
+            var corner = editing ? _editor.SelectedCorner : -1;
+            string text = null;
+            if (wall >= 0 && wall < outline.Count)
+            {
+                var gateWall = LayoutFloorShape.GateWallIndex(floor) == wall ? "　（大門在這面牆）" : string.Empty;
+                text = $"第 {wall + 1} 面牆　長度 {FloorGeometry.WallLength(outline, wall):0.0} m　角度 {FloorGeometry.WallAngle(outline, wall):0}°（0° 朝東、逆時針）{gateWall}";
+            }
+            else if (corner >= 0 && corner < outline.Count)
+            {
+                text = $"第 {corner + 1} 個轉角　X {outline[corner].X:0.0}、Z {outline[corner].Z:0.0} m";
+            }
+
+            var canInsert = editing && _editor.CanInsertCorner;
+            var canRemove = editing && _editor.CanRemoveCorner;
+            var key = $"{text}|{enabled}|{canInsert}|{canRemove}|{wall}|{corner}";
+            if (key == _floorKey)
+            {
+                return;
+            }
+
+            _floorKey = key;
+            _floorBox.Clear();
+            if (text == null)
+            {
+                return;
+            }
+
+            var label = new Label(text);
+            label.style.unityFontStyleAndWeight = FontStyle.Bold;
+            label.style.whiteSpace = WhiteSpace.Normal;
+            _floorBox.Add(label);
+
+            var row = Row();
+            if (wall >= 0)
+            {
+                var insert = ActionButton("在中間加轉角", () => _editor.InsertCornerInMiddle());
+                insert.SetEnabled(enabled && canInsert);
+                row.Add(insert);
+                _floorBox.Add(row);
+                if (!canInsert)
+                {
+                    _floorBox.Add(Hint($"轉角已達上限（{LayoutRules.MaxFloorVertices} 個）。"));
+                }
+            }
+            else
+            {
+                var remove = ActionButton("刪除轉角", () => _editor.RemoveSelectedCorner());
+                remove.SetEnabled(enabled && canRemove);
+                row.Add(remove);
+                _floorBox.Add(row);
+                if (!canRemove)
+                {
+                    _floorBox.Add(Hint("至少要留 3 個轉角。"));
+                }
+            }
         }
 
         private void RefreshSelection(bool editing, bool enabled)
@@ -567,7 +620,7 @@ namespace OpenFleet.Unity
 
             if (shown > 0)
             {
-                _issueList.Add(Hint("點一條會選取相關的模組、路口或路段並把畫面移過去。"));
+                _issueList.Add(Hint("點一條會選取相關的模組、路口、路段或牆（外牆與大門的問題會切到廠房工具）並把畫面移過去。"));
             }
         }
 
