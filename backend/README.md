@@ -31,6 +31,8 @@ dotnet run --project backend/src/OpenFleet.Simulator
 dotnet test backend/OpenFleet.slnx
 ```
 
+後端測試也會在 GitHub Actions 自動執行（push／pull request 動到 `backend/` 時觸發，見 `.github/workflows/backend-tests.yml`）。本機執行整合測試需要 Docker，PostgreSQL 由 Testcontainers 啟動。
+
 手動操作可用 `src/OpenFleet.Api/OpenFleet.Api.http`（VS／Rider／VS Code REST Client），或：
 
 ```bash

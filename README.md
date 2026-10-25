@@ -1,3 +1,5 @@
+[![Backend tests](https://github.com/Tinyhello/OpenFleet/actions/workflows/backend-tests.yml/badge.svg)](https://github.com/Tinyhello/OpenFleet/actions/workflows/backend-tests.yml)
+
 # OpenFleet
 
 ![OpenFleet demo](document/media/openfleet-preview.gif)
