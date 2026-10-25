@@ -35,6 +35,18 @@ namespace OpenFleet.Layout
         /// <summary>兩個占地的重疊面積超過這個值才算重疊（貼邊不算）。</summary>
         public const double OverlapArea = 1e-4;
 
+        /// <summary>路網編輯：新節點離既有節點這麼近就合併過去（公尺）。使用者決定（規劃第 7 節）。</summary>
+        public const double MergeDistance = 0.3;
+
+        /// <summary>路網編輯：畫出來的路段最長 4 m，更長的切成等長的幾段（公尺）。</summary>
+        public const double MaxSegmentLength = 4.0;
+
+        /// <summary>模組自動接路：從交接點往外找路的最遠距離，支線不切段（公尺）。</summary>
+        public const double MaxSpurLength = 8.0;
+
+        /// <summary>點離路段這麼近就視為落在路段上，會把路段切開（公尺）。</summary>
+        public const double OnEdgeDistance = 0.01;
+
         public static readonly int[] AllowedRotations = { 0, 90, 180, 270 };
     }
 }

@@ -78,6 +78,9 @@ namespace OpenFleet.Contracts
         public bool IsDefault { get; set; }
         public DateTimeOffset UpdatedAt { get; set; }
         public DateTimeOffset? AppliedAt { get; set; }
+
+        /// <summary>使用中的佈局存檔後還沒套用：存的文件和工廠正在跑的不同。非使用中的佈局恆為 false。</summary>
+        public bool HasUnappliedChanges { get; set; }
     }
 
     public sealed class LayoutDto
@@ -88,6 +91,11 @@ namespace OpenFleet.Contracts
         public bool IsDefault { get; set; }
         public DateTimeOffset UpdatedAt { get; set; }
         public DateTimeOffset? AppliedAt { get; set; }
+
+        /// <summary>同 <see cref="LayoutSummaryDto.HasUnappliedChanges"/>。</summary>
+        public bool HasUnappliedChanges { get; set; }
+
+        /// <summary>GET active 是工廠正在跑的（套用快照）；其他端點是存下來可編輯的文件。</summary>
         public FactoryLayoutDocument Document { get; set; } = new FactoryLayoutDocument();
     }
 

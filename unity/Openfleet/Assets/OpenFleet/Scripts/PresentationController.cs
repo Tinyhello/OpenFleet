@@ -75,6 +75,25 @@ namespace OpenFleet.Unity
             public static readonly Color Ok = new Color(0.55f, 0.9f, 0.6f);
             public static readonly Color Selected = new Color(0.98f, 0.78f, 0.35f);
 
+            // 佈局編輯（P7 第 4 步）：占地框線與地面墊片的顏色。顏色是 Claude 暫定的，要調整只改這裡。
+            /// <summary>選取的模組。</summary>
+            public static readonly Color LayoutSelected = new Color(1f, 0.85f, 0.2f);
+
+            /// <summary>檢查結果有錯誤的模組。</summary>
+            public static readonly Color LayoutError = new Color(1f, 0.25f, 0.2f);
+
+            /// <summary>擺放中或拖曳中：這個位置可以放（在廠房內、沒有重疊）。</summary>
+            public static readonly Color PlaceOk = new Color(0.25f, 0.9f, 0.4f);
+
+            /// <summary>擺放中或拖曳中：這個位置不能放（超出廠房或和別的模組重疊）；放下去仍然允許，會在檢查結果裡報錯。</summary>
+            public static readonly Color PlaceBlocked = new Color(1f, 0.25f, 0.2f);
+
+            /// <summary>編輯模式地面的 1 m 格線。</summary>
+            public static readonly Color Grid = new Color(0.52f, 0.57f, 0.63f);
+
+            /// <summary>路網的節點（第 5 步畫路線時使用；這一步先定義，節點小圓點目前仍用場景材質）。</summary>
+            public static readonly Color Node = new Color(0.95f, 0.97f, 1f);
+
             /// <summary>急單（排在所有訂單前面）的標示。</summary>
             public static readonly Color Rush = new Color(1f, 0.62f, 0.3f);
             public static readonly Color InputText = new Color(0.08f, 0.09f, 0.11f);
@@ -158,6 +177,15 @@ namespace OpenFleet.Unity
         private int _screenHeight;
 
         public static PresentationController Instance { get; private set; }
+
+        /// <summary>
+        /// 佈局編輯中（P7 第 4 步）：場景畫的是草稿，車輛與機台、車輛上的進度條、路徑虛線都先隱藏（工廠在後端照常運轉）。
+        /// 由 LayoutEditor 設定；設定時車輛一起切換顯示，編輯中才出現的車直接建成隱藏。
+        /// </summary>
+        public bool LayoutEditing { get; private set; }
+
+        /// <summary>編輯狀態改變；StatusOverlay 據此隱藏或恢復進度條與路徑虛線。</summary>
+        public event Action LayoutEditingChanged;
 
         /// <summary>
         /// 目前的介面縮放倍數：操作面板、機台上的進度條（UI Toolkit）與左上的車輛清單（IMGUI）都照這個倍數放大。
@@ -286,10 +314,28 @@ namespace OpenFleet.Unity
 
         public bool TryGetVehicle(string vehicleId, out VehicleView view) => _vehicles.TryGetValue(vehicleId, out view);
 
+        /// <summary>進入或離開佈局編輯：車輛一起隱藏或恢復，並通知進度條與路徑虛線。</summary>
+        public void SetLayoutEditing(bool editing)
+        {
+            if (LayoutEditing == editing)
+            {
+                return;
+            }
+
+            LayoutEditing = editing;
+            foreach (var view in _vehicles.Values)
+            {
+                view.gameObject.SetActive(!editing);
+            }
+
+            LayoutEditingChanged?.Invoke();
+        }
+
         /// <summary>依車型從 Resources 載入 Prefab 並建立一台車。</summary>
         public VehicleView SpawnVehicle(string vehicleId, VehicleType type)
         {
             var view = VehicleView.Create(PrefabFor(type), vehicleId, type, transform);
+            view.gameObject.SetActive(!LayoutEditing);
             _vehicles.Add(vehicleId, view);
             return view;
         }

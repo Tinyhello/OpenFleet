@@ -63,6 +63,22 @@ namespace OpenFleet.Unity
         /// <summary>滑鼠是否在面板上；攝影機用來避免捲動清單時同時縮放畫面。</summary>
         public static bool PointerOverPanel { get; private set; }
 
+        /// <summary>
+        /// 面板的輸入框有焦點（正在打字，包括滑桿旁的數字框）。鍵盤快捷鍵（WASD、R、Delete、Ctrl+Z…）此時不處理。
+        /// 按鈕有焦點不算：按完按鈕之後快捷鍵仍然要能用。
+        /// </summary>
+        public static bool TextInputFocused { get; private set; }
+
+        private bool IsTextInputFocused()
+        {
+            if (_root.panel?.focusController?.focusedElement is VisualElement element && !(element is Button))
+            {
+                return element is TextElement || element.GetFirstAncestorOfType<TextField>() != null;
+            }
+
+            return false;
+        }
+
         private string Api => PresentationController.Instance.Fleet.ApiBaseUrl;
 
         private void OnEnable()
@@ -75,12 +91,15 @@ namespace OpenFleet.Unity
             Build();
             StartCoroutine(LoadSettings());
             StartCoroutine(RefreshLoop());
+            OnLayoutPanelEnabled();
         }
 
         private void OnDisable()
         {
             StopAllCoroutines();
             PointerOverPanel = false;
+            TextInputFocused = false;
+            OnLayoutPanelDisabled();
         }
 
         private void Update()
@@ -96,6 +115,15 @@ namespace OpenFleet.Unity
             var screen = mouse.position.ReadValue();
             var position = RuntimePanelUtils.ScreenToPanel(_root.panel, new Vector2(screen.x, Screen.height - screen.y));
             PointerOverPanel = _panel.resolvedStyle.display != DisplayStyle.None && _panel.worldBound.Contains(position);
+
+            // 面板收起時右上角的「展開面板」按鈕也算在面板上，點它不會被當成點場景（佈局編輯用）。
+            if (!PointerOverPanel && _expand != null && _expand.resolvedStyle.display != DisplayStyle.None)
+            {
+                PointerOverPanel = _expand.worldBound.Contains(position);
+            }
+
+            TextInputFocused = IsTextInputFocused();
+            UpdateLayoutPage();
 
             // 用快捷鍵（Ctrl＋＝／－／0）調整時，面板上的數字跟著變。
             var size = $"介面大小 {PresentationController.Instance.UiSizeText}";
@@ -180,10 +208,12 @@ namespace OpenFleet.Unity
             var tabs = Row();
             tabs.style.marginTop = 0;
             tabs.style.marginBottom = 6;
-            _operationsTab = ActionButton("操作", () => ShowPage(false));
+            _operationsTab = ActionButton("操作", () => ShowPage(0));
             tabs.Add(_operationsTab);
-            _scheduleTab = ActionButton("排程", () => ShowPage(true));
+            _scheduleTab = ActionButton("排程", () => ShowPage(1));
             tabs.Add(_scheduleTab);
+            _layoutTab = ActionButton("佈局", () => ShowPage(2));
+            tabs.Add(_layoutTab);
             content.Add(tabs);
 
             var operations = _operationsPage = new VisualElement();
@@ -191,7 +221,10 @@ namespace OpenFleet.Unity
             _schedulePage = new VisualElement();
             content.Add(_schedulePage);
             BuildSchedulePage(_schedulePage);
-            ShowPage(false);
+            _layoutPage = new VisualElement();
+            content.Add(_layoutPage);
+            BuildLayoutPage(_layoutPage);
+            ShowPage(0);
 
             // 設定預設收合，平常只留批次清單，不擋住場景；點標題展開。
             var settings = new Foldout { text = "示範設定（點此展開）", value = false };

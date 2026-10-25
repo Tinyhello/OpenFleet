@@ -60,6 +60,8 @@ namespace OpenFleet.Unity
             _root.Add(_routeLayer);
 
             _presentation.StationsChanged += ClearStations;
+            _presentation.LayoutEditingChanged += ShowForEditing;
+            ShowForEditing();
             StartCoroutine(RefreshLoop());
         }
 
@@ -68,6 +70,7 @@ namespace OpenFleet.Unity
             if (_presentation != null)
             {
                 _presentation.StationsChanged -= ClearStations;
+                _presentation.LayoutEditingChanged -= ShowForEditing;
             }
 
             StopAllCoroutines();
@@ -87,6 +90,15 @@ namespace OpenFleet.Unity
             }
 
             _stations.Clear();
+        }
+
+        /// <summary>
+        /// 佈局編輯中（場景畫的是草稿，車輛隱藏）：機台與車輛上的進度條、路徑虛線整層隱藏；離開編輯時恢復。
+        /// 編輯中站點會先換成空的（見 LayoutEditor），所以輪詢到的狀態也不會再建立新的進度條。
+        /// </summary>
+        private void ShowForEditing()
+        {
+            _root.style.display = _presentation.LayoutEditing ? DisplayStyle.None : DisplayStyle.Flex;
         }
 
         private IEnumerator RefreshLoop()

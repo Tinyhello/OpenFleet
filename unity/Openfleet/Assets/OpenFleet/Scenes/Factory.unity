@@ -119,7 +119,7 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
---- !u!1 &467303268
+--- !u!1 &99238035
 GameObject:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -127,10 +127,10 @@ GameObject:
   m_PrefabAsset: {fileID: 0}
   serializedVersion: 6
   m_Component:
-  - component: {fileID: 467303272}
-  - component: {fileID: 467303271}
-  - component: {fileID: 467303270}
-  - component: {fileID: 467303269}
+  - component: {fileID: 99238039}
+  - component: {fileID: 99238038}
+  - component: {fileID: 99238037}
+  - component: {fileID: 99238036}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -138,13 +138,13 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!114 &467303269
+--- !u!114 &99238036
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 467303268}
+  m_GameObject: {fileID: 99238035}
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 54c7af88c92c2474da6cb268c89177c0, type: 3}
@@ -158,21 +158,21 @@ MonoBehaviour:
   maxDistance: 80
   rotateSpeed: 0.25
   keyPanSpeed: 0.6
---- !u!81 &467303270
+--- !u!81 &99238037
 AudioListener:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 467303268}
+  m_GameObject: {fileID: 99238035}
   m_Enabled: 1
---- !u!20 &467303271
+--- !u!20 &99238038
 Camera:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 467303268}
+  m_GameObject: {fileID: 99238035}
   m_Enabled: 1
   serializedVersion: 2
   m_ClearFlags: 2
@@ -217,13 +217,13 @@ Camera:
   m_OcclusionCulling: 1
   m_StereoConvergence: 10
   m_StereoSeparation: 0.022
---- !u!4 &467303272
+--- !u!4 &99238039
 Transform:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 467303268}
+  m_GameObject: {fileID: 99238035}
   serializedVersion: 2
   m_LocalRotation: {x: 0.4226183, y: 0, z: 0, w: 0.9063078}
   m_LocalPosition: {x: 3, y: 42.898487, z: -37.496105}
@@ -232,7 +232,7 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &1100991114
+--- !u!1 &505918634
 GameObject:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -240,8 +240,109 @@ GameObject:
   m_PrefabAsset: {fileID: 0}
   serializedVersion: 6
   m_Component:
-  - component: {fileID: 1100991116}
-  - component: {fileID: 1100991115}
+  - component: {fileID: 505918640}
+  - component: {fileID: 505918639}
+  - component: {fileID: 505918638}
+  - component: {fileID: 505918637}
+  - component: {fileID: 505918636}
+  - component: {fileID: 505918635}
+  m_Layer: 0
+  m_Name: OpenFleet
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &505918635
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 505918634}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ae4ee03b2b8c0a74aa0df39df59d956e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.FleetView
+  apiBaseUrl: http://localhost:5229
+--- !u!114 &505918636
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 505918634}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 16c05881dcf31a345b4ffd3998996fd0, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.LayoutEditor
+--- !u!114 &505918637
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 505918634}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 00dbe298bc78332459654146e830fc5d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.LayoutController
+--- !u!114 &505918638
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 505918634}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8db4d28d71e7a29409d677ad450c253e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.PresentationController
+--- !u!114 &505918639
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 505918634}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ea883f652a34ffc408939458814514f1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.FleetMqttClient
+  host: localhost
+  port: 1883
+  factoryId: demo
+  reconnectDelaySeconds: 2
+--- !u!4 &505918640
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 505918634}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &2094920462
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2094920464}
+  - component: {fileID: 2094920463}
   m_Layer: 0
   m_Name: Sun
   m_TagString: Untagged
@@ -249,13 +350,13 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!108 &1100991115
+--- !u!108 &2094920463
 Light:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1100991114}
+  m_GameObject: {fileID: 2094920462}
   m_Enabled: 1
   serializedVersion: 13
   m_Type: 1
@@ -314,103 +415,15 @@ Light:
   m_LightUnit: 1
   m_LuxAtDistance: 1
   m_EnableSpotReflector: 1
---- !u!4 &1100991116
+--- !u!4 &2094920464
 Transform:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1100991114}
+  m_GameObject: {fileID: 2094920462}
   serializedVersion: 2
   m_LocalRotation: {x: 0.418082, y: -0.27027258, z: 0.13182074, w: 0.85719514}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &1867218312
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 1867218317}
-  - component: {fileID: 1867218316}
-  - component: {fileID: 1867218315}
-  - component: {fileID: 1867218314}
-  - component: {fileID: 1867218313}
-  m_Layer: 0
-  m_Name: OpenFleet
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &1867218313
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1867218312}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: ae4ee03b2b8c0a74aa0df39df59d956e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.FleetView
-  apiBaseUrl: http://localhost:5229
---- !u!114 &1867218314
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1867218312}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 00dbe298bc78332459654146e830fc5d, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.LayoutController
---- !u!114 &1867218315
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1867218312}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 8db4d28d71e7a29409d677ad450c253e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.PresentationController
---- !u!114 &1867218316
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1867218312}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: ea883f652a34ffc408939458814514f1, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: OpenFleet.Unity::OpenFleet.Unity.FleetMqttClient
-  host: localhost
-  port: 1883
-  factoryId: demo
-  reconnectDelaySeconds: 2
---- !u!4 &1867218317
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1867218312}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
@@ -421,6 +434,6 @@ Transform:
 SceneRoots:
   m_ObjectHideFlags: 0
   m_Roots:
-  - {fileID: 1100991116}
-  - {fileID: 467303272}
-  - {fileID: 1867218317}
+  - {fileID: 2094920464}
+  - {fileID: 99238039}
+  - {fileID: 505918640}

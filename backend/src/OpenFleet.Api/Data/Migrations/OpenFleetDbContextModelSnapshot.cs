@@ -332,6 +332,9 @@ namespace OpenFleet.Api.Data.Migrations
                     b.Property<DateTimeOffset?>("AppliedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("AppliedDocument")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("AppliedHash")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");

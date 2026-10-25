@@ -278,13 +278,14 @@ public sealed class LayoutServiceTests(PostgresFixture postgres)
         var saved = await h.Service.CreateAsync(Request("標準"), ct);
         await h.Service.ApplyAsync(saved.Layout.Id, resetDemo: true, ct);
 
-        // 程式改了目錄（例如拋光的種類不再合法）：使用中的「標準」變成不合法。
+        // 程式改了目錄（例如拋光的種類不再合法）：使用中的「標準」連工廠正在跑的快照都變成不合法。
         await using (var db = h.Database.NewContext())
         {
             var layout = await db.FactoryLayouts.SingleAsync(l => l.Id == saved.Layout.Id);
             var broken = DefaultLayout.Build();
             broken.Modules.RemoveAll(m => m.Kind == ModuleKind.Polisher);
             layout.Document = broken;
+            layout.AppliedDocument = broken;
             await db.SaveChangesAsync();
         }
 
@@ -293,5 +294,83 @@ public sealed class LayoutServiceTests(PostgresFixture postgres)
         await h.Service.ReconcileOnStartupAsync(ct);
 
         Assert.True((await h.Service.GetActiveAsync(ct))!.IsDefault);
+    }
+
+    private static FactoryLayoutDocument MovedCarrier()
+    {
+        var document = DefaultLayout.Build();
+        document.Modules.Single(m => m.Code == "carrier-1").X += 2;
+        return document;
+    }
+
+    [Fact]
+    public async Task Saving_the_active_layout_keeps_the_applied_snapshot_until_applied_again()
+    {
+        await using var h = await CreateAsync();
+        var ct = CancellationToken.None;
+        var original = DefaultLayout.Build();
+        var originalX = original.Modules.Single(m => m.Code == "carrier-1").X;
+        var saved = await h.Service.CreateAsync(Request("標準", original), ct);
+        var applied = await h.Service.ApplyAsync(saved.Layout.Id, resetDemo: true, ct);
+        Assert.False(applied.Layout!.HasUnappliedChanges);
+
+        await using (var check = h.Database.NewContext())
+        {
+            var stored = await check.FactoryLayouts.SingleAsync(l => l.Id == saved.Layout.Id, ct);
+            Assert.Equal(stored.AppliedHash, LayoutJson.HashOf(stored.AppliedDocument!));
+            Assert.Equal(LayoutJson.HashOf(original), stored.AppliedHash);
+        }
+
+        var update = await h.Service.UpdateAsync(saved.Layout.Id, Request("標準", MovedCarrier()), ct);
+        Assert.True(update.Layout.HasUnappliedChanges);
+
+        // 工廠正在跑的還是舊的位置；可編輯的版本是新的位置。
+        var active = (await h.Service.GetActiveAsync(ct))!;
+        Assert.True(active.HasUnappliedChanges);
+        Assert.Equal(originalX, active.Document.Modules.Single(m => m.Code == "carrier-1").X);
+        var editable = (await h.Service.GetAsync(saved.Layout.Id, ct))!;
+        Assert.Equal(originalX + 2, editable.Document.Modules.Single(m => m.Code == "carrier-1").X);
+        Assert.True(editable.HasUnappliedChanges);
+        var list = await h.Service.ListAsync(ct);
+        Assert.True(list.Single(l => l.Id == saved.Layout.Id).HasUnappliedChanges);
+        Assert.All(list.Where(l => l.Id != saved.Layout.Id), l => Assert.False(l.HasUnappliedChanges));
+
+        // 再套用一次：快照換成新的，旗標消失。
+        var again = await h.Service.ApplyAsync(saved.Layout.Id, resetDemo: true, ct);
+        Assert.False(again.Layout!.HasUnappliedChanges);
+        var after = (await h.Service.GetActiveAsync(ct))!;
+        Assert.False(after.HasUnappliedChanges);
+        Assert.Equal(originalX + 2, after.Document.Modules.Single(m => m.Code == "carrier-1").X);
+        Assert.All(await h.Service.ListAsync(ct), l => Assert.False(l.HasUnappliedChanges));
+    }
+
+    [Fact]
+    public async Task Startup_ignores_errors_that_exist_only_in_the_saved_version_of_the_active_layout()
+    {
+        await using var h = await CreateAsync();
+        var ct = CancellationToken.None;
+        await using (var db = h.Database.NewContext())
+        {
+            await DatabaseInitializer.SeedAsync(db, DefaultLayout.Build());
+        }
+
+        var saved = await h.Service.CreateAsync(Request("標準"), ct);
+        await h.Service.ApplyAsync(saved.Layout.Id, resetDemo: true, ct);
+
+        // 存了一份有錯誤的版本（沙盒常存半成品），沒有套用。
+        var broken = DefaultLayout.Build();
+        broken.Modules.RemoveAll(m => m.Kind == ModuleKind.Polisher);
+        await h.Service.UpdateAsync(saved.Layout.Id, Request("標準", broken), ct);
+        var appliedAt = (await h.Service.GetActiveAsync(ct))!.AppliedAt;
+
+        h.Db.ChangeTracker.Clear();
+        await h.Service.ReconcileOnStartupAsync(ct);
+
+        var active = (await h.Service.GetActiveAsync(ct))!;
+        Assert.Equal(saved.Layout.Id, active.Id);
+        Assert.False(active.IsDefault);
+        Assert.True(active.HasUnappliedChanges);
+        Assert.Equal(appliedAt, active.AppliedAt);
+        Assert.Contains(active.Document.Modules, m => m.Kind == ModuleKind.Polisher);
     }
 }

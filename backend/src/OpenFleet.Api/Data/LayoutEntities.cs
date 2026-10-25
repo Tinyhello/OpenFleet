@@ -22,4 +22,10 @@ public sealed class FactoryLayoutEntity
 
     /// <summary>套用當時文件 JSON 的雜湊。啟動時和目前的文件比對：預設佈局不同，代表程式改過它，要重新套用。</summary>
     public string? AppliedHash { get; set; }
+
+    /// <summary>
+    /// 套用當時實際驗證並推導的那份文件（快照）。使用中的佈局存檔不會自動套用，所以 Document 可能比工廠正在跑的新；
+    /// 場景、啟動檢查都以這份為準（使用者決定，2026-10-25）。從來沒套用過是 null。
+    /// </summary>
+    public FactoryLayoutDocument? AppliedDocument { get; set; }
 }

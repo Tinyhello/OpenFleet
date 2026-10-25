@@ -81,6 +81,13 @@ public sealed class VehicleStatePublisher(
 
     private Task PublishAsync(VehicleState state, CancellationToken cancellationToken)
     {
+        // 佇列裡可能還有車輛退出佈局之前就排進去的狀態；照發會重建 LayoutPublisher 剛清掉的 retained 狀態，
+        // 讓 broker 留下已不存在車輛的過時資料，所以不在 store 裡的車一律不發。
+        if (!store.Contains(state.VehicleId))
+        {
+            return Task.CompletedTask;
+        }
+
         var envelope = MessageEnvelope.Create(publisher.Settings.ProducerId, state, DateTimeOffset.UtcNow);
         var topic = Topics.VehicleState(publisher.Settings.FactoryId, state.VehicleId);
         return publisher.PublishAsync(topic, envelope, MqttQualityOfServiceLevel.AtLeastOnce, retain: true, cancellationToken);

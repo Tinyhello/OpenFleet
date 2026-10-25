@@ -342,6 +342,16 @@ public sealed class OpenFleetDbContext(DbContextOptions<OpenFleetDbContext> opti
                         (a, b) => LayoutJson.Serialize(a!) == LayoutJson.Serialize(b!),
                         d => LayoutJson.Serialize(d).GetHashCode(),
                         d => LayoutJson.Deserialize(LayoutJson.Serialize(d))));
+            e.Property(l => l.AppliedDocument)
+                .HasColumnType("jsonb")
+                .HasConversion(
+                    new ValueConverter<FactoryLayoutDocument?, string?>(
+                        d => d == null ? null : LayoutJson.Serialize(d),
+                        json => json == null ? null : LayoutJson.Deserialize(json)),
+                    new ValueComparer<FactoryLayoutDocument?>(
+                        (a, b) => (a == null ? null : LayoutJson.Serialize(a)) == (b == null ? null : LayoutJson.Serialize(b)),
+                        d => d == null ? 0 : LayoutJson.Serialize(d).GetHashCode(),
+                        d => d == null ? null : LayoutJson.Deserialize(LayoutJson.Serialize(d))));
             e.Property(l => l.AppliedHash).HasMaxLength(64);
         });
 

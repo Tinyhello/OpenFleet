@@ -49,6 +49,7 @@ public sealed class LayoutService(
                 IsDefault = l.IsDefault,
                 UpdatedAt = l.UpdatedAt,
                 AppliedAt = l.AppliedAt,
+                HasUnappliedChanges = HasUnapplied(l),
             })
             .ToList();
     }
@@ -57,7 +58,7 @@ public sealed class LayoutService(
         await db.FactoryLayouts.AsNoTracking().SingleOrDefaultAsync(l => l.Id == id, cancellationToken) is { } layout ? ToDto(layout) : null;
 
     public async Task<LayoutDto?> GetActiveAsync(CancellationToken cancellationToken) =>
-        await db.FactoryLayouts.AsNoTracking().SingleOrDefaultAsync(l => l.IsActive, cancellationToken) is { } layout ? ToDto(layout) : null;
+        await db.FactoryLayouts.AsNoTracking().SingleOrDefaultAsync(l => l.IsActive, cancellationToken) is { } layout ? ToDto(layout, running: true) : null;
 
     public async Task<SaveLayoutResponse> CreateAsync(SaveLayoutRequest request, CancellationToken cancellationToken)
     {
@@ -158,7 +159,10 @@ public sealed class LayoutService(
 
         layout.IsActive = true;
         layout.AppliedAt = time.GetUtcNow();
-        layout.AppliedHash = LayoutJson.HashOf(layout.Document);
+
+        // 快照用複本：之後對 Document 的修改不能連帶改到它；雜湊也從同一份算。
+        layout.AppliedDocument = LayoutJson.Deserialize(LayoutJson.Serialize(layout.Document));
+        layout.AppliedHash = LayoutJson.HashOf(layout.AppliedDocument);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
 
@@ -167,11 +171,17 @@ public sealed class LayoutService(
         return new ApplyResult(ApplyStatus.Applied, Layout: ToDto(layout));
     }
 
-    /// <summary>啟動時檢查使用中的佈局（P7 第 2 步 5.10）：驗證失敗就改用預設佈局；預設佈局的程式改了就重新套用。有在製品時只記錄警告。</summary>
+    /// <summary>
+    /// 啟動時檢查使用中的佈局（P7 第 2 步 5.10）：驗證「套用快照」（工廠正在跑的那份）失敗就改用預設佈局；
+    /// 預設佈局的程式改了就重新套用。自訂佈局存了還沒套用是正常狀態，不因為存檔版本的錯誤退回（使用者決定，2026-10-25）。
+    /// </summary>
     public async Task ReconcileOnStartupAsync(CancellationToken cancellationToken)
     {
         var active = await db.FactoryLayouts.SingleAsync(l => l.IsActive, cancellationToken);
-        var validation = LayoutValidator.Validate(active.Document);
+
+        // 預設佈局的文件每次啟動由程式覆寫，所以以它的文件為準；自訂佈局看快照（沒有快照的舊資料退回存檔版本）。
+        var running = active.IsDefault ? active.Document : active.AppliedDocument ?? active.Document;
+        var validation = LayoutValidator.Validate(running);
         if (!validation.IsValid)
         {
             logger.LogWarning("Active layout {Name} has {Count} error(s) after a code change; switching to the default layout.", active.Name, validation.Issues.Count);
@@ -180,20 +190,21 @@ public sealed class LayoutService(
             return;
         }
 
-        if (active.AppliedHash == LayoutJson.HashOf(active.Document))
-        {
-            return;
-        }
-
         if (active.IsDefault)
         {
-            logger.LogInformation("The default layout changed in code; re-applying it.");
-            await ApplyAtStartupAsync(active.Id, cancellationToken);
+            if (active.AppliedHash != LayoutJson.HashOf(active.Document))
+            {
+                logger.LogInformation("The default layout changed in code; re-applying it.");
+                await ApplyAtStartupAsync(active.Id, cancellationToken);
+            }
+
             return;
         }
 
-        // 自訂佈局的文件改過但還沒套用：只提醒，不替使用者套用。
-        logger.LogWarning("Layout {Name} has saved changes that are not applied; the factory keeps the applied version.", active.Name);
+        if (HasUnapplied(active))
+        {
+            logger.LogInformation("Layout {Name} has saved changes that are not applied; the factory keeps the applied version.", active.Name);
+        }
     }
 
     private async Task ApplyAtStartupAsync(Guid id, CancellationToken cancellationToken)
@@ -282,7 +293,12 @@ public sealed class LayoutService(
         Validation = validation,
     };
 
-    private static LayoutDto ToDto(FactoryLayoutEntity layout) => new()
+    // 使用中且存的文件和套用快照不同。快照是 null（理論上只有從沒套用過的使用中佈局）時以雜湊判斷，沒有雜湊就視為有差異。
+    private static bool HasUnapplied(FactoryLayoutEntity layout) =>
+        layout.IsActive && layout.AppliedHash != LayoutJson.HashOf(layout.Document);
+
+    // running 為 true 時 Document 給工廠正在跑的快照（GET active）；否則給存下來可編輯的文件。
+    private static LayoutDto ToDto(FactoryLayoutEntity layout, bool running = false) => new()
     {
         Id = layout.Id,
         Name = layout.Name,
@@ -290,6 +306,7 @@ public sealed class LayoutService(
         IsDefault = layout.IsDefault,
         UpdatedAt = layout.UpdatedAt,
         AppliedAt = layout.AppliedAt,
-        Document = layout.Document,
+        HasUnappliedChanges = HasUnapplied(layout),
+        Document = running ? layout.AppliedDocument ?? layout.Document : layout.Document,
     };
 }

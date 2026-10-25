@@ -84,14 +84,20 @@ namespace OpenFleet.Unity
             return text;
         }
 
-        /// <summary>切換「操作」與「排程」兩頁；切到排程時馬上讀一次，之後每秒更新。</summary>
-        private void ShowPage(bool schedule)
+        /// <summary>
+        /// 切換「操作」（0）、「排程」（1）、「佈局」（2，ProductionPanel.Layout.cs）三頁；切到排程時馬上讀一次，之後每秒更新。
+        /// </summary>
+        private void ShowPage(int page)
         {
+            var schedule = page == 1;
+            var layout = page == 2;
             _scheduleVisible = schedule;
-            _operationsPage.style.display = schedule ? DisplayStyle.None : DisplayStyle.Flex;
+            _operationsPage.style.display = page == 0 ? DisplayStyle.Flex : DisplayStyle.None;
             _schedulePage.style.display = schedule ? DisplayStyle.Flex : DisplayStyle.None;
-            Highlight(_operationsTab, !schedule, Colors.Selected);
+            _layoutPage.style.display = layout ? DisplayStyle.Flex : DisplayStyle.None;
+            Highlight(_operationsTab, page == 0, Colors.Selected);
             Highlight(_scheduleTab, schedule, Colors.Selected);
+            Highlight(_layoutTab, layout, Colors.Selected);
             if (_panelScroll != null)
             {
                 _panelScroll.scrollOffset = Vector2.zero;
@@ -100,6 +106,11 @@ namespace OpenFleet.Unity
             if (schedule && isActiveAndEnabled)
             {
                 StartCoroutine(RefreshSchedule());
+            }
+
+            if (layout)
+            {
+                OnLayoutPageShown();
             }
         }
 

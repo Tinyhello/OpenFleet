@@ -36,11 +36,27 @@ namespace OpenFleet.Unity
 
         public Transform Following { get; private set; }
 
+        // Focus 的目標點；到達或使用者自己平移、跟隨、回預設視角時結束。
+        private Vector3 _focusPoint;
+        private bool _focusing;
+
+        /// <summary>
+        /// 把視角目標平滑移到 <paramref name="point"/>（地面座標），縮放與角度不變，並取消跟隨。
+        /// 佈局編輯時點選檢查結果的問題用（P7 第 4 步）。
+        /// </summary>
+        public void Focus(Vector3 point)
+        {
+            Following = null;
+            _focusPoint = new Vector3(point.x, 0f, point.z);
+            _focusing = true;
+        }
+
         public void Follow(Transform vehicle)
         {
             Following = vehicle;
             if (vehicle != null)
             {
+                _focusing = false;
                 distance = Mathf.Min(distance, 16f);
             }
         }
@@ -70,6 +86,7 @@ namespace OpenFleet.Unity
             }
 
             Following = null;
+            _focusing = false;
             target = _homeTarget;
             yaw = _homeYaw;
             pitch = _homePitch;
@@ -101,7 +118,8 @@ namespace OpenFleet.Unity
                 }
             }
 
-            var keyboard = Keyboard.current;
+            // 面板的輸入框有焦點時（例如打佈局名稱）鍵盤是用來打字的，不移動攝影機。
+            var keyboard = ProductionPanel.TextInputFocused ? null : Keyboard.current;
             if (keyboard != null)
             {
                 var move = Vector2.zero;
@@ -122,6 +140,7 @@ namespace OpenFleet.Unity
                 if (keyboard.fKey.wasPressedThisFrame)
                 {
                     Following = null;
+                    _focusing = false;
                     target = _homeTarget;
                     yaw = _homeYaw;
                     pitch = _homePitch;
@@ -136,6 +155,15 @@ namespace OpenFleet.Unity
             {
                 target = Vector3.Lerp(target, Following.position, 1f - Mathf.Exp(-6f * Time.deltaTime));
             }
+            else if (_focusing)
+            {
+                target = Vector3.Lerp(target, _focusPoint, 1f - Mathf.Exp(-8f * Time.deltaTime));
+                if ((target - _focusPoint).sqrMagnitude < 0.0025f)
+                {
+                    target = _focusPoint;
+                    _focusing = false;
+                }
+            }
 
             var rotation = Quaternion.Euler(pitch, yaw, 0f);
             transform.SetPositionAndRotation(target - rotation * Vector3.forward * distance, rotation);
@@ -145,6 +173,7 @@ namespace OpenFleet.Unity
         private void Pan(Vector2 amount)
         {
             Following = null;
+            _focusing = false;
             var flat = Quaternion.Euler(0f, yaw, 0f);
             target += flat * new Vector3(amount.x, 0f, amount.y);
         }

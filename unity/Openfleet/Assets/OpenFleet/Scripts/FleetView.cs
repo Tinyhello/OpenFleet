@@ -11,6 +11,7 @@ namespace OpenFleet.Unity
     /// 套用佈局時被拿掉車位的車，state Topic 會被後端清掉（空的 retained 訊息），這裡收到就把那台車移除。
     /// </summary>
     [RequireComponent(typeof(FleetMqttClient), typeof(PresentationController), typeof(LayoutController))]
+    [RequireComponent(typeof(LayoutEditor))]
     public sealed class FleetView : MonoBehaviour
     {
         [SerializeField] private string apiBaseUrl = "http://localhost:5229";
@@ -22,6 +23,12 @@ namespace OpenFleet.Unity
 
         /// <summary>後端 HTTP API 的位址；其他面板共用這一個設定。</summary>
         public string ApiBaseUrl => apiBaseUrl;
+
+        /// <summary>
+        /// 左上狀態框在螢幕上的範圍（原點在左上，像素；最近一次繪製的結果，沒畫時是空的）。
+        /// 佈局編輯用它判斷滑鼠是不是在這個框上，不然點框會被當成點場景。
+        /// </summary>
+        public static Rect OverlayRect { get; private set; }
 
         private void Awake()
         {
@@ -173,10 +180,12 @@ namespace OpenFleet.Unity
             var cameraController = _presentation.CameraController;
             GUILayout.BeginArea(new Rect(10, 10, 520 * scale, Screen.height - 20));
             GUILayout.BeginVertical(GUI.skin.box);
+
             // 還沒有佈局時（後端沒開或還沒有使用中的佈局）在連線狀態後面接上「等待後端佈局…」。
             var layoutStatus = _layout != null ? _layout.StatusText : string.Empty;
             GUILayout.Label(layoutStatus.Length > 0 ? $"{_status}　{layoutStatus}" : _status, _labelStyle);
-            foreach (var view in _presentation.Vehicles)
+            // 佈局編輯中車輛隱藏，跟隨與 Ping 都沒有意義，列表先收起來。
+            foreach (var view in _presentation.LayoutEditing ? System.Linq.Enumerable.Empty<VehicleView>() : _presentation.Vehicles)
             {
                 var s = view.State;
                 GUILayout.BeginHorizontal();
@@ -204,6 +213,13 @@ namespace OpenFleet.Unity
             }
 
             GUILayout.EndVertical();
+            if (Event.current.type == EventType.Repaint)
+            {
+                // 結束群組後的 LastRect 就是整個狀態框（區域內座標，加上區域的左上角 10, 10）。
+                var boxRect = GUILayoutUtility.GetLastRect();
+                OverlayRect = new Rect(boxRect.x + 10, boxRect.y + 10, boxRect.width, boxRect.height);
+            }
+
             GUILayout.EndArea();
         }
 

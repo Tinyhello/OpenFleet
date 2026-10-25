@@ -46,6 +46,7 @@ public static class LayoutWriter
         layout.IsActive = true;
         layout.AppliedAt = now;
         layout.AppliedHash = LayoutJson.HashOf(defaultDocument);
+        layout.AppliedDocument = LayoutJson.Deserialize(LayoutJson.Serialize(defaultDocument));
         await db.SaveChangesAsync();
     }
 

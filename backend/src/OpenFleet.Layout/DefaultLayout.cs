@@ -50,7 +50,7 @@ namespace OpenFleet.Layout
         }
 
         /// <summary>路網節點代碼：座標格式 x,z（最多兩位小數、invariant）。</summary>
-        public static string Code(double x, double z) => FormattableString.Invariant($"{x:0.##},{z:0.##}");
+        public static string Code(double x, double z) => RoadGraphEditor.NodeCode(x, z);
 
         private static void AddModules(FactoryLayoutDocument document)
         {

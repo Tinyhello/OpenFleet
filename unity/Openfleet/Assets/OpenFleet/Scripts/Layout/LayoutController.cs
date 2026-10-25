@@ -107,6 +107,19 @@ namespace OpenFleet.Unity
         }
 
         /// <summary>
+        /// 離開編輯模式（LayoutEditor 呼叫）：場景回到使用中的佈局。編輯中收到新版本（<c>_needsLoad</c>）時不用先畫舊的，
+        /// 載入迴圈下一個 frame 就會向後端重新要一份並重建。
+        /// </summary>
+        public void LeaveEditMode()
+        {
+            _editMode = false;
+            if (_active != null && !_needsLoad)
+            {
+                Rebuild(_active);
+            }
+        }
+
+        /// <summary>
         /// 通知「佈局可能變了」，下一個 frame 重新向後端要使用中的佈局並重建（第 4 步套用佈局之後用）。
         /// </summary>
         public void Reload()
