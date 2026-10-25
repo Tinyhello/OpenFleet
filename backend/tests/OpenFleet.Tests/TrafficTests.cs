@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using OpenFleet.Layout;
 using Microsoft.Extensions.Time.Testing;
 using OpenFleet.Api.Traffic;
@@ -62,12 +63,13 @@ public class TrafficControllerTests
     private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 10, 9, 8, 0, 0, TimeSpan.Zero));
     private readonly RoadNetwork _network;
     private readonly TrafficController _traffic;
+    private readonly CapturingLogger<TrafficController> _log = new();
     private readonly List<Car> _cars = [];
 
     public TrafficControllerTests()
     {
         _network = TestLayouts.Network(DefaultLayout.Build());
-        _traffic = new TrafficController(_network, new TrafficOptions(), _time);
+        _traffic = new TrafficController(_network, new TrafficOptions(), _time, _log);
     }
 
     [Fact]
@@ -154,6 +156,13 @@ public class TrafficControllerTests
         var entering = Add("agv-02", "4,-7", goal: "4,-9.4");
 
         RunUntil(() => leaving.Node == "20,-9.4" && entering.Node == "4,-9.4");
+
+        // 死結處理只記一行（動作成功後不會每輪重複偵測），而且寫明是誰、做了什麼。
+        var line = Assert.Single(_log.Entries);
+        Assert.Equal(LogLevel.Information, line.Level);
+        Assert.Contains("yield", line.Message);
+        Assert.Contains("agv-01", line.Message);
+        Assert.Contains("agv-02", line.Message);
     }
 
     [Fact]
@@ -213,6 +222,19 @@ public class TrafficControllerTests
         }
 
         Assert.Equal(120, arrivals);
+    }
+
+    /// <summary>收集日誌內容的假 logger，用來確認死結處理有留下紀錄。</summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, formatter(state, exception)));
     }
 
     private Car Add(string id, string node, string? goal, bool canMove = true)

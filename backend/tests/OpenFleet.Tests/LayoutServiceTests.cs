@@ -36,7 +36,7 @@ public sealed class LayoutServiceTests(PostgresFixture postgres)
         var db = database.NewContext();
         var network = new RoadNetwork();
         var active = new ActiveLayout();
-        var traffic = new TrafficController(network, new TrafficOptions(), database.Time);
+        var traffic = new TrafficController(network, new TrafficOptions(), database.Time, NullLogger<TrafficController>.Instance);
         var fleet = new FleetStateStore(database.Time, new StateChangeQueue(), active);
         var runtime = new LayoutRuntime(db, network, traffic, active, fleet);
         var service = new LayoutService(db, new LayoutGate(), runtime, database.Time, NullLogger<LayoutService>.Instance);

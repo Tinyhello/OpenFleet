@@ -78,11 +78,86 @@ dotnet ef migrations add <名稱> --project src/OpenFleet.Api -o Data/Migrations
 | `GET /api/shortage` | 缺車統計（車都在忙）：此刻叫不到車的任務數、任務等車的累計，以及各工序機台因缺車停下來的時間（等不到料、成品沒被搬走、等刀）。車型全部離線是重大事故，另外列在 `offline…` 欄位，不算進缺車。秒數是實際時間 |
 | `GET /api/shortage/waits`、`GET /api/shortage/delays` | 最近 100 筆缺車等待區間（每個任務）與機台耽誤區間（每台機台，含機台代碼） |
 | `GET /api/schedule` | 排程預估：照現在的狀態與排程規則往後推算，每台機台接下來做哪幾框（開始、結束、要不要換線）、每座爐接下來開哪幾爐，以及每張還沒出貨的訂單預估什麼時候包裝完、什麼時候出貨、趕不趕得上交期。`normal` 一律用正常速度算，交期只跟它比；測試模式開著時另有 `accelerated`（目前的倍率）。算不出來的訂單在 `blocker` 寫原因（等料、爐湊不滿）。簡化見 P6實作紀錄第 5 節 |
-| `GET /api/layouts`、`GET /api/layouts/{id}`、`GET /api/layouts/active` | 佈局列表（不含文件）、一份佈局（含文件）、使用中的佈局。預設佈局排第一；同時只有一份是使用中（P7 第 2 步） |
+| `GET /api/layouts`、`GET /api/layouts/{id}`、`GET /api/layouts/active` | 佈局列表（不含文件）、一份佈局（含文件）、使用中的佈局。預設佈局排第一；同時只有一份是使用中（P7 第 2 步）。`active` 回的是工廠正在跑的版本（套用快照），其他兩個回存檔的文件；使用中的佈局存檔後還沒套用時 `hasUnappliedChanges` 為 true |
 | `POST /api/layouts`、`PUT /api/layouts/{id}`、`DELETE /api/layouts/{id}` | 另存、覆蓋儲存、刪除。名稱 1～40 字、不重複，最多 20 份；預設佈局不能改、不能刪，使用中的不能刪；有錯誤的佈局可以存，但結構錯誤（欄位是 null、清單有空項目、種類不是定義過的值，問題代碼 `document-invalid`）回 400、不寫入 |
 | `POST /api/layouts/validate` | 只驗證一份佈局文件，回傳問題清單（錯誤與警告）；body 是文件本身。文件缺欄位時也是 200，問題清單裡有 `document-invalid` |
 | `POST /api/layouts/{id}/apply?resetDemo=false` | 套用佈局。工廠有在製品回 409（`LayoutBusyDto`）；`resetDemo=true` 時清空示範資料並套用；有錯誤回 400 |
 | `POST /api/demo/reset` | 清除所有批次與搬運資料、刀具計數歸零（設定、站點、車輛保留）。只供本機示範 |
+
+## 佈局（P7）
+
+工廠的站點、機台、路網與車輛由「佈局」決定。佈局是一份文件，可以存很多份（最多 20 份），同時只有一份使用中。
+
+### 資料模型
+
+- `FactoryLayouts`：`Name`（1～40 字、不重複）、`Document`（jsonb，存檔的文件，可編輯）、`AppliedDocument`（套用時的快照，工廠實際在跑的版本）、`IsDefault`、`IsActive`、`AppliedAt`、`AppliedHash`。
+- 文件 `FactoryLayoutDocument` ＝ 廠房範圍（`Floor`）＋ 模組（`Modules`：種類、位置、朝向 0／90／180／270）＋ 路網（`RoadNodes` 節點、`RoadEdges` 路段）。模組有 17 種：九道工序的機台或爐、原料倉、成品倉、出貨、刀具庫、大型與小型 AGV 車位、雜物倉庫、載具存放區。
+- 套用時由文件推導 `Stations`、`Machines`、`MachineTools`、`RouteNodes`、`RouteEdges`、`Vehicles`：每台機台一個工站、每個車位一台車；不在佈局裡的車只退出派工，不刪除。製程（加工時間、倍率）不屬於佈局，仍在示範設定。
+
+### 共用程式庫 `OpenFleet.Layout`
+
+netstandard2.1，後端與 Unity 共用（`unity/sync-contracts.ps1` 把 DLL 複製進 Unity）：模組目錄與命名（`ModuleCatalog`、`ModuleNaming`）、幾何（占地、交接點）、驗證（`LayoutValidator`）、預設佈局（`DefaultLayout`）、路網編輯（`RoadGraphEditor`、`RoadPicking`）與編輯模型（`LayoutEditSession`：新增、移動、旋轉、刪除、畫路、復原重做最多 50 步）。Unity 編輯時的即時檢查與後端套用前的檢查是同一份程式。
+
+### API
+
+| 方法與路徑 | 說明 | 回應 |
+| --- | --- | --- |
+| `GET /api/layouts` | 所有佈局（不含文件），預設佈局排第一 | 200 |
+| `GET /api/layouts/active` | 工廠正在跑的佈局（套用快照） | 200、404 |
+| `GET /api/layouts/{id}` | 一份佈局（存檔的文件） | 200、404 |
+| `POST /api/layouts` | 另存；回傳佈局與檢查結果 | 201、400 |
+| `PUT /api/layouts/{id}` | 覆蓋儲存；預設佈局不能改 | 200、400、404 |
+| `DELETE /api/layouts/{id}` | 刪除；預設與使用中的不能刪 | 204、400、404 |
+| `POST /api/layouts/validate` | 只驗證（body 是文件），回傳問題清單 | 200 |
+| `POST /api/layouts/{id}/apply?resetDemo=false` | 套用 | 200、400、404、409 |
+
+- **400**：另存或儲存時文件結構錯誤（`document-invalid`，不寫入）、名稱不合規則、份數滿了；套用時佈局有錯誤，回 `LayoutValidationDto`。有錯誤（重疊、缺工序…）的佈局仍可以存，只是不能套用。
+- **409**：套用時工廠還有在製品，回 `LayoutBusyDto`（`message`、`lotsInProgress`、`activeTasks`）。加上 `resetDemo=true` 會清空生產資料（訂單、工單、批次、搬運、刀具計數，庫存回到初始值）後套用。
+- 使用中的佈局可以用 `PUT` 改存檔，但工廠仍照套用時的版本跑，直到再套用一次；`HasUnappliedChanges` 為 true 表示存檔的文件和正在跑的不同。
+
+### 套用與 MQTT
+
+套用先暫停生產、派工、交通三個背景工作，檢查在製品，再以一筆交易清空生產資料並寫入推導結果，最後從資料庫重新載入路網與交通控制，並發布佈局版本：
+
+- Topic `openfleet/v1/{factoryId}/layout`，retained，內容是 `LayoutRevisionMessage`（`layoutId`、`name`、`appliedAt` 與車輛清單：車號、車型、車位座標）。被拿掉的車，它的 state Topic 會被清成空的 retained 訊息。
+- 模擬器訂閱這個 Topic：新版本（佈局或套用時間不同）時換新的 Session、清掉舊的回報與待送事件，每台車放回車位；同一版本（重新連線時收到的 retained）只增減車輛、不動位置。不在清單裡的車，放行與指令一律忽略。
+- Unity 收到新版本就重新向後端要使用中的佈局並重建場景。
+
+### 檢查規則
+
+`LayoutValidator` 回傳錯誤與警告；沒有錯誤才能套用，警告不影響。
+
+| 代碼 | 等級 | 意思 |
+| --- | --- | --- |
+| `document-invalid` | 錯誤 | 文件結構不完整（欄位是 null、清單有空項目、種類不是定義過的值）；有這個錯誤就不再跑其他檢查 |
+| `floor-size` | 錯誤 | 廠房寬 40～100 m、深 24～60 m 以外 |
+| `too-many` | 錯誤 | 模組超過 120 個、路網節點超過 1500 個、AGV 超過 20 台 |
+| `code-invalid` | 錯誤 | 模組或節點的代碼重複，或模組代碼不符合規則 |
+| `rotation-invalid` | 錯誤 | 朝向不是 0、90、180、270 |
+| `module-outside` | 錯誤 | 模組占地超出廠房 |
+| `module-overlap` | 錯誤 | 兩個模組的占地重疊（貼邊不算） |
+| `facility-count` | 錯誤 | 原料倉、成品倉、出貨、刀具庫不是剛好各一個 |
+| `step-missing` | 錯誤 | 九道工序有一道沒有機台 |
+| `vehicle-missing` | 錯誤 | 沒有大型 AGV（搬料）或沒有小型 AGV（送刀具） |
+| `edge-invalid` | 錯誤 | 路段指到不存在的節點、連到自己或重複 |
+| `edge-short` | 錯誤 | 路段短於 1.6 m |
+| `edge-crossing` | 錯誤 | 路段交叉或碰到，交叉處要有路口節點 |
+| `edge-clearance` | 錯誤 | 沒有共用節點的兩條路段相距不到 1.6 m |
+| `edge-through-module` | 錯誤 | 路段穿過模組的占地（接到該模組自己交接點的不算） |
+| `handoff-missing` | 錯誤 | 交接點上沒有路網節點，或那個節點沒有任何路段 |
+| `unreachable` | 錯誤 | 模組的交接點不在原料倉交接點的連通路網裡 |
+| `handoff-through` | 警告 | 交接點上有好幾條路段，停在上面交接的車會擋住路過的車 |
+| `node-isolated` | 警告 | 節點沒有任何路段，也不是交接點 |
+
+檢查只看結構與幾何，不保證車實際開得到每個地方。
+
+### 啟動
+
+啟動時套用 Migration、用程式的預設佈局覆寫資料庫裡的預設佈局，再核對使用中的佈局：
+
+- 使用中的佈局（自訂的看套用快照）驗證失敗（例如程式改了模組目錄），改用預設佈局。
+- 使用中的是預設佈局、而且程式的預設佈局和上次套用的不同，就重新套用。有在製品時只記錄警告、沿用現有資料。
+- 自訂佈局存了還沒套用的修改，只記錄資訊，不替使用者套用。
 
 ## 示範設定
 

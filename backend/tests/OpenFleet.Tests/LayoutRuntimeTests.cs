@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using OpenFleet.Api.Fleet;
 using OpenFleet.Api.Layout;
@@ -36,7 +37,7 @@ public class LayoutRuntimeTests
     public void Traffic_reset_forgets_every_reservation()
     {
         var network = TestLayouts.Network(DefaultLayout.Build());
-        var controller = new TrafficController(network, new TrafficOptions(), new FakeTimeProvider());
+        var controller = new TrafficController(network, new TrafficOptions(), new FakeTimeProvider(), NullLogger<TrafficController>.Instance);
         controller.Update([new TrafficInput("agv", true, Guid.NewGuid(), -10.3, 0.2, null, 0, 0, "-20,-9.4", true)]);
         Assert.NotEmpty(controller.ReservedNodes());
 

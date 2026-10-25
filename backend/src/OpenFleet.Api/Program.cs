@@ -35,7 +35,8 @@ builder.Services.AddSingleton<RoadNetwork>();
 builder.Services.AddSingleton(sp => new TrafficController(
     sp.GetRequiredService<RoadNetwork>(),
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<TrafficOptions>>().Value,
-    sp.GetRequiredService<TimeProvider>()));
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<ILogger<TrafficController>>()));
 
 // 用到 DbContext 的服務也必須是 Scoped（Singleton 不能依賴 Scoped）。
 builder.Services.AddSingleton<IDefectSource, RandomDefectSource>();

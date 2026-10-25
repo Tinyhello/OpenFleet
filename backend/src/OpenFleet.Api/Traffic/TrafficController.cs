@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using OpenFleet.Contracts;
 
 namespace OpenFleet.Api.Traffic;
@@ -51,7 +52,7 @@ public sealed record TrafficClearance(string VehicleId, VehicleClearance Clearan
 ///
 /// 這個類別不碰資料庫、MQTT 或時鐘以外的任何東西，所有輸入都由呼叫端傳入，方便單獨測試。
 /// </summary>
-public sealed class TrafficController(RoadNetwork network, TrafficOptions options, TimeProvider time)
+public sealed class TrafficController(RoadNetwork network, TrafficOptions options, TimeProvider time, ILogger<TrafficController> logger)
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, Entry> _vehicles = new(StringComparer.Ordinal);
@@ -314,11 +315,30 @@ public sealed class TrafficController(RoadNetwork network, TrafficOptions option
                 .OrderByDescending(e => e.VehicleId, StringComparer.Ordinal)
                 .ToList();
 
-            if (!candidates.Any(e => TryReplan(e, now)))
+            // 驗收時要能證明死結處理真的發生過，所以每次「實際動作」記一行；
+            // 動作成功後 BlockedBy 會清掉、並進入冷卻，下一輪不會再偵測到同一個循環，不會每 0.2 秒刷一行。
+            // 沒有任何車能動作（失敗）時每輪都會重試，這種情況不記，避免洗版。
+            var involved = string.Join(" -> ", cycle.Select(e => e.VehicleId));
+
+            if (candidates.FirstOrDefault(e => TryReplan(e, now)) is { } replanned)
             {
-                _ = candidates.Any(e => TryYield(e, now));
+                LogResolved(involved, replanned, "replan");
+            }
+            else if (candidates.FirstOrDefault(e => TryYield(e, now)) is { } yielded)
+            {
+                LogResolved(involved, yielded, "yield");
             }
         }
+    }
+
+    private void LogResolved(string involved, Entry entry, string action)
+    {
+        // 改道或退讓之後，路徑裡「已放行的最後一個節點」之後的下一個節點，就是它新的去向。
+        var node = entry.Path[entry.Released - 1];
+        var next = entry.Released < entry.Path.Count ? entry.Path[entry.Released] : node;
+        logger.LogInformation(
+            "Deadlock among {Vehicles}: {VehicleId} takes action {Action} at node {Node}, next node {NextNode}, goal {Goal}",
+            involved, entry.VehicleId, action, node, next, entry.Goal);
     }
 
     /// <summary>沒有形成循環，但已經等很久（例如前車停在站點上下料）：試著繞過去。</summary>
