@@ -23,6 +23,11 @@ namespace OpenFleet.Unity
     /// 左鍵按在模組上＝選取並開始拖曳（位置對齊 0.2 m）；按在空地＝取消選取；右鍵與中鍵拖曳仍是攝影機。
     /// 拖曳或擺放中只移動物件，占地框線依 <see cref="LayoutEditSession.CanPlace"/> 即時變綠或紅；
     /// 放開（放下）時才改草稿、整個場景重畫、跑驗證。重疊或超出廠房不擋，放得下去，只是會在檢查結果裡報錯（規劃的決定）。
+    ///
+    /// 路線編輯（P7 第 5 步）：兩個工具，<see cref="RoadTool.Select"/> 與 <see cref="RoadTool.Draw"/>。
+    /// 選取工具點擊的順序是節點（0.5 m）→ 路段（0.4 m）→ 模組；節點可拖曳（交接點的節點不行），路段與節點可刪除。
+    /// 畫路線工具：按下是起點、拖到終點放開，起訖點吸附與 Shift 鎖軸都用 <see cref="RoadPicking"/>。
+    /// 路網的選取與錯誤標記是疊在場景上的一組薄片（每次重畫或選取改變才重建，數量只有被標記的那幾個），不是每個 frame 重畫。
     /// </summary>
     public sealed class LayoutEditor : MonoBehaviour
     {
@@ -65,6 +70,26 @@ namespace OpenFleet.Unity
         private Vector2 _dragPressScreen;
         private double _dragGrabX, _dragGrabZ, _dragStartX, _dragStartZ, _dragX, _dragZ;
 
+        // 路線編輯
+        private RoadTool _tool;
+        private string _selectedNode;
+        private string _selectedEdgeFrom, _selectedEdgeTo;
+        private LayoutIssueMarks _marks = new LayoutIssueMarks();
+        private Transform _marksRoot;
+        private string _dragNode;
+        private bool _dragNodeArmed;
+        private Vector2 _dragNodePress;
+        private double _nodeStartX, _nodeStartZ, _nodeTargetX, _nodeTargetZ;
+        private bool _drawing;
+        private RoadSnap _drawStart;
+        private double _drawEndX, _drawEndZ;
+        private Transform _previewRoot;
+        private readonly List<Transform> _previewLines = new List<Transform>();
+        private Transform _drawLine;
+        private Transform _snapMarker;
+        private Renderer[] _snapRenderers;
+        private TextMesh _lengthLabel;
+
         /// <summary>草稿有變、選取或擺放狀態有變時發出，面板據此更新（同一個 frame 內可能發出多次）。</summary>
         public event Action Changed;
 
@@ -97,12 +122,48 @@ namespace OpenFleet.Unity
         /// <summary>選取的模組代碼；沒有選取是 null。</summary>
         public string Selected => _selected;
 
+        /// <summary>目前的工具。</summary>
+        public RoadTool Tool => _tool;
+
+        /// <summary>選取的是什麼（一次只能選一種）。</summary>
+        public SelectionKind SelectionType =>
+            _selected != null ? SelectionKind.Module : _selectedNode != null ? SelectionKind.Node : _selectedEdgeFrom != null ? SelectionKind.Edge : SelectionKind.None;
+
+        public LayoutRoadNode SelectedNode => FindNode(_selectedNode);
+
+        public LayoutRoadEdge SelectedEdge => FindEdge(_selectedEdgeFrom, _selectedEdgeTo);
+
+        /// <summary>選取的節點是不是模組的交接點（交接點跟著模組走，不能拖、不能刪）。</summary>
+        public bool SelectedNodeIsHandoff => _session != null && _selectedNode != null && _session.IsHandoffNode(_selectedNode);
+
+        /// <summary>節點連著幾條路段。</summary>
+        public int EdgeCountOf(string nodeCode)
+        {
+            var count = 0;
+            if (_session != null)
+            {
+                foreach (var edge in _session.Document.RoadEdges)
+                {
+                    if (edge.From == nodeCode || edge.To == nodeCode)
+                    {
+                        count++;
+                    }
+                }
+            }
+
+            return count;
+        }
+
         public LayoutModule SelectedModule => FindModule(_selected);
 
         /// <summary>正在擺放的種類；沒有在擺放是 null。</summary>
         public ModuleKind? Placing => _placing;
 
-        public bool CanDeleteSelected => _session != null && _selected != null && _session.CanRemove(_selected);
+        public bool CanDeleteSelected =>
+            _session != null
+            && (_selected != null ? _session.CanRemove(_selected)
+                : _selectedNode != null ? FindNode(_selectedNode) != null && !_session.IsHandoffNode(_selectedNode)
+                : _selectedEdgeFrom != null && FindEdge(_selectedEdgeFrom, _selectedEdgeTo) != null);
 
         public int CountOf(ModuleKind kind) => _session?.CountOf(kind) ?? 0;
 
@@ -136,9 +197,7 @@ namespace OpenFleet.Unity
             SourceId = layout.Id;
             SourceName = layout.Name;
             SourceIsDefault = layout.IsDefault;
-            _selected = null;
-            _dragging = null;
-            EndPlacing();
+            ResetInteraction();
 
             _controller.EditMode = true;
             _presentation.SetLayoutEditing(true);
@@ -161,10 +220,8 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            EndPlacing();
-            _dragging = null;
+            ResetInteraction();
             _session = null;
-            _selected = null;
             DestroyOverlay();
 
             if (restoreActive)
@@ -197,18 +254,108 @@ namespace OpenFleet.Unity
 
         // ---- 編輯操作（面板與鍵盤共用） ----
 
+        /// <summary>選取模組；傳 null 取消所有選取（模組、節點、路段）。</summary>
         public void Select(string code)
         {
-            if (!Editing || code == _selected)
+            SetSelection(code, null, null, null);
+        }
+
+        public void SelectNode(string code)
+        {
+            SetSelection(null, code, null, null);
+        }
+
+        public void SelectEdge(string from, string to)
+        {
+            SetSelection(null, null, from, to);
+        }
+
+        private void SetSelection(string module, string node, string edgeFrom, string edgeTo)
+        {
+            if (!Editing)
+            {
+                return;
+            }
+
+            // 不存在的東西不能選（取消選取＝全部 null）。
+            module = FindModule(module) != null ? module : null;
+            node = FindNode(node) != null ? node : null;
+            if (FindEdge(edgeFrom, edgeTo) == null)
+            {
+                edgeFrom = edgeTo = null;
+            }
+
+            if (module == _selected && node == _selectedNode && edgeFrom == _selectedEdgeFrom && edgeTo == _selectedEdgeTo)
             {
                 return;
             }
 
             var previous = _selected;
-            _selected = FindModule(code) != null ? code : null;
+            _selected = module;
+            _selectedNode = node;
+            _selectedEdgeFrom = edgeFrom;
+            _selectedEdgeTo = edgeTo;
             Restyle(previous);
             Restyle(_selected);
+            RestyleRoads();
             Changed?.Invoke();
+        }
+
+        /// <summary>
+        /// 換工具。進行中的拖曳、畫線、擺放都取消（規劃：切換工具就取消）。
+        /// 選取不變：換到畫路線工具後還看得到剛才選的東西，Delete 也仍然有效。
+        /// </summary>
+        public void SetTool(RoadTool tool)
+        {
+            if (!Editing || tool == _tool)
+            {
+                return;
+            }
+
+            CancelInteractions();
+            _tool = tool;
+            HidePreview();
+            Changed?.Invoke();
+        }
+
+        /// <summary>取消拖曳（模組、節點）、畫線、擺放，不改工具與選取。</summary>
+        private void CancelInteractions()
+        {
+            if (_dragging != null)
+            {
+                CancelDrag();
+            }
+
+            if (_dragNode != null)
+            {
+                CancelNodeDrag();
+            }
+
+            if (_drawing)
+            {
+                CancelDraw();
+            }
+
+            if (_placing != null)
+            {
+                EndPlacing();
+            }
+        }
+
+        /// <summary>進入、離開編輯時把互動狀態全部歸零（不通知、不重畫）。</summary>
+        private void ResetInteraction()
+        {
+            EndPlacing();
+            _dragging = null;
+            _dragNode = null;
+            _drawing = false;
+            _tool = RoadTool.Select;
+            _selected = null;
+            _selectedNode = null;
+            _selectedEdgeFrom = _selectedEdgeTo = null;
+            _marksRoot = null;
+            _marks = new LayoutIssueMarks();
+            DestroyPreview();
         }
 
         public void StartPlacing(ModuleKind kind)
@@ -218,7 +365,10 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            EndPlacing();
+            // 擺放模組用選取工具的操作（左鍵放下），在畫路線工具下開始擺放就切回選取工具。
+            CancelInteractions();
+            _tool = RoadTool.Select;
+            HidePreview();
             Select(null);
             _placing = kind;
             _placingRotation = 0;
@@ -268,16 +418,37 @@ namespace OpenFleet.Unity
 
         public void DeleteSelected()
         {
-            if (CanDeleteSelected && _session.RemoveModule(_selected))
+            if (!CanDeleteSelected)
             {
-                _selected = null;
+                return;
+            }
+
+            if (_selected != null)
+            {
+                if (_session.RemoveModule(_selected))
+                {
+                    _selected = null;
+                    Rebuild(false);
+                }
+            }
+            else if (_selectedNode != null)
+            {
+                if (_session.DeleteNode(_selectedNode))
+                {
+                    _selectedNode = null;
+                    Rebuild(false);
+                }
+            }
+            else if (_session.DeleteEdge(_selectedEdgeFrom, _selectedEdgeTo))
+            {
+                _selectedEdgeFrom = _selectedEdgeTo = null;
                 Rebuild(false);
             }
         }
 
         public void Undo()
         {
-            if (Editing && _dragging == null && _session.Undo())
+            if (Editing && !Interacting && _session.Undo())
             {
                 AfterHistory();
             }
@@ -285,17 +456,31 @@ namespace OpenFleet.Unity
 
         public void Redo()
         {
-            if (Editing && _dragging == null && _session.Redo())
+            if (Editing && !Interacting && _session.Redo())
             {
                 AfterHistory();
             }
         }
 
+        /// <summary>拖曳或畫線進行中（這時復原、重做、刪除、旋轉都不處理）。</summary>
+        private bool Interacting => _dragging != null || _dragNode != null || _drawing;
+
         private void AfterHistory()
         {
+            // 復原與重做會換掉整份文件：選的東西還在就保留，不在了就取消。
             if (FindModule(_selected) == null)
             {
                 _selected = null;
+            }
+
+            if (FindNode(_selectedNode) == null)
+            {
+                _selectedNode = null;
+            }
+
+            if (FindEdge(_selectedEdgeFrom, _selectedEdgeTo) == null)
+            {
+                _selectedEdgeFrom = _selectedEdgeTo = null;
             }
 
             Rebuild(true);
@@ -311,7 +496,8 @@ namespace OpenFleet.Unity
         }
 
         /// <summary>
-        /// 點檢查結果的一條：選取它的第一個模組（沒有模組就看第一個節點、第一條路段）並把攝影機移過去。
+        /// 點檢查結果的一條：選取它的第一個模組（沒有模組就看第一個節點、再沒有就看第一條路段）並把攝影機移過去。
+        /// 節點與路段也一併選取（P7 第 5 步），讓使用者看得到是哪一個、可以直接刪除。
         /// </summary>
         public void FocusIssue(LayoutIssueDto issue)
         {
@@ -321,25 +507,22 @@ namespace OpenFleet.Unity
             }
 
             Vector3? point = null;
-            var document = _session.Document;
             if (issue.ModuleCodes != null && issue.ModuleCodes.Count > 0 && FindModule(issue.ModuleCodes[0]) is { } module)
             {
                 Select(module.Code);
                 var rect = LayoutGeometry.Footprint(module);
                 point = new Vector3((float)(rect.MinX + rect.MaxX) / 2f, 0f, (float)(rect.MinZ + rect.MaxZ) / 2f);
             }
-            else
+            else if (issue.NodeCodes != null && issue.NodeCodes.Count > 0 && FindNode(issue.NodeCodes[0]) is { } node)
             {
-                var nodeCode = issue.NodeCodes != null && issue.NodeCodes.Count > 0 ? issue.NodeCodes[0]
-                    : issue.Edges != null && issue.Edges.Count > 0 ? issue.Edges[0].From : null;
-                foreach (var node in document.RoadNodes)
-                {
-                    if (node.Code == nodeCode)
-                    {
-                        point = new Vector3((float)node.X, 0f, (float)node.Z);
-                        break;
-                    }
-                }
+                SelectNode(node.Code);
+                point = new Vector3((float)node.X, 0f, (float)node.Z);
+            }
+            else if (issue.Edges != null && issue.Edges.Count > 0 && FindEdge(issue.Edges[0].From, issue.Edges[0].To) is { } edge
+                && FindNode(edge.From) is { } a && FindNode(edge.To) is { } b)
+            {
+                SelectEdge(edge.From, edge.To);
+                point = new Vector3((float)(a.X + b.X) / 2f, 0f, (float)(a.Z + b.Z) / 2f);
             }
 
             if (point.HasValue && _presentation.CameraController != null)
@@ -375,6 +558,15 @@ namespace OpenFleet.Unity
                 {
                     CancelDrag();
                 }
+                else if (_dragNode != null)
+                {
+                    CancelNodeDrag();
+                }
+                else if (_drawing)
+                {
+                    // 只取消這一筆，工具不變，可以接著畫下一筆。
+                    CancelDraw();
+                }
                 else if (_placing != null)
                 {
                     CancelPlacing();
@@ -409,7 +601,7 @@ namespace OpenFleet.Unity
                 return;
             }
 
-            if (_dragging != null)
+            if (Interacting)
             {
                 return;
             }
@@ -452,6 +644,40 @@ namespace OpenFleet.Unity
                 return;
             }
 
+            if (_dragNode != null)
+            {
+                if (mouse.leftButton.isPressed)
+                {
+                    if (hasPoint)
+                    {
+                        UpdateNodeDrag(screen, x, z);
+                    }
+                }
+                else
+                {
+                    EndNodeDrag();
+                }
+
+                return;
+            }
+
+            if (_drawing)
+            {
+                if (mouse.leftButton.isPressed)
+                {
+                    if (hasPoint)
+                    {
+                        UpdateDraw(x, z);
+                    }
+                }
+                else
+                {
+                    EndDraw();
+                }
+
+                return;
+            }
+
             if (_placing != null)
             {
                 UpdateGhost(!overUi && hasPoint, x, z);
@@ -463,16 +689,56 @@ namespace OpenFleet.Unity
                 return;
             }
 
+            if (_tool == RoadTool.Draw)
+            {
+                // 畫路線工具：左鍵只用來畫線，不選取也不拖曳模組；沒按時顯示吸附目標。
+                ShowSnapHover(!overUi && hasPoint, x, z);
+                if (!overUi && hasPoint && mouse.leftButton.wasPressedThisFrame)
+                {
+                    ProductionPanel.ClearFocus();
+                    BeginDraw(x, z);
+                }
+
+                return;
+            }
+
             if (!overUi && hasPoint && mouse.leftButton.wasPressedThisFrame)
             {
                 // 點場景時讓面板的輸入框放開焦點，鍵盤快捷鍵才會恢復。
                 ProductionPanel.ClearFocus();
-                var module = HitModule(x, z);
-                Select(module?.Code);
-                if (module != null)
+                PressSelect(screen, x, z);
+            }
+        }
+
+        /// <summary>選取工具按下左鍵：節點（0.5 m 內）→ 路段（0.4 m 內）→ 模組。</summary>
+        private void PressSelect(Vector2 screen, double x, double z)
+        {
+            var document = _session.Document;
+            var nodeCode = RoadPicking.NearestNode(document, x, z, LayoutRules.PickNodeRadius);
+            if (nodeCode != null)
+            {
+                SelectNode(nodeCode);
+                // 交接點的節點跟著模組走，不能拖（面板會提示）。
+                if (!_session.IsHandoffNode(nodeCode))
                 {
-                    BeginDrag(module, screen, x, z);
+                    BeginNodeDrag(nodeCode, screen);
                 }
+
+                return;
+            }
+
+            var edge = RoadPicking.NearestEdge(document, x, z, LayoutRules.PickEdgeRadius);
+            if (edge != null)
+            {
+                SelectEdge(edge.From, edge.To);
+                return;
+            }
+
+            var module = HitModule(x, z);
+            Select(module?.Code);
+            if (module != null)
+            {
+                BeginDrag(module, screen, x, z);
             }
         }
 
@@ -597,6 +863,470 @@ namespace OpenFleet.Unity
             Restyle(code);
         }
 
+        // ---- 路線：拖曳節點 ----
+
+        private void BeginNodeDrag(string code, Vector2 screen)
+        {
+            var node = FindNode(code);
+            if (node == null)
+            {
+                return;
+            }
+
+            _dragNode = code;
+            _dragNodeArmed = false;
+            _dragNodePress = screen;
+            _nodeStartX = _nodeTargetX = node.X;
+            _nodeStartZ = _nodeTargetZ = node.Z;
+        }
+
+        /// <summary>
+        /// 拖曳中只動預覽：節點的小圓點跟著目標移動、連著的路段畫細的預覽線，鋪面不重畫（放開才重畫）。
+        /// 目標位置（Claude 暫定）：別的節點在 <see cref="LayoutRules.SnapNodeRadius"/> 內就吸到那個節點（放開時 MoveNode 會合併），
+        /// 否則對齊 0.2 m 格點；不吸附到路段上（拖節點的目的是改路口位置，吸到路段中間不會接上去）。
+        /// </summary>
+        private void UpdateNodeDrag(Vector2 screen, double x, double z)
+        {
+            if (!_dragNodeArmed)
+            {
+                if ((screen - _dragNodePress).sqrMagnitude < DragStartPixels * DragStartPixels)
+                {
+                    return;
+                }
+
+                _dragNodeArmed = true;
+                // 標記是依原位置畫的，拖曳中先收起來（目標位置改由預覽顯示）。
+                if (_marksRoot != null)
+                {
+                    _marksRoot.gameObject.SetActive(false);
+                }
+            }
+
+            var node = FindNode(_dragNode);
+            if (node == null || !_controller.Scene.NodeDots.TryGetValue(_dragNode, out var dot) || dot == null)
+            {
+                CancelNodeDrag();
+                return;
+            }
+
+            var target = NearestOtherNode(_dragNode, x, z, LayoutRules.SnapNodeRadius);
+            var snapped = target != null;
+            if (snapped)
+            {
+                _nodeTargetX = target.X;
+                _nodeTargetZ = target.Z;
+            }
+            else
+            {
+                _nodeTargetX = LayoutEditSession.Snap(x, LayoutRules.RoadGrid);
+                _nodeTargetZ = LayoutEditSession.Snap(z, LayoutRules.RoadGrid);
+            }
+
+            dot.localPosition = new Vector3((float)_nodeTargetX, LayoutScene.NodeDotY, (float)_nodeTargetZ);
+            PaintDot(dot, Colors.RoadSelected);
+
+            EnsurePreview();
+            var used = 0;
+            foreach (var edge in _session.Document.RoadEdges)
+            {
+                var otherCode = edge.From == _dragNode ? edge.To : edge.To == _dragNode ? edge.From : null;
+                if (otherCode == null || FindNode(otherCode) is not { } other)
+                {
+                    continue;
+                }
+
+                var line = PreviewLine(used++);
+                PlaceLine(line, _nodeTargetX, _nodeTargetZ, other.X, other.Z, PreviewWidth, PreviewY);
+                Paint(line.GetComponent<Renderer>(), Colors.RoadSelected);
+            }
+
+            for (var i = used; i < _previewLines.Count; i++)
+            {
+                Show(_previewLines[i], false);
+            }
+
+            ShowSnapMarker(_nodeTargetX, _nodeTargetZ, snapped ? RoadSnapKind.Node : RoadSnapKind.Grid);
+        }
+
+        private LayoutRoadNode NearestOtherNode(string exclude, double x, double z, double radius)
+        {
+            LayoutRoadNode best = null;
+            var bestDistance = radius * radius + 1e-9;
+            foreach (var node in _session.Document.RoadNodes)
+            {
+                if (node.Code == exclude)
+                {
+                    continue;
+                }
+
+                var d = (node.X - x) * (node.X - x) + (node.Z - z) * (node.Z - z);
+                if (d <= bestDistance)
+                {
+                    best = node;
+                    bestDistance = d;
+                }
+            }
+
+            return best;
+        }
+
+        private void EndNodeDrag()
+        {
+            var code = _dragNode;
+            var moved = _dragNodeArmed && (_nodeTargetX != _nodeStartX || _nodeTargetZ != _nodeStartZ);
+            if (moved)
+            {
+                // 合併時 MoveNode 回傳被合併到的那個節點，選取跟著它。
+                var result = _session.MoveNode(code, _nodeTargetX, _nodeTargetZ);
+                if (result != null)
+                {
+                    _dragNode = null;
+                    _dragNodeArmed = false;
+                    HidePreview();
+                    _selectedNode = result;
+                    Rebuild(false);
+                    return;
+                }
+            }
+
+            CancelNodeDrag();
+        }
+
+        private void CancelNodeDrag()
+        {
+            var code = _dragNode;
+            _dragNode = null;
+            _dragNodeArmed = false;
+            HidePreview();
+            var node = FindNode(code);
+            if (node != null && _controller.Scene.NodeDots.TryGetValue(code, out var dot) && dot != null)
+            {
+                dot.localPosition = new Vector3((float)node.X, LayoutScene.NodeDotY, (float)node.Z);
+                PaintDot(dot, Colors.Node);
+            }
+
+            RestyleRoads();
+        }
+
+        private void PaintDot(Transform dot, Color color)
+        {
+            if (dot.TryGetComponent<Renderer>(out var renderer))
+            {
+                Paint(renderer, color);
+            }
+        }
+
+        // ---- 路線：畫路線 ----
+
+        private void BeginDraw(double x, double z)
+        {
+            _drawStart = RoadPicking.Snap(_session.Document, x, z);
+            _drawing = true;
+            UpdateDraw(x, z);
+        }
+
+        /// <summary>終點用 <see cref="RoadPicking.Snap"/>；按住 Shift 時先鎖水平或垂直（<see cref="RoadPicking.SnapLocked"/>）。</summary>
+        private void UpdateDraw(double x, double z)
+        {
+            var keyboard = Keyboard.current;
+            var locked = keyboard != null && keyboard.shiftKey.isPressed;
+            var end = locked
+                ? RoadPicking.SnapLocked(_session.Document, _drawStart.X, _drawStart.Z, x, z)
+                : RoadPicking.Snap(_session.Document, x, z);
+            _drawEndX = end.X;
+            _drawEndZ = end.Z;
+
+            var length = DrawLength;
+            var ok = length >= LayoutRules.MinDrawLength;
+            var color = ok ? Colors.DrawOk : Colors.DrawTooShort;
+            EnsurePreview();
+            Show(_drawLine, true);
+            PlaceLine(_drawLine, _drawStart.X, _drawStart.Z, _drawEndX, _drawEndZ, PreviewWidth, PreviewY);
+            Paint(_drawLine.GetComponent<Renderer>(), color);
+
+            // 長度標籤在終點上方；太短時改紅色（放開也不會畫）。
+            // 預設視角（約 56 m）下世界座標的字太小，所以依攝影機距離放大，畫面上的大小固定（暫定，見 LabelPixels）。
+            Show(_lengthLabel.transform, true);
+            var labelPosition = new Vector3((float)_drawEndX, 0.5f, (float)_drawEndZ);
+            _lengthLabel.transform.localPosition = labelPosition;
+            _lengthLabel.transform.localScale = Vector3.one * (LabelPixels * WorldPerPixel(labelPosition) / LabelEmMeters);
+            var text = $"{length:0.0} m";
+            if (_lengthLabel.text != text)
+            {
+                _lengthLabel.text = text;
+            }
+
+            _lengthLabel.color = ok ? Color.white : Colors.DrawTooShort;
+            ShowSnapMarker(_drawEndX, _drawEndZ, end.Kind);
+        }
+
+        private double DrawLength => Math.Sqrt((_drawEndX - _drawStart.X) * (_drawEndX - _drawStart.X) + (_drawEndZ - _drawStart.Z) * (_drawEndZ - _drawStart.Z));
+
+        private void EndDraw()
+        {
+            var length = DrawLength;
+            _drawing = false;
+            HidePreview();
+            if (length >= LayoutRules.MinDrawLength && _session.AddRoad(_drawStart.X, _drawStart.Z, _drawEndX, _drawEndZ) != null)
+            {
+                // 畫完不選取任何東西（新路段可能有好幾段），整個場景重畫並驗證。
+                _selected = null;
+                _selectedNode = null;
+                _selectedEdgeFrom = _selectedEdgeTo = null;
+                Rebuild(false);
+            }
+        }
+
+        private void CancelDraw()
+        {
+            _drawing = false;
+            HidePreview();
+        }
+
+        /// <summary>畫路線工具沒按下時：滑鼠所在位置的吸附目標。</summary>
+        private void ShowSnapHover(bool visible, double x, double z)
+        {
+            if (!visible)
+            {
+                HidePreview();
+                return;
+            }
+
+            var snap = RoadPicking.Snap(_session.Document, x, z);
+            EnsurePreview();
+            ShowSnapMarker(snap.X, snap.Z, snap.Kind);
+        }
+
+        // ---- 路線：預覽物件（畫線預覽、吸附標記、長度標籤、拖曳預覽線） ----
+
+        /// <summary>預覽線的寬度、離地高度（中心）、厚度；高於路面與標記。</summary>
+        private const float PreviewWidth = 0.14f, PreviewY = 0.045f, PreviewThickness = 0.01f;
+
+        private void EnsurePreview()
+        {
+            if (_previewRoot != null)
+            {
+                return;
+            }
+
+            var material = _presentation.LayoutMaterials.ZoneLine;
+            _previewRoot = Group(_overlay.transform, "Road Preview", Vector3.zero);
+            var line = Box(_previewRoot, "Draw Line", Vector3.zero, new Vector3(1f, PreviewThickness, 1f), material);
+            line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _drawLine = line.transform;
+            _drawLine.gameObject.SetActive(false);
+
+            _snapMarker = Group(_previewRoot, "Snap Marker", Vector3.zero);
+            FloorFrame(_snapMarker, "Frame", Vector3.zero, new Vector2(0.6f, 0.6f), 0.06f, material);
+            _snapRenderers = _snapMarker.GetComponentsInChildren<Renderer>(true);
+            foreach (var renderer in _snapRenderers)
+            {
+                renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                Paint(renderer, Colors.SnapMarker);
+            }
+
+            _snapMarker.gameObject.SetActive(false);
+
+            _lengthLabel = Label(_previewRoot, string.Empty, Vector3.zero, 0.07f, Color.white);
+            _lengthLabel.gameObject.SetActive(false);
+        }
+
+        /// <summary>吸附標記：吸到節點是大框、吸到路段中等、只是格點最小（一眼看得出吸到什麼）。</summary>
+        private void ShowSnapMarker(double x, double z, RoadSnapKind kind)
+        {
+            Show(_snapMarker, true);
+            _snapMarker.localPosition = new Vector3((float)x, LayoutScene.NodeDotY, (float)z);
+            // 拉遠時標記跟著放大（預設視角 56 m 以內維持原大小），不會縮到看不見；尺寸暫定。
+            var far = Mathf.Max(1f, CameraDistance(_snapMarker.position) / DefaultCameraDistance);
+            _snapMarker.localScale = Vector3.one * (kind == RoadSnapKind.Node ? 1.1f : kind == RoadSnapKind.Edge ? 0.8f : 0.45f) * far;
+        }
+
+        // 預設攝影機距離（公尺）；長度標籤與吸附標記的螢幕大小以此為準。暫定。
+        private const float DefaultCameraDistance = 56f;
+
+        // 長度標籤的字高（像素，1280×720 約 15 px，和站名標籤相近）。暫定。
+        private const float LabelPixels = 15f;
+
+        // TextMesh 字級 128、characterSize 0.07 / 2 時，一個字的高度約 6.4 × 0.07 公尺（縮放 1）。
+        private const float LabelEmMeters = 6.4f * 0.07f;
+
+        private static float CameraDistance(Vector3 worldPosition)
+        {
+            var camera = Camera.main;
+            return camera != null ? Vector3.Distance(camera.transform.position, worldPosition) : DefaultCameraDistance;
+        }
+
+        // 在這個位置，螢幕上一個像素等於幾公尺（透視攝影機）。
+        private static float WorldPerPixel(Vector3 localPosition)
+        {
+            var camera = Camera.main;
+            var height = Mathf.Max(1, Screen.height);
+            if (camera == null || camera.orthographic)
+            {
+                return 2f * DefaultCameraDistance * Mathf.Tan(30f * Mathf.Deg2Rad) / height;
+            }
+
+            return 2f * CameraDistance(localPosition) * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad) / height;
+        }
+
+        private Transform PreviewLine(int index)
+        {
+            while (_previewLines.Count <= index)
+            {
+                var line = Box(_previewRoot, "Drag Line", Vector3.zero, new Vector3(1f, PreviewThickness, 1f), _presentation.LayoutMaterials.ZoneLine);
+                line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                _previewLines.Add(line.transform);
+            }
+
+            var transform = _previewLines[index];
+            Show(transform, true);
+            return transform;
+        }
+
+        private void HidePreview()
+        {
+            if (_previewRoot == null)
+            {
+                return;
+            }
+
+            Show(_drawLine, false);
+            Show(_snapMarker, false);
+            Show(_lengthLabel != null ? _lengthLabel.transform : null, false);
+            foreach (var line in _previewLines)
+            {
+                Show(line, false);
+            }
+        }
+
+        private void DestroyPreview()
+        {
+            if (_previewRoot != null)
+            {
+                _previewRoot.gameObject.SetActive(false);
+                Destroy(_previewRoot.gameObject);
+            }
+
+            _previewRoot = null;
+            _drawLine = null;
+            _snapMarker = null;
+            _snapRenderers = null;
+            _lengthLabel = null;
+            _previewLines.Clear();
+        }
+
+        private static void Show(Transform transform, bool visible)
+        {
+            if (transform != null && transform.gameObject.activeSelf != visible)
+            {
+                transform.gameObject.SetActive(visible);
+            }
+        }
+
+        /// <summary>把單位方塊擺成從 (ax, az) 到 (bx, bz) 的細長條（方塊的 Z 軸是長邊，yaw 從 +Z 往 +X 轉）。</summary>
+        private static void PlaceLine(Transform line, double ax, double az, double bx, double bz, float width, float y)
+        {
+            var dx = (float)(bx - ax);
+            var dz = (float)(bz - az);
+            var length = Mathf.Max(0.001f, Mathf.Sqrt(dx * dx + dz * dz));
+            line.localPosition = new Vector3((float)(ax + bx) / 2f, y, (float)(az + bz) / 2f);
+            line.localRotation = Quaternion.Euler(0f, Mathf.Atan2(dx, dz) * Mathf.Rad2Deg, 0f);
+            line.localScale = new Vector3(width, PreviewThickness, length);
+        }
+
+        // ---- 路線：選取與錯誤標記 ----
+
+        /// <summary>
+        /// 路段與節點的標記（選取黃、錯誤紅、警告橘）：場景根底下的一組薄片，每次重畫、選取改變時整組重建
+        /// （只有被標記的幾個，不是整個路網），不在每個 frame 做事。正常模式沒有這一組。
+        /// 選取與錯誤同時存在時：路段是紅色寬條上疊黃色窄條；節點是黃色大圓下面墊紅色小圓（選取還看得到、錯誤也看得到）。
+        /// 尺寸與高度都是 Claude 暫定。
+        /// </summary>
+        private void RestyleRoads()
+        {
+            if (!Editing || _controller.Scene == null || _controller.Scene.Root == null || _presentation.LayoutMaterials == null)
+            {
+                return;
+            }
+
+            var root = _controller.Scene.Root;
+            if (_marksRoot == null || _marksRoot.parent != root)
+            {
+                _marksRoot = Group(root, "Road Marks", Vector3.zero);
+            }
+            else
+            {
+                for (var i = _marksRoot.childCount - 1; i >= 0; i--)
+                {
+                    var child = _marksRoot.GetChild(i).gameObject;
+                    child.SetActive(false);
+                    Destroy(child);
+                }
+            }
+
+            _marksRoot.gameObject.SetActive(true);
+            var document = _session.Document;
+            var nodes = new Dictionary<string, LayoutRoadNode>(StringComparer.Ordinal);
+            foreach (var node in document.RoadNodes)
+            {
+                nodes[node.Code] = node;
+            }
+
+            foreach (var edge in document.RoadEdges)
+            {
+                var error = _marks.HasErrorEdge(edge.From, edge.To);
+                var selected = _selectedEdgeFrom != null
+                    && ((edge.From == _selectedEdgeFrom && edge.To == _selectedEdgeTo) || (edge.From == _selectedEdgeTo && edge.To == _selectedEdgeFrom));
+                if ((!error && !selected) || !nodes.TryGetValue(edge.From, out var a) || !nodes.TryGetValue(edge.To, out var b))
+                {
+                    continue;
+                }
+
+                if (error)
+                {
+                    MarkEdge(a, b, Colors.RoadError, 0.5f, 0.017f);
+                }
+
+                if (selected)
+                {
+                    MarkEdge(a, b, Colors.RoadSelected, error ? 0.2f : 0.5f, 0.022f);
+                }
+            }
+
+            foreach (var node in document.RoadNodes)
+            {
+                var selected = node.Code == _selectedNode;
+                var error = _marks.ErrorNodeCodes.Contains(node.Code);
+                var warning = !error && _marks.WarningNodeCodes.Contains(node.Code);
+                if (selected)
+                {
+                    MarkNode(node, Colors.RoadSelected, 0.95f, 0.021f);
+                }
+
+                if (error || warning)
+                {
+                    MarkNode(node, error ? Colors.RoadError : Colors.RoadWarning, 0.65f, 0.026f);
+                }
+            }
+        }
+
+        private void MarkEdge(LayoutRoadNode a, LayoutRoadNode b, Color color, float width, float y)
+        {
+            var renderer = Box(_marksRoot, "Edge Mark", Vector3.zero, new Vector3(1f, 0.004f, 1f), _presentation.LayoutMaterials.ZoneLine);
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            PlaceLine(renderer.transform, a.X, a.Z, b.X, b.Z, width, y);
+            renderer.transform.localScale = new Vector3(width, 0.004f, renderer.transform.localScale.z);
+            Paint(renderer, color);
+        }
+
+        private void MarkNode(LayoutRoadNode node, Color color, float diameter, float y)
+        {
+            var renderer = Cylinder(_marksRoot, "Node Mark", new Vector3((float)node.X, y, (float)node.Z), diameter, 0.008f,
+                _presentation.LayoutMaterials.ZoneLine);
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            Paint(renderer, color);
+        }
+
         // ---- 擺放 ----
 
         private void UpdateGhost(bool visible, double mouseX, double mouseZ)
@@ -679,6 +1409,7 @@ namespace OpenFleet.Unity
         private void Validate()
         {
             _validation = _session.Validate();
+            _marks = LayoutIssueMarks.From(_validation);
             ErrorCount = 0;
             WarningCount = 0;
             foreach (var issue in _validation.Issues)
@@ -712,6 +1443,43 @@ namespace OpenFleet.Unity
             return null;
         }
 
+        private LayoutRoadNode FindNode(string code)
+        {
+            if (_session == null || code == null)
+            {
+                return null;
+            }
+
+            foreach (var node in _session.Document.RoadNodes)
+            {
+                if (node.Code == code)
+                {
+                    return node;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>找路段（不分方向）。</summary>
+        private LayoutRoadEdge FindEdge(string from, string to)
+        {
+            if (_session == null || from == null || to == null)
+            {
+                return null;
+            }
+
+            foreach (var edge in _session.Document.RoadEdges)
+            {
+                if ((edge.From == from && edge.To == to) || (edge.From == to && edge.To == from))
+                {
+                    return edge;
+                }
+            }
+
+            return null;
+        }
+
         private bool HasError(string code)
         {
             foreach (var issue in _validation.Issues)
@@ -731,6 +1499,8 @@ namespace OpenFleet.Unity
             {
                 Restyle(code);
             }
+
+            RestyleRoads();
         }
 
         /// <summary>
@@ -922,5 +1692,24 @@ namespace OpenFleet.Unity
             var renderer = Box(_gridRoot, "Line", center, size, _gridMaterial);
             renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         }
+    }
+
+    /// <summary>編輯模式的工具（P7 第 5 步）。</summary>
+    public enum RoadTool
+    {
+        /// <summary>選取：點模組、節點、路段；拖曳移動模組或節點。</summary>
+        Select,
+
+        /// <summary>畫路線：拖曳畫一條新路段。</summary>
+        Draw,
+    }
+
+    /// <summary>選取的種類（一次只能選一種）。</summary>
+    public enum SelectionKind
+    {
+        None,
+        Module,
+        Node,
+        Edge,
     }
 }

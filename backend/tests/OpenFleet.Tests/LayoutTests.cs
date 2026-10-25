@@ -306,6 +306,28 @@ public class LayoutTests
     }
 
     [Fact]
+    public void Unreachable_issue_marks_the_cut_off_handoff_node_and_edges()
+    {
+        // 刀具庫的交接點接在內圈 0,-5.2：把內圈車道在這個節點兩側的路段剪掉，
+        // 剩下「交接點—車道節點」這條支線自成一塊，連不到原料倉。
+        var result = Mutate(d => d.RoadEdges.RemoveAll(e =>
+            (e.From == "0,-5.2" || e.To == "0,-5.2") && e.From != "0,-3.2" && e.To != "0,-3.2"));
+
+        var issue = Issue(result, "unreachable");
+        Assert.Equal(LayoutIssueSeverity.Error, issue.Severity);
+        Assert.Contains("0,-3.2", issue.NodeCodes);
+        Assert.Contains(issue.Edges, e => (e.From == "0,-3.2" && e.To == "0,-5.2") || (e.From == "0,-5.2" && e.To == "0,-3.2"));
+        // 還連得到原料倉的路段不標記。
+        Assert.DoesNotContain(issue.Edges, e => e.From == "-12,-9.4" || e.To == "-12,-9.4");
+    }
+
+    [Fact]
+    public void The_default_layout_has_no_issues_at_all()
+    {
+        Assert.Empty(LayoutValidator.Validate(DefaultLayout.Build()).Issues);
+    }
+
+    [Fact]
     public void A_station_handoff_with_two_edges_is_only_a_warning()
     {
         // 原料倉交接點多接一條路段（往西側的新節點）：停在交接點上的車會擋住路過的車，但不影響套用。

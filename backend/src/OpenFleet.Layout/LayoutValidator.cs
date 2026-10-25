@@ -561,7 +561,12 @@ namespace OpenFleet.Layout
                     issues,
                     "unreachable",
                     "不在原料倉交接點的連通路網裡：" + string.Join("、", unreachable.Select(m => ModuleNaming.DisplayName(document, m))),
-                    modules: unreachable.Select(m => m.Code));
+                    modules: unreachable.Select(m => m.Code),
+                    // 讓編輯器能把斷掉的路畫成紅色：斷掉的交接點節點，加上不在原料倉連通區塊裡的路段。
+                    nodes: unreachable.Select(m => handoffNodes[m.Code]).Distinct(StringComparer.Ordinal),
+                    edges: edges
+                        .Where(e => !reached.Contains(e.From))
+                        .Select(e => new LayoutRoadEdge { From = e.From, To = e.To }));
             }
         }
 

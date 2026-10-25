@@ -91,8 +91,27 @@ namespace OpenFleet.Unity
             /// <summary>編輯模式地面的 1 m 格線。</summary>
             public static readonly Color Grid = new Color(0.52f, 0.57f, 0.63f);
 
-            /// <summary>路網的節點（第 5 步畫路線時使用；這一步先定義，節點小圓點目前仍用場景材質）。</summary>
+            /// <summary>路網的節點（編輯模式的小圓點，P7 第 5 步）。</summary>
             public static readonly Color Node = new Color(0.95f, 0.97f, 1f);
+
+            // 路線編輯（P7 第 5 步）。顏色是 Claude 暫定的，要調整只改這裡。
+            /// <summary>選取的節點或路段。</summary>
+            public static readonly Color RoadSelected = new Color(1f, 0.85f, 0.2f);
+
+            /// <summary>檢查結果有錯誤的節點與路段。</summary>
+            public static readonly Color RoadError = new Color(1f, 0.25f, 0.2f);
+
+            /// <summary>警告的節點（孤立）。</summary>
+            public static readonly Color RoadWarning = new Color(1f, 0.6f, 0.15f);
+
+            /// <summary>畫路線的預覽線：長度夠（至少 1 m）。</summary>
+            public static readonly Color DrawOk = new Color(0.3f, 0.85f, 1f);
+
+            /// <summary>畫路線的預覽線：太短，放開也不會畫。</summary>
+            public static readonly Color DrawTooShort = new Color(0.9f, 0.4f, 0.35f);
+
+            /// <summary>吸附目標的標記框。</summary>
+            public static readonly Color SnapMarker = new Color(0.6f, 1f, 0.9f);
 
             /// <summary>急單（排在所有訂單前面）的標示。</summary>
             public static readonly Color Rush = new Color(1f, 0.62f, 0.3f);

@@ -6,7 +6,7 @@ using OpenFleet.Contracts;
 namespace OpenFleet.Layout
 {
     /// <summary>
-    /// 沙盒編輯的編輯模型（規劃第 7 節）：Unity 只負責輸入與繪製，所有對佈局文件的修改都經過這個類別，
+    /// 沙盒編輯的編輯模型：Unity 只負責輸入與繪製，所有對佈局文件的修改都經過這個類別，
     /// 所以規則（對齊、代碼、自動接路、復原）都能用單元測試驗證。
     ///
     /// 約定：
@@ -225,6 +225,55 @@ namespace OpenFleet.Layout
             _floorDrag = true;
             return result;
         }
+
+        /// <summary>
+        /// 畫一條路（<see cref="RoadGraphEditor.AddRoad"/>）：交叉處變路口、長路段切成 4 m 以內。回傳沿線節點代碼；
+        /// 起點終點是同一個節點，或畫的路已經完全存在（文件沒變）時回傳 null、不留復原紀錄。
+        /// </summary>
+        public List<string>? AddRoad(double startX, double startZ, double endX, double endZ)
+        {
+            var before = LayoutDocuments.Clone(_document);
+            var codes = RoadGraphEditor.AddRoad(_document, (startX, startZ), (endX, endZ));
+            return Commit(before, false) ? codes : null;
+        }
+
+        /// <summary>
+        /// 移動節點（0.3 m 內有別的節點就合併）。回傳移動後的節點代碼（合併時是被合併到的那個）。
+        /// 找不到節點、節點是模組交接點（跟著模組走，Claude 暫定）或位置沒變時回傳 null。
+        /// </summary>
+        public string? MoveNode(string code, double x, double z)
+        {
+            if (RoadGraphEditor.FindNode(_document, code) == null || IsHandoffNode(code))
+            {
+                return null;
+            }
+
+            var before = LayoutDocuments.Clone(_document);
+            var result = RoadGraphEditor.MoveNode(_document, code, x, z);
+            return Commit(before, false) ? result : null;
+        }
+
+        /// <summary>刪除節點與相連的路段。找不到節點或節點是模組交接點（Claude 暫定）時回傳 false。</summary>
+        public bool DeleteNode(string code)
+        {
+            if (IsHandoffNode(code))
+            {
+                return false;
+            }
+
+            var before = LayoutDocuments.Clone(_document);
+            return RoadGraphEditor.DeleteNode(_document, code) && Commit(before, false);
+        }
+
+        /// <summary>刪除路段；兩端變成沒有路段又不是交接點的節點一起刪。找不到路段時回傳 false。交接點節點會保留。</summary>
+        public bool DeleteEdge(string from, string to)
+        {
+            var before = LayoutDocuments.Clone(_document);
+            return RoadGraphEditor.DeleteEdge(_document, from, to) && Commit(before, false);
+        }
+
+        /// <summary>節點是否在某個模組的交接點上。</summary>
+        public bool IsHandoffNode(string code) => RoadGraphEditor.IsHandoffNode(_document, code);
 
         /// <summary>
         /// 模組放在這裡（對齊格點後）是否可行：占地完全在廠房內，而且和其他模組沒有重疊（貼邊不算）。

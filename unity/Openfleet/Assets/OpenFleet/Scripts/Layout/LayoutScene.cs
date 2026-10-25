@@ -23,17 +23,21 @@ namespace OpenFleet.Unity
         // 牆與大門的尺寸沿用第 1b 步的場景。大門寬度是 Claude 挑的（規劃：西牆中間留 10 m 寬的大門）。
         private const float WallHeight = 1.2f, WallThickness = 0.2f, ApronDepth = 5f, GateWidth = 10f;
 
-        // 路網鋪面（寬 1.6 m）、中心黃線（寬 0.06 m）、節點補角的圓（直徑 1.6 m）：規劃第 6 節的數字。
+        // 路網鋪面（寬 1.6 m）、中心黃線（寬 0.06 m）、節點補角的圓（直徑 1.6 m）：規劃時決定的數字。
         private const float RoadWidth = 1.6f, RoadLineWidth = 0.06f;
         private const float RoadHeight = 0.01f, RoadLineHeight = 0.004f, RoadLineY = 0.012f;
 
         /// <summary>編輯模式的節點小圓點直徑（公尺）。</summary>
         private const float NodeDotDiameter = 0.35f;
 
+        /// <summary>節點小圓點的離地高度（中心）；LayoutEditor 的標記疊在它下面或周圍。</summary>
+        public const float NodeDotY = 0.03f;
+
         private readonly LayoutMaterials _materials;
         private readonly Func<ModuleKind, GameObject> _prefabs;
         private readonly List<StationAnchor> _anchors = new List<StationAnchor>();
         private readonly Dictionary<string, Transform> _modules = new Dictionary<string, Transform>(StringComparer.Ordinal);
+        private readonly Dictionary<string, Transform> _nodeDots = new Dictionary<string, Transform>(StringComparer.Ordinal);
         private GameObject _root;
 
         /// <param name="materials">環境與路網用的材質。</param>
@@ -53,6 +57,9 @@ namespace OpenFleet.Unity
         /// <summary>模組代碼對應的物件（第 4 步的選取與拖曳用）。</summary>
         public IReadOnlyDictionary<string, Transform> Modules => _modules;
 
+        /// <summary>節點代碼對應的小圓點（只有編輯模式才有；第 5 步拖曳路口時直接移動圓點，不重畫整個場景）。</summary>
+        public IReadOnlyDictionary<string, Transform> NodeDots => _nodeDots;
+
         /// <summary>地面範圍（X 對應 Rect 的 x、Z 對應 y）。</summary>
         public Rect Floor { get; private set; }
 
@@ -64,6 +71,7 @@ namespace OpenFleet.Unity
         {
             _anchors.Clear();
             _modules.Clear();
+            _nodeDots.Clear();
             if (_root != null)
             {
                 _root.SetActive(false);
@@ -195,7 +203,8 @@ namespace OpenFleet.Unity
         /// 每條路段一片鋪面（寬 1.6 m）加一條中心黃線；每個節點一個圓形鋪面補轉角，交接點上的節點不畫圓（模組本身有交接點方框）。
         /// 沒有畫車道邊線與分隔線：車道不限方向，由後端的路段預約決定誰先走。
         /// 這是第 3 步的暫定畫法，取代第 1b 步場景裡內外兩條車道的整片鋪面。
-        /// 編輯模式另外畫節點的小圓點：交接點節點用交接點的顏色，其他是白色。
+        /// 編輯模式另外畫節點的小圓點：交接點節點用交接點的顏色，其他是白色（用 MaterialPropertyBlock 上色，不複製材質）。
+        /// 路段與節點的選取、錯誤標記是編輯器另外疊上去的（LayoutEditor），這裡只畫底。
         /// </summary>
         private void BuildRoads(Transform roads, FactoryLayoutDocument document, bool editMode)
         {
@@ -242,6 +251,14 @@ namespace OpenFleet.Unity
                 }
             }
 
+            MaterialPropertyBlock dotBlock = null;
+            if (editMode)
+            {
+                dotBlock = new MaterialPropertyBlock();
+                dotBlock.SetColor(Shader.PropertyToID("_BaseColor"), PresentationController.Colors.Node);
+                dotBlock.SetColor(Shader.PropertyToID("_EmissionColor"), PresentationController.Colors.Node);
+            }
+
             foreach (var node in nodes.Values)
             {
                 var atHandoff = false;
@@ -262,8 +279,15 @@ namespace OpenFleet.Unity
 
                 if (editMode)
                 {
-                    Flat(Cylinder(roads, "Node Dot " + node.Code, center + new Vector3(0f, 0.03f, 0f), NodeDotDiameter, 0.02f,
-                        atHandoff ? _materials.Handoff : _materials.ZoneLine));
+                    var dot = Cylinder(roads, "Node Dot " + node.Code, center + new Vector3(0f, NodeDotY, 0f), NodeDotDiameter, 0.02f,
+                        atHandoff ? _materials.Handoff : _materials.ZoneLine);
+                    Flat(dot);
+                    if (!atHandoff)
+                    {
+                        dot.SetPropertyBlock(dotBlock);
+                    }
+
+                    _nodeDots[node.Code] = dot.transform;
                 }
             }
         }

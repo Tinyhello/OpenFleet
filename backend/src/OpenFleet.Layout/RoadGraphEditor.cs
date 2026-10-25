@@ -7,7 +7,7 @@ using OpenFleet.Contracts;
 namespace OpenFleet.Layout
 {
     /// <summary>
-    /// 路網編輯：直接修改 <see cref="FactoryLayoutDocument"/> 的節點與路段（規劃第 7 節）。
+    /// 路網編輯：直接修改 <see cref="FactoryLayoutDocument"/> 的節點與路段。
     /// 所有座標一律四捨五入到 0.01 m；節點代碼是 <see cref="NodeCode"/>。常數在 <see cref="LayoutRules"/>。
     /// 模組自動接路（<see cref="ConnectModule"/> 等）用在移動、旋轉、新增、刪除模組；畫路線（<see cref="AddRoad"/>）留給第 5 步。
     /// 這些方法都在傳入的文件上直接修改，不複製。
@@ -44,7 +44,11 @@ namespace OpenFleet.Layout
         /// 確保 (x, z) 有一個節點並回傳代碼：0.3 m 內已有節點就回傳最近的那個；
         /// 點落在某條路段內部（0.01 m 內）就在那裡切開路段；否則新增節點。
         /// </summary>
-        public static string EnsureNode(FactoryLayoutDocument document, double x, double z)
+        public static string EnsureNode(FactoryLayoutDocument document, double x, double z) =>
+            EnsureNode(document, x, z, false);
+
+        // snapToNearEnd：點落在路段內部時，離路段較近的端點不到 MinEdgeLength 就用那個端點、不切段（畫路線用，見 AddRoad）。
+        private static string EnsureNode(FactoryLayoutDocument document, double x, double z, bool snapToNearEnd)
         {
             x = Round(x);
             z = Round(z);
@@ -87,6 +91,15 @@ namespace OpenFleet.Layout
 
             if (onEdge != null)
             {
+                if (snapToNearEnd)
+                {
+                    var nearEnd = NearEndpoint(document, onEdge.From, onEdge.To, x, z);
+                    if (nearEnd != null)
+                    {
+                        return nearEnd;
+                    }
+                }
+
                 return SplitEdge(document, onEdge.From, onEdge.To, x, z) ?? NewNode(document, x, z);
             }
 
@@ -123,14 +136,19 @@ namespace OpenFleet.Layout
         }
 
         /// <summary>
-        /// 畫一條路（第 5 步用）：起點終點各 <see cref="EnsureNode"/>；和既有路段交叉的地方變成路口（既有路段被切開）；
+        /// 畫一條路（第 5 步用）：起點終點各 <see cref="EnsureNode"/>；和既有路段交叉的地方變成路口；
         /// 剛好在路上的既有節點也串進來；相鄰兩點之間還沒有路段的，切成 ceil(長度 / 4 m) 段等長的路段。
+        /// 使用者決定（2026-10-25，互動驗收發現）：「接到最近的節點」。車道節點每 4 m 一個，
+        /// 起點或終點落在路段內部、以及每個交叉點，常離該路段的端點不到 <see cref="LayoutRules.MinEdgeLength"/>，
+        /// 在那裡切段會留下比最短路段還短的路段（實測 1.19 m）並觸發 edge-short／edge-clearance；
+        /// 所以這些點離該路段較近的端點不到 MinEdgeLength 時，直接用那個既有端點、不切段（兩端都不到就取較近的）；
+        /// 離兩端都夠遠才照樣切開路口。新的路因此會稍微彎過那些節點（接受）。規則和 <see cref="ConnectModule"/> 一致。
         /// 回傳沿線的節點代碼（起點到終點）。起點與終點是同一個節點時只回傳那一個。
         /// </summary>
         public static List<string> AddRoad(FactoryLayoutDocument document, (double X, double Z) start, (double X, double Z) end)
         {
-            var startCode = EnsureNode(document, start.X, start.Z);
-            var endCode = EnsureNode(document, end.X, end.Z);
+            var startCode = EnsureNode(document, start.X, start.Z, true);
+            var endCode = EnsureNode(document, end.X, end.Z, true);
             if (startCode == endCode)
             {
                 return new List<string> { startCode };
@@ -147,7 +165,7 @@ namespace OpenFleet.Layout
 
             var found = new Dictionary<string, double> { [startCode] = double.NegativeInfinity, [endCode] = double.PositiveInfinity };
 
-            // 交叉：先記下現有的路段，逐條求交點；交點 EnsureNode 時會把那條路段切開。
+            // 交叉：先記下現有的路段，逐條求交點；交點離路段端點夠遠才把那條路段切開，太近就用端點（見上面的使用者決定）。
             foreach (var edge in document.RoadEdges.ToList())
             {
                 if (!document.RoadEdges.Contains(edge))
@@ -168,7 +186,7 @@ namespace OpenFleet.Layout
                     continue; // 平行：重疊的部分由下面「在路上的既有節點」處理
                 }
 
-                var code = EnsureNode(document, point.Value.X, point.Value.Z);
+                var code = EnsureNode(document, point.Value.X, point.Value.Z, true);
                 if (!found.ContainsKey(code))
                 {
                     var node = FindNode(document, code)!;
@@ -380,20 +398,8 @@ namespace OpenFleet.Layout
 
             var hitX = origin.X + direction.X * bestT;
             var hitZ = origin.Z + direction.Z * bestT;
-            string hit;
-            var distA = LayoutGeometry.Distance((bestA!.X, bestA.Z), (hitX, hitZ));
-            var distB = LayoutGeometry.Distance((bestB!.X, bestB.Z), (hitX, hitZ));
-            var nearerIsA = distA <= distB;
-            var nearerDistance = nearerIsA ? distA : distB;
-            if (nearerDistance < LayoutRules.MinEdgeLength - Eps)
-            {
-                // 離端點太近：連到既有端點，不新增節點。
-                hit = nearerIsA ? bestA.Code : bestB.Code;
-            }
-            else
-            {
-                hit = EnsureNode(document, hitX, hitZ);
-            }
+            // 離端點太近：連到既有端點，不新增節點（和 AddRoad 同一個判斷）。
+            var hit = NearEndpoint(document, bestA!.Code, bestB!.Code, hitX, hitZ) ?? EnsureNode(document, hitX, hitZ);
 
             if (hit == handoffCode)
             {
@@ -506,6 +512,30 @@ namespace OpenFleet.Layout
             DisconnectModule(document, module);
             document.Modules.Remove(module);
             return true;
+        }
+
+        /// <summary>節點是否落在某個模組的交接點上（和驗證器、<see cref="DisconnectModule"/> 同一個比對距離）。找不到節點時回傳 false。</summary>
+        public static bool IsHandoffNode(FactoryLayoutDocument document, string code)
+        {
+            var node = FindNode(document, code);
+            return node != null && IsHandoffOfAnyModule(document, node);
+        }
+
+        // 路段 a–b 上的 (x, z)：離較近的端點不到 MinEdgeLength 就回傳那個端點的代碼（兩端都不到取較近的），否則 null。
+        // 在那裡切段會留下過短的路段；ConnectModule 與 AddRoad 共用（使用者決定 2026-10-25）。
+        private static string? NearEndpoint(FactoryLayoutDocument document, string a, string b, double x, double z)
+        {
+            var nodeA = FindNode(document, a);
+            var nodeB = FindNode(document, b);
+            if (nodeA == null || nodeB == null)
+            {
+                return null;
+            }
+
+            var distA = LayoutGeometry.Distance((nodeA.X, nodeA.Z), (x, z));
+            var distB = LayoutGeometry.Distance((nodeB.X, nodeB.Z), (x, z));
+            var nearerIsA = distA <= distB;
+            return (nearerIsA ? distA : distB) < LayoutRules.MinEdgeLength - Eps ? (nearerIsA ? a : b) : null;
         }
 
         private static bool Matches(LayoutRoadEdge edge, string a, string b) =>

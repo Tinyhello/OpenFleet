@@ -5,7 +5,7 @@ using OpenFleet.Contracts;
 namespace OpenFleet.Layout
 {
     /// <summary>
-    /// 新增模組時產生代碼（規劃第 7 節）：製程機台 {工序代碼}-{n}、AGV 車位 agv-{nn}（至少兩位數）、
+    /// 新增模組時產生代碼：製程機台 {工序代碼}-{n}、AGV 車位 agv-{nn}（至少兩位數）、
     /// 裝飾物 misc-{n}／carrier-{n}，n 取最小沒用過的正整數；倉儲站是固定代碼。產生的代碼一定符合 <see cref="ModuleCatalog.IsValidCode"/>。
     /// </summary>
     public static class ModuleCodes

@@ -16,7 +16,7 @@ namespace OpenFleet.Unity
     /// </summary>
     public sealed partial class ProductionPanel
     {
-        /// <summary>「新增模組」各組的按鈕（規劃第 7 節）。機台與倉儲站、裝飾物的名稱取自模組目錄；機台的名稱要比目錄的工序名稱更像一台設備，所以另外寫。</summary>
+        /// <summary>「新增模組」各組的按鈕。機台與倉儲站、裝飾物的名稱取自模組目錄；機台的名稱要比目錄的工序名稱更像一台設備，所以另外寫。</summary>
         private static readonly (string Heading, (ModuleKind Kind, string Text)[] Items)[] AddGroups =
         {
             ("機台", new[]
@@ -56,6 +56,15 @@ namespace OpenFleet.Unity
         /// <summary>檢查結果最多列出幾條（太多時只列前面的，總數照實顯示）。Claude 暫定。</summary>
         private const int MaxIssuesShown = 40;
 
+        /// <summary>編輯模式的說明文字，依目前的工具切換。</summary>
+        private const string SelectToolHelp = "編輯時場景畫的是草稿，車輛與進度條先隱藏，工廠在後端照常運轉。" +
+            "選取工具：點模組、路口（白點）或路段選取；按住拖曳移動模組或路口（路口放到另一個路口上會合併）；" +
+            "R 旋轉模組、Delete 刪除、Esc 取消、Ctrl+Z 復原、Ctrl+Y 重做。";
+
+        private const string DrawToolHelp = "畫路線：按下的位置是起點，拖到終點放開就畫出路段；" +
+            "起點與終點會吸附到 0.6 m 內的路口、0.4 m 內的路段、0.2 m 格點；按住 Shift 鎖定水平或垂直；" +
+            "短於 1 m 不會畫；Esc 取消這一筆。畫路線時左鍵不會選取或拖曳模組；右鍵與中鍵拖曳仍是移動攝影機。";
+
         private static ProductionPanel _layoutPanel;
 
         private readonly Dictionary<ModuleKind, Button> _addButtons = new Dictionary<ModuleKind, Button>();
@@ -75,6 +84,8 @@ namespace OpenFleet.Unity
         private Label _editName;
         private Label _editDirty;
         private Label _editHint;
+        private Button _toolSelect;
+        private Button _toolDraw;
         private VisualElement _selectionBox;
         private string _selectionKey;
         private SliderInt _floorWidth;
@@ -222,8 +233,16 @@ namespace OpenFleet.Unity
             nameRow.Add(_editDirty);
             page.Add(nameRow);
 
-            _editHint = Hint("編輯時場景畫的是草稿，車輛與進度條先隱藏，工廠在後端照常運轉。" +
-                "點模組選取、按住拖曳移動；R 旋轉、Delete 刪除、Esc 取消、Ctrl+Z 復原、Ctrl+Y 重做。");
+            // 工具列（P7 第 5 步）：選取、畫路線。只在編輯中可用，目前的工具反白。
+            var toolRow = Row();
+            _toolSelect = ActionButton("選取", () => _editor.SetTool(RoadTool.Select));
+            toolRow.Add(_toolSelect);
+            _toolDraw = ActionButton("畫路線", () => _editor.SetTool(RoadTool.Draw));
+            toolRow.Add(_toolDraw);
+            page.Add(toolRow);
+
+            _editHint = Hint(string.Empty);
+            _editHint.style.marginTop = 4;
             page.Add(_editHint);
 
             // (2) 新增模組
@@ -255,7 +274,7 @@ namespace OpenFleet.Unity
             page.Add(add);
 
             // (3) 選取的模組
-            page.Add(Heading("選取的模組"));
+            page.Add(Heading("選取"));
             _selectionBox = new VisualElement();
             page.Add(_selectionBox);
 
@@ -364,6 +383,12 @@ namespace OpenFleet.Unity
             _editName.text = editing ? $"編輯中：{_editor.SourceName}" : $"使用中：{_layoutController.Active?.Name ?? "（尚未讀到）"}{(_layouts.Exists(l => l.IsActive && l.HasUnappliedChanges) ? "（有未套用的修改）" : string.Empty)}";
             _editDirty.style.display = editing && _editor.IsDirty ? DisplayStyle.Flex : DisplayStyle.None;
             _editHint.style.display = editing ? DisplayStyle.Flex : DisplayStyle.None;
+            var drawing = editing && _editor.Tool == RoadTool.Draw;
+            _toolSelect.SetEnabled(enabled && editing);
+            _toolDraw.SetEnabled(enabled && editing);
+            Highlight(_toolSelect, editing && !drawing, Colors.Selected);
+            Highlight(_toolDraw, drawing, Colors.Selected);
+            _editHint.text = drawing ? DrawToolHelp : SelectToolHelp;
 
             // (2)
             foreach (var group in AddGroups)
@@ -401,8 +426,17 @@ namespace OpenFleet.Unity
 
         private void RefreshSelection(bool editing, bool enabled)
         {
-            var module = editing ? _editor.SelectedModule : null;
-            var key = module == null ? string.Empty : $"{module.Code}|{module.X}|{module.Z}|{module.Rotation}|{enabled}|{_editor.CanDeleteSelected}|{_editor.Document.Modules.Count}";
+            var kind = editing ? _editor.SelectionType : SelectionKind.None;
+            var module = kind == SelectionKind.Module ? _editor.SelectedModule : null;
+            var node = kind == SelectionKind.Node ? _editor.SelectedNode : null;
+            var edge = kind == SelectionKind.Edge ? _editor.SelectedEdge : null;
+            var key = kind switch
+            {
+                SelectionKind.Module when module != null => $"M|{module.Code}|{module.X}|{module.Z}|{module.Rotation}|{enabled}|{_editor.CanDeleteSelected}|{_editor.Document.Modules.Count}",
+                SelectionKind.Node when node != null => $"N|{node.Code}|{node.X}|{node.Z}|{enabled}|{_editor.CanDeleteSelected}|{_editor.EdgeCountOf(node.Code)}|{_editor.SelectedNodeIsHandoff}",
+                SelectionKind.Edge when edge != null => $"E|{edge.From}|{edge.To}|{enabled}|{_editor.CanDeleteSelected}|{FindRoadNode(edge.From)?.X}|{FindRoadNode(edge.From)?.Z}|{FindRoadNode(edge.To)?.X}|{FindRoadNode(edge.To)?.Z}",
+                _ => editing ? "-|edit" : "-",
+            };
             if (key == _selectionKey)
             {
                 return;
@@ -410,31 +444,85 @@ namespace OpenFleet.Unity
 
             _selectionKey = key;
             _selectionBox.Clear();
-            if (module == null)
+            var document = editing ? _editor.Document : null;
+            if (module != null)
             {
-                _selectionBox.Add(Hint(editing ? "（點選場景中的模組；放開前可拖曳移動）" : "（進入編輯後可選取模組）"));
+                var name = new Label($"{ModuleNaming.DisplayName(document, module)}　{ModuleNaming.EnglishName(document, module)}");
+                name.style.unityFontStyleAndWeight = FontStyle.Bold;
+                name.style.whiteSpace = WhiteSpace.Normal;
+                _selectionBox.Add(name);
+                _selectionBox.Add(Hint($"代碼 {module.Code}　位置 X {module.X:0.0}、Z {module.Z:0.0} m　朝向 {module.Rotation}°"));
+
+                var row = Row();
+                var rotate = ActionButton("旋轉 90°", () => _editor.RotateSelected());
+                rotate.SetEnabled(enabled);
+                row.Add(rotate);
+                var delete = ActionButton("刪除", () => _editor.DeleteSelected());
+                delete.SetEnabled(enabled && _editor.CanDeleteSelected);
+                row.Add(delete);
+                _selectionBox.Add(row);
+                if (ModuleCatalog.IsFacility(module.Kind))
+                {
+                    _selectionBox.Add(Hint("倉儲站只能移動、旋轉，不能刪除。"));
+                }
+
                 return;
             }
 
-            var document = _editor.Document;
-            var name = new Label($"{ModuleNaming.DisplayName(document, module)}　{ModuleNaming.EnglishName(document, module)}");
-            name.style.unityFontStyleAndWeight = FontStyle.Bold;
-            name.style.whiteSpace = WhiteSpace.Normal;
-            _selectionBox.Add(name);
-            _selectionBox.Add(Hint($"代碼 {module.Code}　位置 X {module.X:0.0}、Z {module.Z:0.0} m　朝向 {module.Rotation}°"));
-
-            var row = Row();
-            var rotate = ActionButton("旋轉 90°", () => _editor.RotateSelected());
-            rotate.SetEnabled(enabled);
-            row.Add(rotate);
-            var delete = ActionButton("刪除", () => _editor.DeleteSelected());
-            delete.SetEnabled(enabled && _editor.CanDeleteSelected);
-            row.Add(delete);
-            _selectionBox.Add(row);
-            if (ModuleCatalog.IsFacility(module.Kind))
+            if (node != null)
             {
-                _selectionBox.Add(Hint("倉儲站只能移動、旋轉，不能刪除。"));
+                var handoff = _editor.SelectedNodeIsHandoff;
+                var name = new Label($"路口 {node.Code}{(handoff ? "（模組交接點）" : string.Empty)}");
+                name.style.unityFontStyleAndWeight = FontStyle.Bold;
+                name.style.whiteSpace = WhiteSpace.Normal;
+                _selectionBox.Add(name);
+                _selectionBox.Add(Hint($"位置 X {node.X:0.0}、Z {node.Z:0.0} m　連著 {_editor.EdgeCountOf(node.Code)} 條路段　{(handoff ? "交接點" : "一般路口")}"));
+
+                var row = Row();
+                var delete = ActionButton("刪除", () => _editor.DeleteSelected());
+                delete.SetEnabled(enabled && _editor.CanDeleteSelected);
+                row.Add(delete);
+                _selectionBox.Add(row);
+                _selectionBox.Add(Hint(handoff
+                    ? "交接點跟著模組移動；要移動請拖曳模組。交接點不能刪除，要拆掉接路請刪它的支線（點路段再刪除）。"
+                    : "按住拖曳可移動路口（放到另一個路口上會合併）；刪除會連同連著的路段一起刪。"));
+                return;
             }
+
+            if (edge != null)
+            {
+                var a = FindRoadNode(edge.From);
+                var b = FindRoadNode(edge.To);
+                var length = a != null && b != null ? Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Z - b.Z) * (a.Z - b.Z)) : 0d;
+                var name = new Label($"路段 {edge.From} ～ {edge.To}");
+                name.style.unityFontStyleAndWeight = FontStyle.Bold;
+                name.style.whiteSpace = WhiteSpace.Normal;
+                _selectionBox.Add(name);
+                _selectionBox.Add(Hint($"長度 {length:0.0} m"));
+
+                var row = Row();
+                var delete = ActionButton("刪除", () => _editor.DeleteSelected());
+                delete.SetEnabled(enabled && _editor.CanDeleteSelected);
+                row.Add(delete);
+                _selectionBox.Add(row);
+                _selectionBox.Add(Hint("刪除只拿掉這一條路段；兩端的路口變成沒有路段連著時一併移除（交接點的節點會留下）。"));
+                return;
+            }
+
+            _selectionBox.Add(Hint(editing ? "（點選場景中的模組、路口或路段；按住可拖曳移動）" : "（進入編輯後可選取模組、路口或路段）"));
+        }
+
+        private LayoutRoadNode FindRoadNode(string code)
+        {
+            foreach (var node in _editor.Document.RoadNodes)
+            {
+                if (node.Code == code)
+                {
+                    return node;
+                }
+            }
+
+            return null;
         }
 
         private void RefreshIssues(bool editing)
@@ -479,7 +567,7 @@ namespace OpenFleet.Unity
 
             if (shown > 0)
             {
-                _issueList.Add(Hint("點一條會選取相關的模組並把畫面移過去。"));
+                _issueList.Add(Hint("點一條會選取相關的模組、路口或路段並把畫面移過去。"));
             }
         }
 

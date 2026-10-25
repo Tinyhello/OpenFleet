@@ -755,4 +755,73 @@ public class RoadGraphEditorTests
             Assert.True(ModuleCatalog.IsValidCode(kind, code!), $"{kind}: {code}");
         }
     }
+
+    // 使用者決定（2026-10-25）：畫路線的交點離既有路段端點不到 1.6 m 就接到端點、不切段。
+
+    [Fact]
+    public void AddRoad_crossing_far_from_both_ends_still_splits_the_crossed_edge()
+    {
+        var doc = Empty();
+        Link(doc, (0, -5), (0, 5)); // 10 m 的路段，交點離兩端各 5 m
+
+        var codes = RoadGraphEditor.AddRoad(doc, (-3, 0), (3, 0));
+
+        Assert.Equal(new[] { "-3,0", "0,0", "3,0" }, codes);
+        Assert.True(RoadGraphEditor.HasEdge(doc, "0,-5", "0,0"));
+        Assert.True(RoadGraphEditor.HasEdge(doc, "0,0", "0,5"));
+        Assert.False(RoadGraphEditor.HasEdge(doc, "0,-5", "0,5"));
+    }
+
+    [Fact]
+    public void AddRoad_crossing_near_an_end_uses_that_end_without_splitting()
+    {
+        var doc = Empty();
+        Link(doc, (0, 0), (4, 0));
+
+        // 垂直線在 x = 1.19 穿過 0,0–4,0：離 0,0 只有 1.19 m。
+        var codes = RoadGraphEditor.AddRoad(doc, (1.19, -6), (1.19, 6));
+
+        Assert.Contains("0,0", codes);
+        Assert.DoesNotContain("1.19,0", codes);
+        Assert.Null(RoadGraphEditor.FindNode(doc, "1.19,0"));
+        Assert.True(RoadGraphEditor.HasEdge(doc, "0,0", "4,0")); // 沒被切開
+        Assert.All(doc.RoadEdges, e =>
+        {
+            var a = RoadGraphEditor.FindNode(doc, e.From)!;
+            var b = RoadGraphEditor.FindNode(doc, e.To)!;
+            Assert.True(LayoutGeometry.Distance((a.X, a.Z), (b.X, b.Z)) >= LayoutRules.MinEdgeLength - 1e-6, $"{e.From}|{e.To}");
+        });
+        AssertConsistent(doc);
+    }
+
+    [Fact]
+    public void AddRoad_endpoint_on_an_edge_interior_uses_the_near_end_or_splits_when_far()
+    {
+        var near = Empty();
+        Link(near, (0, 0), (4, 0));
+        var nearCodes = RoadGraphEditor.AddRoad(near, (3, 0), (3, 6)); // 離 4,0 只有 1 m
+        Assert.Equal("4,0", nearCodes[0]);
+        Assert.Null(RoadGraphEditor.FindNode(near, "3,0"));
+        Assert.True(RoadGraphEditor.HasEdge(near, "0,0", "4,0"));
+
+        var far = Empty();
+        Link(far, (0, 0), (8, 0));
+        var farCodes = RoadGraphEditor.AddRoad(far, (4, 0), (4, 6)); // 離兩端各 4 m
+        Assert.Equal("4,0", farCodes[0]);
+        Assert.True(RoadGraphEditor.HasEdge(far, "0,0", "4,0"));
+        Assert.True(RoadGraphEditor.HasEdge(far, "4,0", "8,0"));
+        Assert.False(RoadGraphEditor.HasEdge(far, "0,0", "8,0"));
+    }
+
+    [Fact]
+    public void AddRoad_near_both_ends_of_a_short_edge_uses_the_nearer_one()
+    {
+        var doc = Empty();
+        Link(doc, (0, 0), (2, 0)); // 兩端都在 1.6 m 內
+
+        var codes = RoadGraphEditor.AddRoad(doc, (0.8, 5), (0.8, 0)); // 終點在邊內，離 0,0 較近 (0.8)
+
+        Assert.Equal("0,0", codes[^1]);
+        Assert.True(RoadGraphEditor.HasEdge(doc, "0,0", "2,0"));
+    }
 }
